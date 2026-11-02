@@ -2,8 +2,12 @@ import logging
 import shutil
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
+# ponytail: leaving the form is the only success evidence; a slower or same-URL acknowledgement
+# reports unknown (manual reconciliation) until a live confirmation selector is known.
+COMMIT_EVIDENCE_MS = 30000
 
 
 def validate_profiles(data_root: Path, source: Path, work: Path) -> tuple[Path, Path]:
@@ -86,13 +90,14 @@ class BrowserSession:
 
 
 def set_checkbox(page, name, want=True):
+    checked = lambda: page.evaluate('n => document.querySelector(`input[name="${n}"]`).checked', name) == want
     for _ in range(3):
-        checked = page.evaluate('n => document.querySelector(`input[name="${n}"]`).checked', name)
-        if checked == want:
+        if checked():
             return
         page.evaluate('n => document.querySelector(`input[name="${n}"]`).click()', name)
         page.wait_for_timeout(300)
-    raise RuntimeError(f"checkbox {name} would not stay {want}")
+    if not checked():
+        raise RuntimeError(f"checkbox {name} would not stay {want}")
 
 
 def _tag_input(page):
@@ -135,6 +140,33 @@ def _pick_combo(page, combo, text):
     combo.click(); page.wait_for_timeout(200)
 
 
+def _left_form(form_url, url):
+    form, now = urlsplit(form_url), urlsplit(url)
+    return now.netloc == form.netloc and now.path != form.path and not now.path.startswith("/users/login")
+
+
+def _combo_labels(combo):
+    # Exact selected labels, one per text node: aggregate text would let a selected "Artwork" satisfy "Art".
+    return combo.evaluate(r"""el => {
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), labels = [];
+        while (walker.nextNode()) {
+            const label = walker.currentNode.data.replace(/\s+/g, " ").trim();
+            if (label) labels.push(label);
+        }
+        return labels;
+    }""")
+
+
+def _clear_tags(page):
+    chips = page.locator('[role="combobox"] span[role="button"][data-tag]')
+    for _ in range(60):
+        if not chips.count():
+            return
+        chips.first.click(); page.wait_for_timeout(80)
+    if chips.count():
+        raise RuntimeError("pre-filled tags would not clear")
+
+
 def _submit_entry(page, job, before_commit):
     page.goto("https://www.deviantart.com", wait_until="domcontentloaded", timeout=45000)
     page.get_by_role("link", name="Submit").first.click(); page.wait_for_load_state("domcontentloaded", timeout=30000)
@@ -145,12 +177,7 @@ def _submit_entry(page, job, before_commit):
     page.locator('[contenteditable="true"]').first.fill(job["description"])
     set_checkbox(page, "matureContent", True); set_checkbox(page, "isAiGenerated", True)
     tags = _tag_input(page); tags.click()
-    chips = page.locator('[role="combobox"] span[role="button"][data-tag]')
-    for _ in range(60):
-        if not chips.count(): break
-        try: chips.first.click()
-        except Exception: pass
-        page.wait_for_timeout(80)
+    _clear_tags(page)
     for tag in job["tags"]:
         tags.type(tag, delay=10); page.keyboard.press("Enter"); page.wait_for_timeout(120)
     if job.get("price") is not None:
@@ -160,15 +187,19 @@ def _submit_entry(page, job, before_commit):
         combo = page.get_by_text("Submit to your subscribers").locator('xpath=following::*[@role="combobox"][1]')
         combo.scroll_into_view_if_needed()
         for tier in job["tiers"]: _pick_combo(page, combo, tier)
-    for gallery in job["galleries"]:
+    if job["galleries"]:
         combo = page.locator('xpath=//*[normalize-space(text())="Gallery"]/following::*[@role="combobox"][1]')
         combo.scroll_into_view_if_needed()
-        if gallery not in combo.inner_text(): _pick_combo(page, combo, gallery)
+        for gallery in job["galleries"]:
+            if gallery not in _combo_labels(combo): _pick_combo(page, combo, gallery)
+        if missing := [gallery for gallery in job["galleries"] if gallery not in _combo_labels(combo)]:
+            raise RuntimeError(f"galleries did not stay selected: {missing}")
     _pick_schedule(page, job["schedule"])
     set_checkbox(page, "matureContent", True)
+    form_url = page.url
     before_commit()
     page.get_by_text("Schedule", exact=True).last.click()
-    page.wait_for_timeout(5000)
+    page.wait_for_url(lambda url: _left_form(form_url, url), wait_until="commit", timeout=COMMIT_EVIDENCE_MS)
 
 
 def _noop_optional(page, job):

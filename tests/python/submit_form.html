@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline submit form</title>
+<!-- Local stand-in for the controls publicator_da.browser drives; window.FIXTURE configures it.
+     It proves the session logic against a real DOM, not the live DeviantArt selectors. -->
+<style>#gallery { min-height: 2em; border: 1px solid; }</style>
+<a href="/submit">Submit</a>
+<form id="form" hidden onsubmit="return false">
+  <button type="button" id="upload">Upload Your Art</button>
+  <input type="file" id="file" hidden>
+  <label>Title <input name="title"></label>
+  <div contenteditable="true"></div>
+  <label><input type="checkbox" name="matureContent"> Mature</label>
+  <label><input type="checkbox" name="isAiGenerated"> Created using AI tools</label>
+  <div role="combobox" id="tags"><input aria-errormessage="tags-error"></div>
+  <div>Gallery</div>
+  <div role="combobox" id="gallery"></div>
+  <div role="listbox" id="options" hidden></div>
+  <div id="schedule" hidden>
+    <div id="schedule-draft-date-picker">
+      <div role="button" id="date">Pick a date</div>
+      <div id="calendar"></div>
+      <button type="button" aria-label="Go to the Next Month">&gt;</button>
+    </div>
+    <select id="schedule-draft-time-picker"></select>
+    <button type="button" id="confirm">Confirm Schedule</button>
+  </div>
+  <p id="error" hidden>Fix the highlighted fields</p>
+  <button type="button" id="commit">Submit Now</button>
+  <button type="button" aria-haspopup="menu">More options</button>
+</form>
+<script>
+const F = Object.assign({start: [2026, 1], tags: [], selected: [], offered: [], stuck: [], outcome: "land"}, window.FIXTURE);
+const $ = id => document.getElementById(id);
+function make(tag, text, attributes = {}) {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  return element;
+}
+$("form").hidden = location.pathname !== "/submit";
+$("upload").onclick = () => $("file").click();
+for (const name of F.stuck) document.querySelector(`[name="${name}"]`).onclick = event => event.preventDefault();
+
+const tagInput = document.querySelector("#tags input");
+function addTag(tag) {
+  const chip = make("span", tag, {role: "button", "data-tag": tag});
+  chip.onclick = () => chip.remove();
+  tagInput.before(chip);
+}
+F.tags.forEach(addTag);
+tagInput.onkeydown = event => {
+  if (event.key === "Enter" && tagInput.value) { addTag(tagInput.value); tagInput.value = ""; }
+};
+
+// Multi-select: clicking an option toggles it, so blindly re-picking a selected gallery removes it.
+const chosen = [...F.selected];
+const renderGalleries = () => $("gallery").replaceChildren(...chosen.map(name => make("span", name)));
+$("gallery").onclick = () => { $("options").hidden = !$("options").hidden; };
+for (const name of F.offered) {
+  const option = make("div", name, {role: "option"});
+  option.onclick = () => {
+    const at = chosen.indexOf(name);
+    if (at < 0) chosen.push(name); else chosen.splice(at, 1);
+    renderGalleries();
+  };
+  $("options").append(option);
+}
+renderGalleries();
+
+let view = new Date(F.start[0], F.start[1] - 1, 1), picked = null, scheduled = null;
+document.querySelector('[aria-haspopup="menu"]').onclick = () => {
+  const menu = make("div", "", {role: "menu"}), item = make("div", "Schedule", {role: "menuitem", label: "Schedule"});
+  item.onclick = () => { menu.remove(); $("schedule").hidden = false; };
+  menu.append(item);
+  document.body.append(menu);
+};
+const ordinal = day => day + (day % 10 === 1 && day !== 11 ? "st" : day % 10 === 2 && day !== 12 ? "nd"
+  : day % 10 === 3 && day !== 13 ? "rd" : "th");
+const dayLabel = day => "Choose " + day.toLocaleDateString("en-US", {weekday: "long"}) + ", "
+  + day.toLocaleDateString("en-US", {month: "long"}) + " " + ordinal(day.getDate()) + ", " + day.getFullYear();
+function renderCalendar() {
+  // Six weeks, including the neighbouring months' days, like a real month grid.
+  const offset = view.getDay();
+  $("calendar").replaceChildren(make("div", view.toLocaleDateString("en-US", {month: "long", year: "numeric"})),
+    ...Array.from({length: 42}, (_, index) => {
+      const day = new Date(view.getFullYear(), view.getMonth(), 1 - offset + index);
+      const button = make("button", String(day.getDate()), {type: "button", "aria-label": dayLabel(day)});
+      button.onclick = () => pickDay(day);
+      return button;
+    }));
+}
+$("date").onclick = renderCalendar;
+document.querySelector('[aria-label="Go to the Next Month"]').onclick = () => {
+  view = new Date(view.getFullYear(), view.getMonth() + 1, 1);
+  renderCalendar();
+};
+function pickDay(day) {
+  // Offer only wall-clock hours that exist on that day in the page's time zone.
+  picked = day;
+  $("date").textContent = day.toDateString();
+  const hours = [...Array(24).keys()].filter(hour =>
+    new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour).getHours() === hour);
+  $("schedule-draft-time-picker").replaceChildren(...hours.map(hour =>
+    make("option", (hour % 12 || 12) + ":00 " + (hour < 12 ? "AM" : "PM"), {value: hour})));
+}
+$("confirm").onclick = () => {
+  const hour = Number($("schedule-draft-time-picker").value);
+  const at = new Date(picked.getFullYear(), picked.getMonth(), picked.getDate(), hour);
+  scheduled = {date: [picked.getFullYear(), picked.getMonth() + 1, picked.getDate()], hour,
+               epoch: at.getTime() / 1000, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone};
+  sessionStorage.scheduled = JSON.stringify(scheduled);
+  $("schedule").hidden = true;
+  $("commit").textContent = "Schedule";
+};
+
+$("commit").onclick = () => {
+  sessionStorage.commits = Number(sessionStorage.commits || 0) + 1;
+  if (F.outcome === "reject") { $("error").hidden = false; return; }
+  sessionStorage.submitted = JSON.stringify({
+    scheduled, galleries: chosen, files: $("file").files.length,
+    tags: [...document.querySelectorAll("#tags [data-tag]")].map(chip => chip.dataset.tag),
+    mature: document.querySelector('[name="matureContent"]').checked,
+    ai: document.querySelector('[name="isAiGenerated"]').checked,
+  });
+  location.assign(F.outcome === "login" ? "/users/login?referer=submit" : "/deviation/1");
+};
+</script>

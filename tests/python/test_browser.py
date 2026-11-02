@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,92 +333,188 @@ def test_steps_parser_detects_skill_drift(tmp_path):
     assert not browser.check_steps(skill, ["Connect to site"])
 
 
-def test_submit_selects_every_requested_tier(monkeypatch, tmp_path):
-    selected = []
-
-    class Locator:
-        first = last = None
-
-        def __init__(self): self.first = self.last = self
-        def click(self, *args, **kwargs): pass
-        def fill(self, value): pass
-        def type(self, value, delay=0): pass
-        def count(self): return 0
-        def locator(self, selector): return self
-        def scroll_into_view_if_needed(self): pass
-
-    class Chooser:
-        value = SimpleNamespace(set_files=lambda path: None)
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-
-    class Page:
-        keyboard = SimpleNamespace(press=lambda key: None)
-        def goto(self, *args, **kwargs): pass
-        def get_by_role(self, role, **kwargs): return Locator()
-        def get_by_text(self, text, **kwargs): return Locator()
-        def get_by_label(self, label, **kwargs): return Locator()
-        def locator(self, selector): return Locator()
-        def expect_file_chooser(self, **kwargs): return Chooser()
-        def wait_for_load_state(self, *args, **kwargs): pass
-        def wait_for_timeout(self, ms): pass
-
-    monkeypatch.setattr(browser, "set_checkbox", lambda *args, **kwargs: None)
-    monkeypatch.setattr(browser, "_tag_input", lambda page: Locator())
-    monkeypatch.setattr(browser, "_pick_schedule", lambda *args: None)
-    monkeypatch.setattr(browser, "_pick_combo", lambda _page, _combo, tier: selected.append(tier))
-    browser._submit_entry(
-        Page(),
-        {
-            "image_path": str(tmp_path / "art.png"),
-            "title": "Title",
-            "description": "Description",
-            "tags": [],
-            "schedule": {},
-            "tiers": ["gold", "silver"],
-            "galleries": [],
-        },
-        lambda: None,
-    )
-    assert selected == ["gold", "silver"]
+FORM = "https://www.deviantart.com/submit"
+JOB = {"attempt_id": "attempt", "uuid": "artwork", "image_path": "art.png", "title": "Title",
+       "description": "Description", "tags": ["new"], "schedule": {}, "tiers": [], "galleries": []}
 
 
-def test_submit_skips_unset_premium_tiers_and_galleries(monkeypatch, tmp_path):
-    calls = []
-    class Locator:
-        def __init__(self, label=""): self.label = label
-        @property
-        def first(self): return self
-        @property
-        def last(self): return self
-        def click(self, *a, **kw): calls.append(("click", self.label))
-        def fill(self, value): calls.append(("fill", self.label))
-        def set_files(self, path): calls.append(("file", path))
-        def count(self): return 0
-        def wait_for_timeout(self, ms): pass
-    class Chooser:
-        value = Locator("chooser")
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-    class Page:
-        keyboard = SimpleNamespace(press=lambda key: None)
-        def goto(self, *a, **kw): pass
-        def get_by_role(self, role, **kw): return Locator(f"role:{role}:{kw}")
-        def wait_for_load_state(self, *a, **kw): pass
-        def expect_file_chooser(self, **kw): return Chooser()
-        def get_by_text(self, text, **kw): return Locator(f"text:{text}")
-        def get_by_label(self, label, **kw): return Locator(f"label:{label}")
-        def locator(self, selector):
-            if "input[aria-errormessage" in selector:
-                return Locator("tags")
-            return Locator(f"selector:{selector}")
-        def wait_for_timeout(self, ms): pass
-    monkeypatch.setattr(browser, "set_checkbox", lambda *a, **kw: None)
-    monkeypatch.setattr(browser, "_tag_input", lambda page: Locator("tags"))
-    monkeypatch.setattr(browser, "_pick_schedule", lambda *a: None)
-    browser._submit_entry(Page(), {"image_path": str(tmp_path / "art.png"), "title": "Title",
-                                   "description": "Description", "tags": [], "schedule": {},
-                                   "tiers": [], "galleries": []}, lambda: None)
-    assert not any("Sell as Premium Download" in str(call) or
-                   "Submit to your subscribers" in str(call) or "Gallery" in str(call)
-                   for call in calls)
+class CheckboxPage:
+    """Per-name checkbox that reads checked once it has been clicked `sticks_after` times."""
+
+    def __init__(self, sticks_after=1):
+        self.sticks_after, self.clicks = sticks_after, {}
+
+    def evaluate(self, expression, name):
+        if expression.endswith(".click()"):
+            self.clicks[name] = self.clicks.get(name, 0) + 1
+            return None
+        return self.sticks_after is not None and self.clicks.get(name, 0) >= self.sticks_after
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+@pytest.mark.parametrize("sticks_after", [0, 1, 2, 3])
+def test_checkbox_returns_once_state_sticks_including_after_the_last_click(sticks_after):
+    page = CheckboxPage(sticks_after)
+    browser.set_checkbox(page, "matureContent", True)
+    assert page.clicks.get("matureContent", 0) == sticks_after
+    assert page.evaluate("n => input.checked", "matureContent") is True
+
+
+def test_checkbox_that_never_sticks_raises_after_three_clicks_and_blocks_commit(monkeypatch):
+    page = CheckboxPage(None)
+    with pytest.raises(RuntimeError, match="would not stay True"):
+        browser.set_checkbox(page, "matureContent", True)
+    assert page.clicks == {"matureContent": 3}
+    form = FormPage(sticks_after=None)
+    assert (submit(monkeypatch, form)["type"], form.commits) == ("failed", 0)
+
+
+class FormLocator:
+    first = last = property(lambda self: self)
+
+    def __init__(self, page, kind, text=""):
+        self.page, self.kind, self.text = page, kind, text
+
+    def click(self, *args, **kwargs): self.page.clicked(self)
+    def fill(self, value): pass
+    def type(self, value, delay=0): self.page.typed.append(value)
+    def set_files(self, path): pass
+    def count(self): return self.page.chips
+    def scroll_into_view_if_needed(self): pass
+    def locator(self, selector): return FormLocator(self.page, "tiers")
+    def evaluate(self, expression): return list(self.page.selected[self.kind])
+
+
+class FormPage(CheckboxPage):
+    """One stateful submit form whose Schedule click lands on `lands` (an exception is raised instead)."""
+
+    def __init__(self, lands="https://www.deviantart.com/deviation/1", sticks_after=1, chips=0, chip_click="removes",
+                 galleries=(), sticky=True):
+        super().__init__(sticks_after)
+        self.url, self.lands = "about:blank", lands
+        self.chips, self.chip_click = chips, chip_click
+        self.selected, self.sticky, self.open_combo = {"tiers": [], "gallery": list(galleries)}, sticky, None
+        self.typed, self.asked, self.picks, self.commits = [], [], [], 0
+        self.keyboard = SimpleNamespace(press=lambda key: None)
+
+    def goto(self, url, **kwargs): self.url = url
+    def wait_for_load_state(self, *args, **kwargs): pass
+    def expect_file_chooser(self, **kwargs): return nullcontext(SimpleNamespace(value=FormLocator(self, "file")))
+    def get_by_role(self, role, **kwargs): return FormLocator(self, "link")
+    def get_by_label(self, label, **kwargs): return self.ask("label", label)
+    def get_by_text(self, text, **kwargs): return self.ask("text", text)
+    def locator(self, selector):
+        kind = "chips" if "data-tag" in selector else "gallery" if "Gallery" in selector else "field"
+        return self.ask(kind, selector)
+
+    def ask(self, kind, text):
+        self.asked.append(text)
+        return FormLocator(self, kind, text)
+
+    def clicked(self, locator):
+        if locator.kind == "link":
+            self.url = FORM
+        elif locator.kind == "chips":
+            if self.chip_click == "raises":
+                raise RuntimeError("chip click timed out")
+            if self.chip_click == "removes":
+                self.chips -= 1
+        elif locator.kind in self.selected:
+            self.open_combo = None if self.open_combo else locator.kind
+        elif locator.text == "Schedule":
+            self.commits += 1
+        elif self.open_combo:
+            self.pick(self.selected[self.open_combo], locator.text)
+
+    def pick(self, labels, label):
+        """Clicking an option toggles it, like the live multi-select; a non-sticky form ignores it."""
+        self.picks.append(label)
+        if self.sticky:
+            if label in labels:
+                labels.remove(label)
+            else:
+                labels.append(label)
+
+    def wait_for_url(self, accepted, wait_until, timeout):
+        if isinstance(self.lands, Exception):
+            raise self.lands
+        if not (wait_until == "commit" and timeout == browser.COMMIT_EVIDENCE_MS and accepted(self.lands)):
+            raise TimeoutError(f"Timeout {timeout}ms exceeded waiting for navigation")
+        self.url = self.lands
+
+
+def submit(monkeypatch, page, pick_schedule=lambda *args: None, **changes):
+    monkeypatch.setattr(browser, "_pick_schedule", pick_schedule)
+    return browser.BrowserSession.submit(SimpleNamespace(page=page), {**JOB, **changes})
+
+
+@pytest.mark.parametrize("lands, outcome", [
+    ("https://www.deviantart.com/deviation/1", "scheduled"),
+    (FORM, "unknown"),  # validation rejected the form: no navigation
+    (FORM + "?step=review", "unknown"),
+    ("https://www.deviantart.com/users/login?referer=submit", "unknown"),  # challenge or signed out
+    ("https://elsewhere.example/deviation/1", "unknown"),
+    (RuntimeError("page crashed"), "unknown"),  # exception after the Schedule click
+])
+def test_only_bounded_navigation_away_from_the_form_is_scheduled(monkeypatch, lands, outcome):
+    page = FormPage(lands=lands)
+    event = submit(monkeypatch, page)
+    assert (event["type"], page.commits) == (outcome, 1)
+    assert ("error" in event) == (outcome == "unknown")
+
+
+def test_exception_before_commit_is_failed_and_never_clicks_schedule(monkeypatch):
+    def rejected(*args):
+        raise RuntimeError("calendar did not expose the full requested date")
+    page = FormPage()
+    event = submit(monkeypatch, page, pick_schedule=rejected)
+    assert (event["type"], page.commits) == ("failed", 0)
+
+
+def test_submit_selects_every_requested_tier(monkeypatch):
+    page = FormPage()
+    assert submit(monkeypatch, page, tiers=["gold", "silver"])["type"] == "scheduled"
+    assert page.selected["tiers"] == ["gold", "silver"]
+
+
+def test_submit_skips_unset_premium_tiers_and_galleries(monkeypatch):
+    page = FormPage()
+    assert submit(monkeypatch, page)["type"] == "scheduled"
+    assert not {"Sell as Premium Download", "Submit to your subscribers"} & set(page.asked)
+    assert not any("Gallery" in asked for asked in page.asked)
+    assert page.typed == ["new"]
+
+
+@pytest.mark.parametrize("chips, chip_click, outcome", [
+    (3, "removes", "scheduled"),
+    (60, "removes", "scheduled"),
+    (61, "removes", "failed"),  # more old tags than the bounded loop clears
+    (2, "sticks", "failed"),  # clicks make no progress
+    (2, "raises", "failed"),
+])
+def test_pre_filled_tags_must_all_clear_before_new_tags_or_commit(monkeypatch, chips, chip_click, outcome):
+    page = FormPage(chips=chips, chip_click=chip_click)
+    assert submit(monkeypatch, page)["type"] == outcome
+    cleared = outcome == "scheduled"
+    assert (page.chips == 0, page.typed, page.commits) == (cleared, ["new"] if cleared else [], int(cleared))
+
+
+@pytest.mark.parametrize("selected, requested, picks", [
+    (["Artwork"], ["Art"], ["Art"]),  # a selected superstring does not satisfy the request
+    (["Art"], ["Art"], []),  # an exact selection is not toggled off
+    ([], ["Art", "Artwork"], ["Art", "Artwork"]),
+    (["Artwork", "Art"], ["Art", "Artwork"], []),
+])
+def test_galleries_compare_exact_selected_labels(monkeypatch, selected, requested, picks):
+    page = FormPage(galleries=selected)
+    assert submit(monkeypatch, page, galleries=requested)["type"] == "scheduled"
+    assert page.picks == picks
+    assert set(requested) <= set(page.selected["gallery"])
+
+
+def test_gallery_pick_that_does_not_stick_fails_before_commit(monkeypatch):
+    page = FormPage(sticky=False)
+    event = submit(monkeypatch, page, galleries=["Art"])
+    assert (event["type"], page.picks, page.commits) == ("failed", ["Art"], 0)

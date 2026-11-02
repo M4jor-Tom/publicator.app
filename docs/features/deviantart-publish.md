@@ -3,7 +3,7 @@
 - **Does:** Rust validates and journals each approved pending target, then drives the retained Python Playwright worker through the DeviantArt submit flow.
 - **Run:** `nix run .#da-publish -- --data-dir DIR [--uuid ID | --all] [--headless]`; `nix run .#check-steps`; `nix run .#login`; `nix run .#pw-daemon` for explicit DOM probing.
 - **Code:** `src/publishing.rs`, `src/publish_journal.rs`, `src/publish_protocol.rs`, `src/artwork.rs`, `python/publicator_da/`, `.claude/skills/publish-deviantart/SKILL.md`, `src/bin/`.
-- **Tests:** `tests/publishing.rs`, `tests/publish_protocol.rs`, `tests/python/test_worker.py`, `tests/python/test_browser.py`.
+- **Tests:** `tests/publishing.rs`, `tests/publish_protocol.rs`, `tests/python/test_worker.py`, `tests/python/test_browser.py`, `tests/python/test_browser_dom.py` (offline headless Firefox on the routed local `submit_form.html`; no live selectors).
 - **Config:** Data-dir tags and DeviantArt allow-lists are validated by Rust before worker startup.
 - **Data:** `.deviantart-login/` is the human-owned original profile; `.deviantart-session/` is a disposable working copy. `.publicator/` holds persistent receipts/intents/staging; `.publicator/publish.lock` excludes concurrent publishers.
 - **Decisions:** Rust owns database/config/validation/recovery. Python receives one bounded job at a time and never reads/writes publication data. Keep these data paths ignored in the separate data repository.
@@ -25,6 +25,7 @@ The Playwright worker uses the existing ordered browser steps and static skill. 
 - Python receives no publication database/config path and cannot mutate the Store.
 - Per-target receipt and Store state survive restart; do not delete `.publicator/` to clear a failure.
 - An ambiguous external result is reconciled explicitly, never automatically resubmitted.
+- `scheduled` needs positive evidence: after the final Schedule click the page must navigate within a bounded wait to another path on the form's host that is not a login page. A timeout or any error after the click reports `unknown`; any error before it reports `failed`.
 - `.webp` is converted before upload; STEPS ordering remains synchronized with the static skill.
 - The original browser profile is read-only; publish uses a separate working profile.
 
