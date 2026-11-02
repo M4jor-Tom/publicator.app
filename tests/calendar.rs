@@ -1,7 +1,10 @@
-use chrono::{NaiveDate, TimeZone};
-use chrono_tz::Europe::Paris;
+mod common;
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono_tz::{America::Los_Angeles, Europe::Paris, Tz, UTC};
+use common::epoch;
 use publicator::{
-    calendar::{months, timeline},
+    calendar::{Event, months, timeline},
+    error::Error,
     model::{Delivery, Publications},
 };
 use serde_json::json;
@@ -159,4 +162,105 @@ fn calendar_uses_publication_schedule_for_every_platform() {
             .unwrap()
             .timestamp()
     );
+}
+
+fn at(timestamp: i64) -> Event {
+    Event {
+        uuid: "event".into(),
+        apparition_index: 0,
+        platform: "deviantart".into(),
+        title: "Title".into(),
+        timestamp,
+        url: None,
+        basename: None,
+        sha512: None,
+        delivery: Delivery::Unpublished,
+    }
+}
+
+fn month(year: i32, month: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, 1).unwrap()
+}
+
+fn months_of(pairs: &[(i32, u32)]) -> Vec<NaiveDate> {
+    pairs.iter().map(|&(year, m)| month(year, m)).collect()
+}
+
+/// The month bucket of a single event, with now at the same instant.
+fn bucket(timestamp: i64, zone: Tz) -> publicator::error::Result<Vec<NaiveDate>> {
+    months(&[at(timestamp)], zone, timestamp)
+}
+
+#[test]
+fn leap_february_ends_at_local_midnight_after_the_29th() {
+    let late_29th = epoch("2028-02-29T22:30:00Z"); // 23:30 in Paris
+    let after = epoch("2028-02-29T23:30:00Z"); // 00:30 on 1 March in Paris
+    assert_eq!(bucket(late_29th, Paris).unwrap(), [month(2028, 2)]);
+    assert_eq!(bucket(after, Paris).unwrap(), [month(2028, 3)]);
+    assert_eq!(bucket(after, UTC).unwrap(), [month(2028, 2)]);
+}
+
+#[test]
+fn year_rollover_follows_the_configured_zone() {
+    let instant = epoch("2026-12-31T23:30:00Z");
+    assert_eq!(bucket(instant, Paris).unwrap(), [month(2027, 1)]);
+    assert_eq!(bucket(instant, UTC).unwrap(), [month(2026, 12)]);
+    assert_eq!(bucket(instant, Los_Angeles).unwrap(), [month(2026, 12)]);
+    let new_year_utc = epoch("2027-01-01T05:00:00Z"); // 21:00 on 31 December in Los Angeles
+    assert_eq!(bucket(new_year_utc, UTC).unwrap(), [month(2027, 1)]);
+    assert_eq!(
+        bucket(new_year_utc, Los_Angeles).unwrap(),
+        [month(2026, 12)]
+    );
+}
+
+#[test]
+fn month_span_crosses_the_year_boundary_in_order() {
+    let events = [
+        at(epoch("2027-02-28T23:30:00Z")), // 1 March 2027 in Paris
+        at(epoch("2026-11-15T12:00:00Z")),
+    ];
+    let now = epoch("2026-12-31T23:30:00Z"); // January 2027 in Paris
+    assert_eq!(
+        months(&events, Paris, now).unwrap(),
+        months_of(&[(2026, 11), (2026, 12), (2027, 1), (2027, 2), (2027, 3)])
+    );
+    assert_eq!(
+        months(&events, UTC, now).unwrap(),
+        months_of(&[(2026, 11), (2026, 12), (2027, 1), (2027, 2)])
+    );
+}
+
+#[test]
+fn out_of_range_timestamps_are_rejected_instead_of_panicking() {
+    let max = DateTime::<Utc>::MAX_UTC.timestamp();
+    let min = DateTime::<Utc>::MIN_UTC.timestamp();
+    let now = epoch("2026-01-01T00:00:00Z");
+    for timestamp in [i64::MAX, i64::MIN, max + 1, min - 1] {
+        let event = months(&[at(timestamp)], UTC, now);
+        assert!(
+            matches!(event, Err(Error::Validation(_))),
+            "{timestamp}: {event:?}"
+        );
+        let current = months(&[], UTC, timestamp);
+        assert!(
+            matches!(current, Err(Error::Validation(_))),
+            "{timestamp}: {current:?}"
+        );
+    }
+    // Representable instants whose local date in the zone is outside chrono's range.
+    for (timestamp, zone) in [(max, Paris), (min, Los_Angeles)] {
+        let current = bucket(timestamp, zone);
+        assert!(
+            matches!(current, Err(Error::Validation(_))),
+            "{zone}: {current:?}"
+        );
+        let event = months(&[at(timestamp)], zone, now);
+        assert!(
+            matches!(event, Err(Error::Validation(_))),
+            "{zone}: {event:?}"
+        );
+    }
+    let last = DateTime::<Utc>::MAX_UTC.date_naive();
+    assert_eq!(bucket(max, UTC).unwrap(), [month(last.year(), 12)]);
 }

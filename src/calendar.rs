@@ -2,7 +2,7 @@ use crate::{
     error::{Error, Result},
     model::{Delivery, GENERATE_MARKER, effective_schedule},
 };
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::Value;
 
@@ -95,22 +95,23 @@ fn apparition_delivery(app: &Value, uuid: &str) -> Result<Delivery> {
     }
 }
 
+/// First day of the zone-local month, or None when the instant or its local date is outside
+/// chrono's range (`with_timezone(..).date_naive()` would panic at the range edges).
+fn local_month(timestamp: i64, zone: Tz) -> Option<NaiveDate> {
+    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0)?.naive_utc();
+    let offset = zone.offset_from_utc_datetime(&utc).fix();
+    utc.checked_add_offset(offset)?.date().with_day(1)
+}
+
 /// Inclusive month starts from the earliest event through the later of the last event and now.
 pub fn months(events: &[Event], zone: Tz, now: i64) -> Result<Vec<NaiveDate>> {
-    let now_dt = DateTime::<Utc>::from_timestamp(now, 0)
+    let mut first = local_month(now, zone)
         .ok_or_else(|| Error::Validation("calendar timestamp is outside supported range".into()))?;
-    let today = now_dt.with_timezone(&zone).date_naive();
-    let mut first = today.with_day(1).unwrap();
     let mut last = first;
     for event in events {
-        let instant = DateTime::<Utc>::from_timestamp(event.timestamp, 0).ok_or_else(|| {
+        let month = local_month(event.timestamp, zone).ok_or_else(|| {
             Error::Validation("calendar event timestamp is outside supported range".into())
         })?;
-        let month = instant
-            .with_timezone(&zone)
-            .date_naive()
-            .with_day(1)
-            .unwrap();
         first = first.min(month);
         last = last.max(month);
     }

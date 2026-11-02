@@ -1,10 +1,11 @@
 mod common;
-use common::{Fixture, row};
+use common::{Fixture, id, row};
 use publicator::{
     config::{Config, Paths},
     error::Error,
+    workflow::{PlatformOptions, save_options},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::{Arc, Barrier};
 
 #[test]
@@ -18,6 +19,39 @@ fn round_trips_unknown_fields_and_missing_files_are_empty() {
         f.store.read().unwrap()[0]["futureField"],
         json!({"kept": true})
     );
+}
+
+fn with_extensions(n: u64, state: &str) -> Value {
+    let mut value = row(n, state);
+    value["futurePublication"] = json!({"n": n, "nested": [n, "kept"]});
+    value["files"] = json!([
+        {"basename": format!("{n}-a.png"), "sha512sum": "a".repeat(128), "futureFile": [n, 1]},
+        {"basename": format!("{n}-b.png"), "fileSha512sum": "b".repeat(128), "futureFile": [n, 2]}
+    ]);
+    value["apparitions"] = json!([
+        {"platformName": "deviantart", "state": "unpublished", "futureApparition": {"n": n}},
+        {"platformName": "pixiv", "state": "published_or_scheduled",
+            "url": format!("https://pixiv.example/artwork/{n}"), "futureApparition": [n]}
+    ]);
+    value
+}
+
+#[test]
+fn unrelated_workflow_edit_preserves_nested_extensions_and_order() {
+    let f = Fixture::new();
+    let document = json!([
+        with_extensions(1, "DESCRIBED"),
+        with_extensions(2, "APPEARED")
+    ]);
+    f.write(document.clone());
+    let options = PlatformOptions {
+        price: Some(Some(5.0)),
+        ..PlatformOptions::default()
+    };
+    save_options(&f.store, &id(1), options).unwrap();
+    let mut expected = document;
+    expected[0]["apparitions"][0]["priceIfNotFree"] = json!(5.0);
+    assert_eq!(f.read(), expected);
 }
 
 #[test]
@@ -89,6 +123,12 @@ fn rejected_mutation_callback_preserves_original_bytes() {
 #[test]
 fn failed_staging_preserves_original_after_mutation_callback() {
     use std::os::unix::fs::PermissionsExt;
+    // Limitation: directory permissions do not restrain root. The in-crate injected
+    // staging/flush/sync/rename faults in src/store.rs cover rollback for every user.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root bypasses directory write permissions");
+        return;
+    }
     let f = Fixture::new();
     f.write(json!([row(1, "PICKED")]));
     f.store.read().unwrap(); // Create the persistent lock before making the directory unwritable.
@@ -219,71 +259,163 @@ fn dangling_json_symlink_is_rejected_instead_of_becoming_an_empty_database() {
     assert!(Paths::resolve(Some(f.root.path()), Some(&alias)).is_err());
 }
 
-#[test]
-fn child_store_mutation_waits_for_parent_lock() {
+#[cfg(target_os = "linux")]
+mod process_lock {
+    use super::*;
+    use publicator::store::Store;
+    use std::{
+        os::unix::fs::{MetadataExt, symlink},
+        path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
     const CHILD: &str = "PUBLICATOR_STORE_LOCK_CHILD";
-    if let Ok(path) = std::env::var(CHILD) {
-        let json_path = std::path::PathBuf::from(path);
-        let ready = json_path.with_extension("ready");
-        let completed = json_path.with_extension("completed");
-        let paths = Paths::resolve(json_path.parent(), Some(&json_path)).unwrap();
-        let store = publicator::store::Store::new(paths, Config::default()).unwrap();
-        std::fs::write(ready, b"ready").unwrap();
-        store
+    const HOLD: &str = "PUBLICATOR_STORE_LOCK_HOLD";
+
+    /// Kills and reaps a helper child even when an assertion fails first.
+    struct Reaped(Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn store_at(path: &Path) -> Store {
+        Store::new(
+            Paths::resolve(path.parent(), Some(path)).unwrap(),
+            Config::default(),
+        )
+        .unwrap()
+    }
+
+    /// In a child, append row 2 through the Store; with HOLD, park inside the
+    /// mutation (lock held) until killed or the parent closes stdin.
+    fn run_child() -> bool {
+        let Some(alias) = std::env::var_os(CHILD) else {
+            return false;
+        };
+        store_at(Path::new(&alias))
             .mutate(|rows| {
                 rows.push(row(2, "PICKED"));
+                if std::env::var_os(HOLD).is_some() {
+                    std::io::stdin().read_line(&mut String::new()).unwrap();
+                }
                 Ok(())
             })
             .unwrap();
-        std::fs::write(completed, b"completed").unwrap();
-        return;
+        true
     }
-    let f = Fixture::new();
-    f.write(json!([row(1, "PICKED")]));
-    let lock_path = f.store.paths().json.with_extension("json.lock");
-    std::fs::File::create(&lock_path).unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .unwrap();
-    fs2::FileExt::lock_exclusive(&lock).unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "child_store_mutation_waits_for_parent_lock",
-            "--nocapture",
-        ])
-        .env(CHILD, &f.store.paths().json)
-        .spawn()
-        .unwrap();
-    let ready = f.store.paths().json.with_extension("ready");
-    let completed = f.store.paths().json.with_extension("completed");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !ready.exists() && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
+
+    fn spawn_child(test: &str, alias: &Path, hold: bool) -> Reaped {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, alias)
+            .stdin(Stdio::piped());
+        if hold {
+            command.env(HOLD, "1");
+        }
+        Reaped(command.spawn().unwrap())
     }
-    assert!(
-        ready.exists(),
-        "child must signal readiness before Store mutation"
-    );
-    let held_deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
-    while !completed.exists() && std::time::Instant::now() < held_deadline {
-        std::thread::yield_now();
+
+    /// One persisted row reachable through a symlink alias, plus its lock inode.
+    fn aliased_store() -> (Fixture, PathBuf, PathBuf, u64) {
+        let f = Fixture::new();
+        f.write(json!([row(1, "PICKED")]));
+        f.store.read().unwrap(); // Creates the persistent lock file.
+        let alias = f.path("alias.json");
+        symlink(&f.store.paths().json, &alias).unwrap();
+        let lock = f.store.paths().json.with_extension("json.lock");
+        let inode = std::fs::metadata(&lock).unwrap().ino();
+        (f, alias, lock, inode)
     }
-    assert!(
-        !completed.exists(),
-        "Store mutation must not complete while parent holds the lock"
-    );
-    fs2::FileExt::unlock(&lock).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !completed.exists() && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
+
+    /// Polls observable state up to a bound; the poll interval is never the proof.
+    fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
-    assert!(
-        completed.exists(),
-        "Store mutation must complete after release"
-    );
-    assert!(child.wait().unwrap().success());
-    assert_eq!(f.store.read().unwrap().len(), 2);
+
+    /// The kernel lists flock(2) holders, and blocked requesters as `->` waiters.
+    fn flock_listed(pid: u32, inode: u64, waiting: bool) -> bool {
+        let (pid, inode) = (pid.to_string(), inode.to_string());
+        let locks = std::fs::read_to_string("/proc/locks").unwrap();
+        locks.lines().any(|line| {
+            let mut fields: Vec<_> = line.split_whitespace().skip(1).collect();
+            let waiter = fields.first() == Some(&"->");
+            if waiter {
+                fields.remove(0);
+            }
+            waiter == waiting
+                && fields.first() == Some(&"FLOCK")
+                && fields.get(3) == Some(&pid.as_str())
+                && fields.get(4).and_then(|dev| dev.rsplit(':').next()) == Some(inode.as_str())
+        })
+    }
+
+    fn uuids(f: &Fixture) -> Vec<Value> {
+        let rows = f.store.read().unwrap();
+        rows.iter().map(|row| row["uuid"].clone()).collect()
+    }
+
+    #[test]
+    fn aliased_child_writer_blocks_at_the_lock_until_release() {
+        if run_child() {
+            return;
+        }
+        let (f, alias, lock_path, inode) = aliased_store();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let test = "process_lock::aliased_child_writer_blocks_at_the_lock_until_release";
+        let mut child = spawn_child(test, &alias, false);
+        let pid = child.0.id();
+        eventually("child blocked in flock", || flock_listed(pid, inode, true));
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert_eq!(f.read(), json!([row(1, "PICKED")]), "writer entered early");
+        fs2::FileExt::unlock(&lock).unwrap();
+        let mut status = None;
+        eventually("child exit after release", || {
+            status = child.0.try_wait().unwrap();
+            status.is_some()
+        });
+        assert!(status.unwrap().success());
+        assert_eq!(uuids(&f), [id(1), id(2)]);
+        assert!(alias.is_symlink());
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), inode);
+    }
+
+    #[test]
+    fn killed_lock_holder_does_not_block_a_restarted_writer() {
+        if run_child() {
+            return;
+        }
+        let (f, alias, lock_path, inode) = aliased_store();
+        let before = std::fs::read(&f.store.paths().json).unwrap();
+        let test = "process_lock::killed_lock_holder_does_not_block_a_restarted_writer";
+        let mut child = spawn_child(test, &alias, true);
+        let pid = child.0.id();
+        eventually("child holding the Store lock", || {
+            flock_listed(pid, inode, false)
+        });
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+        store_at(&alias)
+            .mutate(|rows| {
+                rows.push(row(3, "PICKED"));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(uuids(&f), [id(1), id(3)]);
+        assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), inode);
+    }
 }
