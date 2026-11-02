@@ -308,6 +308,71 @@ mod cfg {
     }
 }
 
+#[test]
+fn search_limit_counts_available_results_past_referenced_unreadable_and_malformed_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, cfg) = setup();
+    let art = dir.path().join("art");
+    let digest = cfg::digest(b"A Moonlit Garden");
+    let name = |i: usize| format!("p{i:03}_{digest}.png");
+    // Discovery order: 201 referenced (past the old 200-match cap), 1 unreadable, 26 available.
+    for i in 0..228 {
+        image(&art, format!("art-{i}").as_bytes(), &name(i));
+    }
+    image(&art, b"malformed", "plain.png");
+    image(
+        &art,
+        b"nearest",
+        &format!("prompt.txt_{}.png", "f".repeat(64)),
+    );
+    let rows: Vec<_> = (0..201)
+        .map(|i| {
+            let sha512 = publicator::images::file_sha512(&art.join(name(i))).unwrap();
+            let mut row = common::row(i as u64, "PICKED");
+            row["files"][0] = serde_json::json!({"basename": name(i), "sha512sum": sha512});
+            row
+        })
+        .collect();
+    let store = store(&dir, cfg.clone());
+    std::fs::write(&store.paths().json, serde_json::to_vec(&rows).unwrap()).unwrap();
+    let unreadable = art.join(name(201));
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&unreadable).is_ok() {
+        // Privileged runs read mode 000 anyway; drop the file so the arithmetic still holds.
+        std::fs::remove_file(&unreadable).unwrap();
+    }
+    let archive = archive(dir.path(), &cfg);
+    let limited = Search {
+        limit: 25,
+        paths: vec!["art".into()],
+    };
+    let run = || search(&store, &limited, Some(&archive), None, None).unwrap();
+    let available = (202..227).map(name).collect::<Vec<_>>();
+    let names = |result: &publicator::prompts::SearchMatches| {
+        assert!(result.maybe.is_empty());
+        assert_eq!(
+            result.skipped, 1,
+            "the Nearest file is skipped, plain.png ignored"
+        );
+        result
+            .exact
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let over = run();
+    assert_eq!(names(&over), available);
+    assert!(over.truncated, "26 available results exceed the limit");
+    std::fs::remove_file(art.join(name(227))).unwrap();
+    let fit = run();
+    assert_eq!(names(&fit), available);
+    assert!(
+        !fit.truncated,
+        "exactly `limit` available results are complete"
+    );
+}
+
 mod common;
 
 #[test]

@@ -8,13 +8,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::{Mutex, RwLock},
     time::{Duration, Instant},
 };
 
 const HEAD_PROBE_TTL: Duration = Duration::from_secs(2);
-const SEARCH_GROUP_LIMIT: usize = 200;
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "mp4"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,44 +124,62 @@ impl PromptArchive {
         }
     }
 
-    fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let output = Command::new("git")
+    /// Makes the next resolve rebuild the index even when HEAD is unchanged. Automatic refresh
+    /// follows HEAD only, so new unreachable blobs, other-ref commits and pruned objects wait for
+    /// this. Waits for an in-flight rebuild (so it cannot be overwritten): call it off the UI thread.
+    pub fn invalidate(&self) -> Result<()> {
+        let _refresh = self
+            .refresh_lock
+            .lock()
+            .map_err(|_| Error::Busy("prompt archive refresh lock poisoned".into()))?;
+        self.index
+            .write()
+            .map_err(|_| Error::Busy("prompt archive index lock poisoned".into()))?
+            .probed = None;
+        Ok(())
+    }
+
+    /// Runs Git against the archive only: inherited repository variables (for example from a
+    /// Git hook) would otherwise redirect `-C` to the caller's repository.
+    fn output(&self, args: &[&str]) -> Result<Output> {
+        Command::new("git")
             .arg("-C")
             .arg(&self.repo)
             .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .output()
             .map_err(|error| {
                 Error::PromptArchiveUnavailable(format!(
                     "git unavailable in {}: {error}",
                     self.repo.display()
                 ))
-            })?;
+            })
+    }
+
+    fn failed(&self, args: &[&str], output: &Output) -> Error {
+        Error::PromptArchiveUnavailable(format!(
+            "git {} returned {} in {}: {}",
+            args.join(" "),
+            output.status,
+            self.repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+
+    fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.output(args)?;
         if output.status.success() && output.stderr.is_empty() {
             Ok(output.stdout)
         } else {
-            Err(Error::PromptArchiveUnavailable(format!(
-                "git {} returned {} in {}: {}",
-                args.join(" "),
-                output.status,
-                self.repo.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )))
+            Err(self.failed(args, &output))
         }
     }
 
     fn head(&self) -> Result<Option<String>> {
         let args = ["rev-parse", "--verify", "--quiet", "HEAD"];
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .output()
-            .map_err(|error| {
-                Error::PromptArchiveUnavailable(format!(
-                    "git unavailable in {}: {error}",
-                    self.repo.display()
-                ))
-            })?;
+        let output = self.output(&args)?;
         if output.status.success() && output.stderr.is_empty() {
             return Ok(Some(
                 String::from_utf8_lossy(&output.stdout).trim().to_owned(),
@@ -172,13 +189,7 @@ impl PromptArchive {
         if output.status.code() == Some(1) && output.stderr.is_empty() {
             return Ok(None);
         }
-        Err(Error::PromptArchiveUnavailable(format!(
-            "git {} returned {} in {}: {}",
-            args.join(" "),
-            output.status,
-            self.repo.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
+        Err(self.failed(&args, &output))
     }
 
     fn refresh(&self) -> Result<()> {
@@ -219,6 +230,9 @@ impl PromptArchive {
     }
 
     fn build_index(&self, head: Option<String>) -> Result<Index> {
+        // ponytail: buffers every object, then copies blob bodies (measured ~2x object bytes,
+        // plus the live old index on a rebuild); accepted ceiling ~100 MB of object content
+        // (prompt-mapping.md). Past it, stream cat-file through a BufRead instead.
         let stream = self.git(&["cat-file", "--batch-all-objects", "--batch"])?;
         let (by_oid, blobs) = self.read_blobs(&stream).map_err(|error| match error {
             Error::Protocol(reason) => Error::PromptArchiveUnavailable(reason),
@@ -229,14 +243,14 @@ impl PromptArchive {
                 .git(&["for-each-ref", "--format=%(refname)"])?
                 .is_empty()
         {
+            // `-z`: paths arrive verbatim, never C-quoted (quotes, tabs, newlines, backslashes).
             let log = self.git(&[
-                "-c",
-                "core.quotePath=false",
                 "log",
                 "--all",
                 "--raw",
                 "--no-abbrev",
                 "--no-renames",
+                "-z",
                 "--format=%ct",
             ])?;
             history(&log, &by_oid)
@@ -362,38 +376,34 @@ impl PromptArchive {
     }
 }
 
+/// Parses `git log --raw -z --format=%ct`: NUL-separated `%ct` and `:meta` tokens, each
+/// `:meta` followed by its verbatim path token. Deletions (destination oid 000...) are absent
+/// from `by_oid`, so a removed path keeps the commit that added it.
 fn history(
     log: &[u8],
     by_oid: &BTreeMap<String, String>,
 ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, i64>) {
-    let text = String::from_utf8_lossy(log);
     let mut paths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut times = BTreeMap::new();
     let mut commit_time = 0i64;
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        if !line.starts_with(':') {
-            if let Ok(time) = line.parse() {
+    let mut tokens = log.split(|b| *b == 0);
+    while let Some(token) = tokens.next() {
+        let token = String::from_utf8_lossy(token);
+        let Some(meta) = token.trim().strip_prefix(':') else {
+            if let Ok(time) = token.trim().parse() {
                 commit_time = time;
             }
             continue;
-        }
-        let Some((meta, path)) = line.split_once('\t') else {
-            continue;
         };
-        let fields = meta.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 4 || path.is_empty() {
-            continue;
-        }
-        let Some(digest) = by_oid.get(fields[3]) else {
+        let path = tokens.next().unwrap_or_default();
+        let oid = meta.split_whitespace().nth(3).unwrap_or_default();
+        let Some(digest) = by_oid.get(oid).filter(|_| !path.is_empty()) else {
             continue;
         };
         paths
             .entry(digest.clone())
             .or_default()
-            .insert(path.to_owned());
+            .insert(String::from_utf8_lossy(path).into_owned());
         times
             .entry(digest.clone())
             .and_modify(|time: &mut i64| *time = (*time).min(commit_time))
@@ -542,15 +552,16 @@ pub fn search(
     let paths = configured_files(&store.paths().data_dir, &search.paths)?;
     let mut references = References::new(&store.read()?);
     let needle = needle.filter(|s| !s.is_empty()).map(str::to_lowercase);
-    let (mut exact, mut maybe, skipped) =
-        matching_paths(archive, paths, needle.as_deref(), lineage)?;
-    let truncated = exact.len() > SEARCH_GROUP_LIMIT
-        || maybe.len() > SEARCH_GROUP_LIMIT
-        || exact.len().saturating_add(maybe.len()) > search.limit;
-    exact.truncate(SEARCH_GROUP_LIMIT);
-    maybe.truncate(SEARCH_GROUP_LIMIT);
-    let exact = unreferenced_candidates(&exact, &mut references, search.limit);
-    let maybe = unreferenced_candidates(&maybe, &mut references, search.limit - exact.len());
+    let (exact, maybe, skipped) = matching_paths(archive, paths, needle.as_deref(), lineage)?;
+    // The limit bounds available (unreferenced, readable) results; one extra proves truncation.
+    // ponytail: hashing is lazy but walks past every referenced match, like normal discovery;
+    // add a hash budget if large referenced catalogs make search slow.
+    let mut exact = unreferenced_candidates(&exact, &mut references, search.limit + 1);
+    let remaining = search.limit + 1 - exact.len();
+    let mut maybe = unreferenced_candidates(&maybe, &mut references, remaining);
+    let truncated = exact.len() + maybe.len() > search.limit;
+    exact.truncate(search.limit);
+    maybe.truncate(search.limit - exact.len());
     Ok(SearchMatches {
         exact,
         maybe,
@@ -684,5 +695,125 @@ mod tests {
         ]
         .concat();
         assert!(archive.read_blobs(&truncated).is_err());
+
+        let unterminated = format!("{} blob 5\nhelloX", "d".repeat(40));
+        assert!(matches!(
+            archive.read_blobs(unterminated.as_bytes()),
+            Err(Error::Protocol(reason)) if reason.contains("terminator")
+        ));
+        let kinds = [
+            format!("{} tree 3\nabc\n", "e".repeat(40)).as_bytes(),
+            format!("{} commit 4\nabcd\n", "f".repeat(40)).as_bytes(),
+            good.as_bytes(),
+        ]
+        .concat();
+        let (ids, blobs) = archive.read_blobs(&kinds).unwrap();
+        assert_eq!(ids.keys().collect::<Vec<_>>(), [&"a".repeat(40)]);
+        assert_eq!(blobs.values().collect::<Vec<_>>(), [b"hello"]);
+    }
+
+    /// Developer config and inherited repository variables never reach these commits.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// An archive in `<root>/prompts` with one committed `scene.txt` revision per `commit` call.
+    struct Repo {
+        root: tempfile::TempDir,
+        archive: PromptArchive,
+    }
+    impl Repo {
+        fn new() -> Self {
+            let root = tempdir().unwrap();
+            fs::create_dir(root.path().join("prompts")).unwrap();
+            git(&root.path().join("prompts"), &["init", "-q"]);
+            let config = PromptConfig {
+                repo: "prompts".into(),
+                filename: r"(?P<lineage>[^_]+)_(?P<version>[a-f0-9]+)\.png".into(),
+                version_hash: "sha256".into(),
+            };
+            let archive = PromptArchive::new(root.path(), &config).unwrap();
+            Self { root, archive }
+        }
+        fn dir(&self) -> PathBuf {
+            self.root.path().join("prompts")
+        }
+        fn commit(&self, text: &str) {
+            fs::write(self.dir().join("scene.txt"), text).unwrap();
+            git(&self.dir(), &["add", "-A"]);
+            git(&self.dir(), &["commit", "-qm", text]);
+        }
+        fn resolve(&self, text: &str) -> PromptMatch {
+            let digest = self.archive.grammar.digest(text.as_bytes()).unwrap();
+            let image = self.root.path().join(format!("scene.txt_{digest}.png"));
+            self.archive.resolve_path(&image).unwrap()
+        }
+        /// Expires the HEAD probe without sleeping through `HEAD_PROBE_TTL`.
+        fn age(&self) {
+            self.archive.index.write().unwrap().probed = Instant::now().checked_sub(HEAD_PROBE_TTL);
+        }
+        fn snapshot(&self) -> (String, BTreeMap<String, PromptVersion>, Vec<String>) {
+            let index = self.archive.index.read().unwrap();
+            let basenames = index.by_basename.keys().cloned().collect();
+            (index.head.clone(), index.versions.clone(), basenames)
+        }
+    }
+
+    #[test]
+    fn failed_or_unavailable_refresh_keeps_the_whole_previous_index_then_recovers() {
+        let repo = Repo::new();
+        repo.commit("first");
+        assert!(matches!(repo.resolve("first"), PromptMatch::Exact(_)));
+        let warm = repo.snapshot();
+        let unavailable = |result| {
+            matches!(result, PromptMatch::Unknown(reason)
+                if reason.starts_with("prompt archive unavailable"))
+        };
+
+        // HEAD moves, then a corrupt loose object makes cat-file fail mid-rebuild.
+        repo.commit("second");
+        let garbage = repo
+            .dir()
+            .join(".git/objects/ab/cdef0123456789abcdef0123456789abcdef01");
+        fs::create_dir_all(garbage.parent().unwrap()).unwrap();
+        fs::write(&garbage, b"garbage").unwrap();
+        repo.age();
+        assert!(unavailable(repo.resolve("second")));
+        assert_eq!(repo.snapshot(), warm, "no partial replacement");
+
+        fs::remove_file(&garbage).unwrap();
+        let moved = repo.root.path().join("moved");
+        fs::rename(repo.dir(), &moved).unwrap();
+        repo.age();
+        assert!(unavailable(repo.resolve("second")));
+        assert_eq!(repo.snapshot(), warm, "no partial replacement");
+
+        fs::rename(&moved, repo.dir()).unwrap();
+        repo.age();
+        assert!(matches!(repo.resolve("second"), PromptMatch::Exact(v) if v.text == "second"));
+    }
+
+    #[test]
+    fn automatic_refresh_follows_head_only_until_invalidated() {
+        let repo = Repo::new();
+        repo.commit("first");
+        assert!(matches!(repo.resolve("first"), PromptMatch::Exact(_)));
+        fs::write(repo.dir().join("loose.txt"), "loose").unwrap();
+        git(&repo.dir(), &["hash-object", "-w", "loose.txt"]);
+        repo.age();
+        assert!(!matches!(repo.resolve("loose"), PromptMatch::Exact(_)));
+        repo.archive.invalidate().unwrap();
+        assert!(matches!(repo.resolve("loose"), PromptMatch::Exact(_)));
     }
 }

@@ -6,43 +6,44 @@ use std::{
     path::Path,
     process::Command,
     sync::{Arc, Barrier},
+    time::{Duration, Instant},
 };
 
+/// Git confined to `dir`: explicit repository, work tree, index and config, so an inherited
+/// hook environment (`GIT_DIR`, `GIT_INDEX_FILE`, ...) can never redirect a test commit.
+fn git(dir: &Path, args: &[&str]) {
+    let git_dir = dir.join(".git");
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", dir)
+        .env("GIT_INDEX_FILE", git_dir.join("index"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "git {args:?}: {stderr}");
+}
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        )
-    };
-    git(&["init", "-q"]);
-    git(&["config", "user.name", "Test"]);
-    git(&["config", "user.email", "test@example.invalid"]);
+    git(dir.path(), &["init", "-q"]);
     dir
 }
-fn commit(dir: &std::path::Path, path: &str, text: &str) {
+fn commit(dir: &Path, path: &str, text: &str) {
     let file = dir.join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(file, text).unwrap();
-    let git = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        )
-    };
-    git(&["add", "--", path]);
-    git(&["commit", "-qm", "snapshot"]);
+    // `-A`, not a pathspec: pathspecs glob, and test names contain backslashes.
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "snapshot"]);
 }
 fn config() -> PromptConfig {
     PromptConfig {
@@ -288,24 +289,8 @@ fn concurrent_queries_never_observe_a_partial_archive_index() {
 #[test]
 fn unreachable_blob_is_exact_but_has_no_commit_or_path_metadata() {
     let tmp = repo();
-    let oid = Command::new("git")
-        .arg("-C")
-        .arg(tmp.path())
-        .args(["hash-object", "-w", "--stdin"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    let mut child = oid;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"unreachable prompt")
-        .unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert!(result.status.success());
+    std::fs::write(tmp.path().join("loose.txt"), "unreachable prompt").unwrap();
+    git(tmp.path(), &["hash-object", "-w", "loose.txt"]);
     let digest = PromptGrammar::compile(&config())
         .unwrap()
         .digest(b"unreachable prompt")
@@ -330,18 +315,7 @@ fn removed_path_and_duplicate_basename_remain_in_archive() {
     commit(tmp.path(), "gone/scene.txt", "gone prompt");
     let path = tmp.path().join("gone/scene.txt");
     std::fs::remove_file(path).unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(tmp.path())
-        .args(["add", "-A"])
-        .status()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(tmp.path())
-        .args(["commit", "-qm", "remove"])
-        .status()
-        .unwrap();
+    git(tmp.path(), &["commit", "-qam", "remove"]);
     commit(tmp.path(), "other/scene.txt", "other prompt");
     let archive = PromptArchive::new(tmp.path(), &config()).unwrap();
     let missing = PromptGrammar::compile(&config())
@@ -358,4 +332,118 @@ fn removed_path_and_duplicate_basename_remain_in_archive() {
         ),
         other => panic!("expected archived historical paths, got {other:?}"),
     }
+}
+
+#[test]
+fn git_quoted_filenames_round_trip_as_exact_paths_and_nearest_lineage() {
+    let tmp = repo();
+    let names = [
+        "dir/a\"b.txt",
+        "tab\there.txt",
+        "new\nline.txt",
+        "back\\slash.txt",
+    ];
+    for name in names {
+        commit(tmp.path(), name, name);
+    }
+    // The removed quoted path must stay in history like any other removed path.
+    std::fs::remove_file(tmp.path().join(names[3])).unwrap();
+    git(tmp.path(), &["commit", "-qam", "remove"]);
+    let archive = PromptArchive::new(tmp.path(), &config()).unwrap();
+    let grammar = PromptGrammar::compile(&config()).unwrap();
+    let missing = grammar.digest(b"not archived").unwrap();
+    for name in names {
+        let base = Path::new(name).file_name().unwrap().to_str().unwrap();
+        let digest = grammar.digest(name.as_bytes()).unwrap();
+        let exact = archive
+            .resolve_path(Path::new(&format!("{base}_{digest}.png")))
+            .unwrap();
+        assert!(
+            matches!(&exact, PromptMatch::Exact(v) if v.paths == [name]),
+            "{exact:?}"
+        );
+        let nearest = archive
+            .resolve_path(Path::new(&format!("{base}_{missing}.png")))
+            .unwrap();
+        assert!(
+            matches!(&nearest, PromptMatch::Nearest(l) if l.len() == 1 && l[0].path == name),
+            "{nearest:?}"
+        );
+    }
+}
+
+#[test]
+fn archive_git_ignores_inherited_repository_environment() {
+    const CHILD: &str = "PUBLICATOR_PROMPT_ENV_CHILD";
+    const NAME: &str = "archive_git_ignores_inherited_repository_environment";
+    let digest = PromptGrammar::compile(&config())
+        .unwrap()
+        .digest(b"isolated prompt")
+        .unwrap();
+    if let Ok(repo) = std::env::var(CHILD) {
+        // Child process: its inherited GIT_* variables name a repository that does not exist.
+        let archive = PromptArchive::new(Path::new(&repo), &config()).unwrap();
+        let result = archive
+            .resolve_path(Path::new(&format!("scene.txt_{digest}.png")))
+            .unwrap();
+        assert!(matches!(result, PromptMatch::Exact(_)), "{result:?}");
+        return;
+    }
+    let tmp = repo();
+    commit(tmp.path(), "scene.txt", "isolated prompt");
+    let bogus = tmp.path().join("missing.git");
+    // Child-only environment: never mutate this test process's env under parallel tests.
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env(CHILD, tmp.path())
+        .env("GIT_DIR", &bogus)
+        .env("GIT_WORK_TREE", &bogus)
+        .env("GIT_INDEX_FILE", bogus.join("index"))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("isolated archive child timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "inherited GIT_* must not redirect the archive"
+    );
+}
+
+#[test]
+fn invalidate_rebuilds_for_unreachable_blobs_other_refs_and_pruned_objects() {
+    let tmp = repo();
+    commit(tmp.path(), "scene.txt", "first");
+    let archive = PromptArchive::new(tmp.path(), &config()).unwrap();
+    let grammar = PromptGrammar::compile(&config()).unwrap();
+    let exact = |text: &str| {
+        let digest = grammar.digest(text.as_bytes()).unwrap();
+        let image = tmp.path().join(format!("scene.txt_{digest}.png"));
+        matches!(archive.resolve_path(&image).unwrap(), PromptMatch::Exact(_))
+    };
+    assert!(exact("first"));
+    // HEAD stays put: a side-branch commit, then a blob no ref reaches.
+    git(tmp.path(), &["switch", "-q", "-c", "side"]);
+    commit(tmp.path(), "scene.txt", "side");
+    git(tmp.path(), &["switch", "-q", "-"]);
+    std::fs::write(tmp.path().join("loose.txt"), "loose").unwrap();
+    git(tmp.path(), &["hash-object", "-w", "loose.txt"]);
+    assert!(!exact("side") && !exact("loose"));
+    archive.invalidate().unwrap();
+    assert!(exact("side") && exact("loose"));
+    git(tmp.path(), &["prune", "--expire=now"]);
+    archive.invalidate().unwrap();
+    assert!(
+        exact("side") && !exact("loose"),
+        "pruned blob leaves the index"
+    );
 }
