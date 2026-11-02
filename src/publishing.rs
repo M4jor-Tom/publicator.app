@@ -1,7 +1,7 @@
 use crate::{
     application::Application,
     error::{Error, Result},
-    images::{index_by_basename, prepare_upload, validate_upload},
+    images::{prepare_upload, validate_upload},
     model::{Phase, phase},
     publish_journal::{self, PublishJournal},
     publish_protocol::{PublishJob, ScheduleParts, SessionOpen, WorkerCommand, WorkerEvent},
@@ -287,7 +287,9 @@ fn approved_for_dispatch(
     if cancel.load(Ordering::SeqCst) {
         return Ok(false);
     }
-    Ok(publish_journal::snapshot(store, &job.uuid)? == *approved)
+    // A delivery recorded by another writer since approval is no longer sendable.
+    Ok(publish_journal::pending_approval(store, &job.uuid)?
+        .is_some_and(|(current, _)| current == *approved))
 }
 
 fn locked_journal(store: &Store) -> Result<(PublishJournal, publish_journal::PublisherLock)> {
@@ -417,7 +419,7 @@ fn drain_stderr(child: &mut Child) -> Option<tokio::task::JoinHandle<Vec<u8>>> {
 
 struct PreparedBatch {
     jobs: Vec<(publish_journal::ApprovedSnapshot, PublishJob)>,
-    // Keep converted uploads alive through worker shutdown and diagnostic draining.
+    // Keep staged uploads alive through worker shutdown and diagnostic draining.
     _staged_uploads: Vec<TempDir>,
 }
 
@@ -433,11 +435,10 @@ fn prepare_batch(
             .get("uuid")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Validation("publication UUID missing".into()))?;
-        let approved = publish_journal::snapshot(store, uuid)?;
-        let image = artwork_path(store, row)?;
-        let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
-        let upload = prepare_upload(&image, staging.path())?;
-        validate_upload(&upload)?;
+        // Snapshot and upload derive from one fresh resolution.
+        let (approved, artwork) = publish_journal::pending_approval(store, uuid)?
+            .ok_or_else(|| Error::InvalidState("delivery target is no longer pending".into()))?;
+        let (staging, upload) = stage_upload(store, &artwork)?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let job = make_job(&approved, attempt_id, upload, zone)?;
         staged_uploads.push(staging);
@@ -450,17 +451,12 @@ fn prepare_batch(
     })
 }
 
-fn artwork_path(store: &Store, row: &Value) -> Result<PathBuf> {
-    let basename = row
-        .get("files")
-        .and_then(Value::as_array)
-        .and_then(|f| f.first())
-        .and_then(|f| f.get("basename"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Validation("artwork basename missing".into()))?;
-    index_by_basename(&store.paths().data_dir)?
-        .remove(basename)
-        .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))
+/// The worker opens only this verified per-attempt copy, never the mutable original.
+fn stage_upload(store: &Store, artwork: &crate::artwork::Artwork) -> Result<(TempDir, PathBuf)> {
+    let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
+    let upload = prepare_upload(&artwork.stage(staging.path())?, staging.path())?;
+    validate_upload(&upload)?;
+    Ok((staging, upload))
 }
 
 fn selected_targets<'a>(
@@ -795,6 +791,80 @@ async fn shutdown(child: &mut Child, cleanup_timeout: Duration, process_group: O
 use chrono::{Datelike, Timelike};
 
 #[cfg(test)]
+mod approved_bytes_tests {
+    use super::{timeout_tests::publisher_fixture, *};
+    use crate::images::file_sha512;
+    use serde_json::json;
+
+    fn prepared(root: &Path, store: &Store, selected: &[Value]) -> PreparedBatch {
+        std::fs::create_dir_all(root.join(".publicator")).unwrap();
+        prepare_batch(store, selected.iter().collect(), chrono_tz::UTC).unwrap()
+    }
+
+    #[test]
+    fn preparation_derives_snapshot_and_upload_from_the_current_reference() {
+        let (root, app) = publisher_fixture(1, "Description");
+        let store = app.store();
+        let selected = store.read().unwrap();
+        let replacement = root.path().join("b.png");
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "2x2", "xc:blue"])
+                .arg(&replacement)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let hash = file_sha512(&replacement).unwrap();
+        store
+            .mutate(|rows| {
+                rows[0]["files"] = json!([{"basename": "b.png", "sha512sum": hash}]);
+                Ok(())
+            })
+            .unwrap();
+
+        let batch = prepared(root.path(), store, &selected);
+        let (approved, job) = &batch.jobs[0];
+        assert_eq!(approved.source_hash, hash);
+        assert_eq!(file_sha512(&job.image_path).unwrap(), hash);
+        assert!(job.image_path.starts_with(root.path().join(".publicator")));
+    }
+
+    #[test]
+    fn dispatch_rejects_a_delivery_recorded_since_approval_but_recovery_applies_it() {
+        let (root, app) = publisher_fixture(1, "Description");
+        let store = app.store();
+        let batch = prepared(root.path(), store, &store.read().unwrap());
+        let (approved, job) = &batch.jobs[0];
+        let cancel = AtomicBool::new(false);
+        assert!(approved_for_dispatch(store, approved, job, &cancel).unwrap());
+        store
+            .mutate(|rows| {
+                rows[0]["apparitions"][0]["state"] = json!("published_or_scheduled");
+                rows[0]["state"] = json!("APPEARED");
+                Ok(())
+            })
+            .unwrap();
+        assert!(!approved_for_dispatch(store, approved, job, &cancel).unwrap());
+
+        let journal = PublishJournal::new(root.path()).unwrap();
+        journal.begin(job, approved).unwrap();
+        journal
+            .terminal(&WorkerEvent::Scheduled {
+                protocol: 1,
+                attempt_id: job.attempt_id.clone(),
+                uuid: job.uuid.clone(),
+                url: None,
+            })
+            .unwrap();
+        assert_eq!(
+            journal.recover(store).unwrap().replayed,
+            std::slice::from_ref(&job.attempt_id)
+        );
+    }
+}
+
+#[cfg(test)]
 mod timeout_tests {
     use super::*;
     use crate::{
@@ -804,7 +874,7 @@ mod timeout_tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    fn publisher_fixture(count: usize, description: &str) -> (TempDir, Application) {
+    pub(super) fn publisher_fixture(count: usize, description: &str) -> (TempDir, Application) {
         let root = tempfile::tempdir().unwrap();
         let mut rows = Vec::new();
         for n in 1..=count {

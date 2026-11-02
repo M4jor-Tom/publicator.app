@@ -200,8 +200,7 @@ async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
 #[tokio::test]
 async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_work() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
+    f.write(json!([f.art_row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
     let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
         path: "/chat/completions".into(),
         status: 200,
@@ -237,8 +236,7 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        f.image(&format!("{n}.png"), 4, 4);
-        let mut publication = row(n, "SCHEDULED");
+        let mut publication = f.art_row(n, "SCHEDULED");
         publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         rows.push(publication);
@@ -294,8 +292,7 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        f.image(&format!("{n}.png"), 4, 4);
-        let mut publication = row(n, "SCHEDULED");
+        let mut publication = f.art_row(n, "SCHEDULED");
         publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         rows.push(publication);
@@ -380,8 +377,7 @@ async fn successful_batches_save_in_provider_order() {
         let f = Fixture::new();
         let mut rows = Vec::new();
         for n in 1..=3 {
-            f.image(&format!("{n}.png"), 4, 4);
-            let mut p = row(n, "SCHEDULED");
+            let mut p = f.art_row(n, "SCHEDULED");
             p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
             p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
             rows.push(p);
@@ -538,8 +534,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
 #[tokio::test]
 async fn accepted_provider_failure_saves_both_markers() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([row(1, "SCHEDULED")]));
+    f.write(json!([f.art_row(1, "SCHEDULED")]));
     let app = Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
@@ -555,8 +550,7 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
     let f = Fixture::new();
     let mut rows = vec![];
     for n in 1..=3 {
-        f.image(&format!("{n}.png"), 4, 4);
-        let mut p = row(n, "SCHEDULED");
+        let mut p = f.art_row(n, "SCHEDULED");
         p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         rows.push(p);
     }
@@ -592,8 +586,7 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        f.image(&format!("{n}.png"), 4, 4);
-        let mut p = row(n, "SCHEDULED");
+        let mut p = f.art_row(n, "SCHEDULED");
         p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
         rows.push(p);
@@ -644,4 +637,74 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
             Some("vendor/model-b:free".into()),
         ]
     );
+}
+
+fn generated_reply() -> Reply {
+    reply(
+        "/chat/completions",
+        json!({"choices":[{"message":{"content":content("Generated")}}]}),
+    )
+}
+
+#[tokio::test]
+async fn changed_artwork_bytes_make_no_provider_call_and_save_nothing() {
+    let f = Fixture::new();
+    let mut publication = f.art_row(1, "SCHEDULED");
+    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    f.write(json!([publication]));
+    f.colored("1.png", "blue");
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let server = Server::start(vec![generated_reply()]);
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
+
+    let error = app
+        .generate_one(&id(1), request(Source::OpenRouter))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        publicator::error::Error::ReconciliationRequired(_)
+    ));
+    let report = app
+        .generate_marked(&request(Source::OpenRouter))
+        .await
+        .unwrap();
+    assert_eq!((report.succeeded, report.failed), (0, 1));
+    assert!(server.requests().is_empty());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert!(!f.path(".thumbs").exists());
+}
+
+#[tokio::test]
+async fn duplicate_basenames_resolve_to_the_recorded_hash_in_any_directory_order() {
+    for recorded in ["a", "b"] {
+        let f = Fixture::new();
+        // a/ is both named and created first, so a name-, creation- or reverse-ordered walk meets
+        // the unrecorded duplicate first in one of the two cases.
+        let color = |dir| if dir == recorded { "red" } else { "blue" };
+        let a = f.colored("a/1.png", color("a"));
+        let b = f.colored("b/1.png", color("b"));
+        let (red, blue) = if recorded == "a" { (a, b) } else { (b, a) };
+        let (red_hash, blue_hash) = (
+            publicator::images::file_sha512(&red).unwrap(),
+            publicator::images::file_sha512(&blue).unwrap(),
+        );
+        let mut publication = row(1, "SCHEDULED");
+        publication["files"][0]["sha512sum"] = json!(red_hash);
+        f.write(json!([publication]));
+        let server = Server::start(vec![generated_reply()]);
+        let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
+
+        app.generate_one(&id(1), request(Source::OpenRouter))
+            .await
+            .unwrap();
+        let thumbs = f.path(".thumbs");
+        let thumb = |path: &std::path::Path, hash: &str| {
+            thumbs.join(publicator::images::thumb_name(path, hash).unwrap())
+        };
+        assert!(thumb(&red, &red_hash).exists());
+        assert!(!thumb(&blue, &blue_hash).exists());
+        assert_eq!(server.requests().len(), 1);
+    }
 }

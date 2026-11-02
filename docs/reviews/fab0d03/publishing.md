@@ -26,28 +26,6 @@ exception/timeout. No scheduled event without positive bounded evidence; attempt
 commit stays unknown. No next send or automatic retry after unknown. Deny non-loopback network.
 Local DOM contract tests do not prove current live-site selectors/authentication.
 
-## PUB-02 — P1 · Defect · Approved state is not bound to uploaded bytes
-
-**Evidence:** `src/publishing.rs:436–440` obtains fresh approval but resolves the older selected
-row's image; non-WebP preparation returns the mutable original (`src/images.rs:343–350`). Dispatch
-checks current source hash (`src/publishing.rs:281–290`), not bytes later opened by the browser
-(`python/publicator_da/browser.py:144`). Approval matching lacks upload-content binding
-(`src/publish_journal.rs:760–778`). Confidence: high.
-
-**Trigger/impact:** Another writer changes A's stored file reference to B between selection and
-preparation, or changes original bytes after dispatch validation and before worker open. Wrong
-artwork can be uploaded; later persistence rejection cannot undo the remote effect. Application
-leases/publisher locks do not exclude arbitrary filesystem edits.
-
-**Existing coverage:** `tests/publishing.rs:290` converts WebP;
-`src/publish_journal.rs:1185–1205` checks post-submit metadata drift, not this content identity.
-
-**Regression / close when:** Retain selected A, replace Store reference with valid B, then prepare:
-reject or derive both snapshot and upload from B. Separately gate worker file-open, replace the
-original and assert received content remains the approved bytes. Use two tiny colored PNGs with
-computed hashes. Derive one coherent approval/source and stage verified content independently of
-mutable originals; coordinate with ASSET-02/03 rather than inventing another resolver.
-
 ## PUB-03 — P2 · Defect · Gallery membership uses substring matching
 
 **Evidence:** `python/publicator_da/browser.py:163–166` checks requested text inside aggregate
@@ -111,19 +89,6 @@ and worker termination tests (`src/publishing.rs:892–994`) do not cover a chec
 Require bounded error, no session submission, reaped process tree, cancellation handling and lock
 reacquisition. Use short test deadlines plus an external watchdog. Do not confuse this with VER-07's
 separate development executable-path failure or META-03's image-tool timeout.
-
-## PUB-R1 — P2 · Risk · Dispatch equality omits pending-delivery state
-
-**Evidence:** `src/publishing.rs:281–290` compares ApprovedSnapshot, whose fields omit delivery
-state and accept both pending and successful targets (`src/publish_journal.rs:150–178,189–203`).
-Cooperating publishers/reconciliation are locked out; another external Store writer is the
-conditional prerequisite. No normal UI duplicate-send race was demonstrated.
-
-**Existing coverage:** `tests/publishing.rs:190,940` covers sequential reuse and publisher locking.
-
-**Regression / close when:** Capture approval, record synthetic delivery through another writer,
-then call dispatch approval: require rejection of the now-successful target. Verify dispatch's
-pending-state check does not break recovery of legitimately already-applied deliveries.
 
 ## PUB-C01 — P2 · Gap · Receipt-write and crash checkpoints need end-to-end witnesses
 

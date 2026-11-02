@@ -2,7 +2,7 @@
 
 - **Does:** Rust validates and journals each approved pending target, then drives the retained Python Playwright worker through the DeviantArt submit flow.
 - **Run:** `nix run .#da-publish -- --data-dir DIR [--uuid ID | --all] [--headless]`; `nix run .#check-steps`; `nix run .#login`; `nix run .#pw-daemon` for explicit DOM probing.
-- **Code:** `src/publishing.rs`, `src/publish_journal.rs`, `src/publish_protocol.rs`, `python/publicator_da/`, `.claude/skills/publish-deviantart/SKILL.md`, `src/bin/`.
+- **Code:** `src/publishing.rs`, `src/publish_journal.rs`, `src/publish_protocol.rs`, `src/artwork.rs`, `python/publicator_da/`, `.claude/skills/publish-deviantart/SKILL.md`, `src/bin/`.
 - **Tests:** `tests/publishing.rs`, `tests/publish_protocol.rs`, `tests/python/test_worker.py`, `tests/python/test_browser.py`.
 - **Config:** Data-dir tags and DeviantArt allow-lists are validated by Rust before worker startup.
 - **Data:** `.deviantart-login/` is the human-owned original profile; `.deviantart-session/` is a disposable working copy. `.publicator/` holds persistent receipts/intents/staging; `.publicator/publish.lock` excludes concurrent publishers.
@@ -20,6 +20,8 @@ The Playwright worker uses the existing ordered browser steps and static skill. 
 ## Invariants
 
 - The complete source document, target, options, tags, schedule and artwork identity validate before sending.
+- Approval and upload come from one fresh read: `files[0]` resolves to the visible file whose bytes match the recorded SHA-512 (same-named files are told apart by hash; changed bytes require reconciliation). The worker opens only a hash-verified per-attempt copy under `.publicator/`, never the mutable original.
+- A target sends only while its DeviantArt delivery is still `unpublished`; a delivery recorded since approval stops the batch. Recovery still replays a receipt whose delivery is already applied.
 - Python receives no publication database/config path and cannot mutate the Store.
 - Per-target receipt and Store state survive restart; do not delete `.publicator/` to clear a failure.
 - An ambiguous external result is reconciled explicitly, never automatically resubmitted.

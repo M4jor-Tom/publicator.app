@@ -1,6 +1,6 @@
 use crate::{
+    artwork::{self, Artwork},
     error::{Error, Result},
-    images::{file_sha512, index_by_basename},
     model::{Phase, deliveries_complete, phase, validate_metadata},
     publish_protocol::{PublishJob, WorkerEvent},
     store::Store,
@@ -147,7 +147,27 @@ pub fn snapshot(store: &Store, uuid: &str) -> Result<ApprovedSnapshot> {
     snapshot_row(store, row)
 }
 
+/// Fresh approval of a DeviantArt target that is still pending, with the verified artwork it
+/// was derived from; `None` once the delivery is recorded. Recovery uses `snapshot`, which also
+/// accepts an already-applied delivery.
+pub fn pending_approval(store: &Store, uuid: &str) -> Result<Option<(ApprovedSnapshot, Artwork)>> {
+    let rows = store.read()?;
+    let row = find(&rows, uuid)?;
+    if approved_delivery(row, uuid)?
+        .get("state")
+        .and_then(Value::as_str)
+        != Some("unpublished")
+    {
+        return Ok(None);
+    }
+    approval(store, row).map(Some)
+}
+
 fn snapshot_row(store: &Store, row: &Value) -> Result<ApprovedSnapshot> {
+    approval(store, row).map(|(approved, _)| approved)
+}
+
+fn approval(store: &Store, row: &Value) -> Result<(ApprovedSnapshot, Artwork)> {
     let uuid = string(row, "uuid")?;
     if !matches!(phase(row)?, Phase::Described | Phase::Appeared) {
         return Err(Error::InvalidState(
@@ -161,21 +181,22 @@ fn snapshot_row(store: &Store, row: &Value) -> Result<ApprovedSnapshot> {
         .and_then(Value::as_i64)
         .or_else(|| row.get("submissionTimestamp").and_then(Value::as_i64))
         .ok_or_else(|| Error::Validation("approved schedule is missing".into()))?;
-    let source_hash = approved_source_hash(store, row)?;
+    let artwork = artwork::resolve(&store.paths().data_dir, row)?;
     let tags = approved_tags(store)?;
-    Ok(ApprovedSnapshot {
+    let approved = ApprovedSnapshot {
         database_path: store.paths().json.clone(),
         uuid: uuid.to_owned(),
         platform: "deviantart".into(),
         title: title.to_owned(),
         description: description.to_owned(),
-        source_hash,
+        source_hash: artwork.sha512.clone(),
         schedule_epoch,
         tags,
         tiers: strings(app, "tiers")?,
         galleries: strings(app, "galleries")?,
         price: app.get("priceIfNotFree").and_then(Value::as_f64),
-    })
+    };
+    Ok((approved, artwork))
 }
 
 fn approved_metadata(row: &Value) -> Result<(&str, &str)> {
@@ -202,33 +223,6 @@ fn approved_delivery<'a>(row: &'a Value, uuid: &str) -> Result<&'a Value> {
         ));
     }
     Ok(app)
-}
-
-fn approved_source_hash(store: &Store, row: &Value) -> Result<String> {
-    let basename = row
-        .get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(|file| file.get("basename"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Validation("artwork basename is missing".into()))?;
-    let source = index_by_basename(&store.paths().data_dir)?
-        .remove(basename)
-        .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
-    let source_hash = file_sha512(&source)?;
-    let stored_hash = row
-        .get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(|file| file.get("sha512sum").or_else(|| file.get("fileSha512sum")))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Validation("artwork hash is missing".into()))?;
-    if !stored_hash.eq_ignore_ascii_case(&source_hash) {
-        return Err(Error::ReconciliationRequired(
-            "artwork content no longer matches the approved record".into(),
-        ));
-    }
-    Ok(source_hash)
 }
 
 fn approved_tags(store: &Store) -> Result<Vec<String>> {

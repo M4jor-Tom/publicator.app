@@ -1037,3 +1037,41 @@ async fn publishing_requires_configured_publisher_on_application() {
         .await;
     assert!(result.is_err());
 }
+#[tokio::test]
+async fn worker_receives_approved_bytes_when_the_original_changes_after_dispatch() {
+    let f = configured_fixture();
+    let original = f.path("1.png");
+    let approved = std::fs::read(&original).unwrap();
+    let replacement = f.colored("replacement.png", "blue");
+    let received = f.path("received.png");
+    // Submit arrives only after dispatch validation; swap the original before opening the upload.
+    let worker = fake_worker(
+        &f,
+        &format!(
+            r#"while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) cp '{}' '{}'; cp "$(printf '%s' "$line" | jq -r .image_path)" '{}'; printf '%s' "$line" | jq -c '{{protocol:1,type:"failed",attempt_id,uuid,error:"fixture"}}' ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done"#,
+            replacement.display(),
+            original.display(),
+            received.display()
+        ),
+    );
+    let report = app(&f)
+        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
+        .publish(
+            PublishRequest {
+                uuids: None,
+                headless: true,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(std::fs::read(received).unwrap(), approved);
+    assert_ne!(std::fs::read(&original).unwrap(), approved);
+}

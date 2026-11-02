@@ -62,3 +62,25 @@ impl Fixture {
         path
     }
 }
+impl Fixture {
+    /// A tiny solid-color PNG (parents created); distinct colors give distinct content identities.
+    pub fn colored(&self, name: &str, color: &str) -> std::path::PathBuf {
+        let path = self.path(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("magick")
+            .args(["-size", "2x2", &format!("xc:{color}")])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        path
+    }
+    /// `row(n, state)` whose `{n}.png` artwork exists and carries its real SHA-512, as Pick records it.
+    pub fn art_row(&self, n: u64, state: &str) -> Value {
+        let image = self.image(&format!("{n}.png"), 4, 4);
+        let mut publication = row(n, state);
+        publication["files"][0]["sha512sum"] =
+            json!(publicator::images::file_sha512(&image).unwrap());
+        publication
+    }
+}

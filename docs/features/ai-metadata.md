@@ -2,7 +2,7 @@
 
 - **Does:** Generates a validated title/description pair through OpenRouter or local Ollama; only a complete pair advances a publication to DESCRIBED.
 - **Run:** `nix run .#generate-meta -- --help`; or use the native `ui` Describe phase.
-- **Code:** `src/metadata/`, `src/application.rs`, `src/images.rs`, `src/bin/publicator.rs`, `src/bin/publicator-ui.rs`.
+- **Code:** `src/metadata/`, `src/application.rs`, `src/artwork.rs`, `src/images.rs`, `src/bin/publicator.rs`, `src/bin/publicator-ui.rs`.
 - **Tests:** `tests/metadata*.rs`, `tests/application_ai.rs`, `tests/cli.rs`, `tests/ui_describe.rs`.
 - **Config:** Provider/model selection is explicit; local fit is assessed with llmfit. CLI-only `PUBLICATOR_OLLAMA_URL` overrides the Ollama endpoint.
 - **Data:** `publications.json` stores title/description; `.thumbs/` holds AI input previews. Runtime credentials are read only when the selected provider needs them.
@@ -20,6 +20,7 @@ OpenRouter requests use Rust HTTP clients and loopback fixtures in ordinary test
 - A missing, blank or marker-bearing field cannot be approved or published.
 - Provider work occurs outside Store locks; save merges only fields still carrying the exact marker.
 - Invalid source data/config fails before provider admission and leaves source bytes unchanged.
+- AI input is the publication's recorded artwork: `files[0]` resolves to the visible file whose bytes match the stored SHA-512, whatever directory holds a same-named file. Changed bytes require reconciliation; no provider call or metadata is made from them.
 - The `PUBLICATOR_OLLAMA_URL` override is CLI-only and selects a dependency endpoint; it is not a hidden test/fake switch.
 - Tests use deterministic local/loopback fixtures and never require live provider credentials.
 

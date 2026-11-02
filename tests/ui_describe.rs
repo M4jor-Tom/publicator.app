@@ -107,7 +107,13 @@ fn edit_manual_metadata(app: &mut App) {
 }
 
 fn marker_row(n: u64) -> serde_json::Value {
-    let mut row = row(n, "SCHEDULED");
+    with_markers(row(n, "SCHEDULED"))
+}
+/// `marker_row` whose `{n}.png` exists with its real hash, as AI generation requires.
+fn art_marker_row(f: &Fixture, n: u64) -> serde_json::Value {
+    with_markers(f.art_row(n, "SCHEDULED"))
+}
+fn with_markers(mut row: serde_json::Value) -> serde_json::Value {
     row["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
     row["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
     row
@@ -257,8 +263,7 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
 #[tokio::test]
 async fn installed_good_local_model_generates_without_pull_or_install_modal() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1)]));
+    f.write(json!([art_marker_row(&f, 1)]));
     let model_name = VISION_MODELS[0].ollama_name.clone();
     let tags = json!({"models":[{"name":model_name}]});
     let server = common::http::Server::start(vec![
@@ -303,8 +308,7 @@ async fn installed_good_local_model_generates_without_pull_or_install_modal() {
 #[tokio::test]
 async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1)]));
+    f.write(json!([art_marker_row(&f, 1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models":[]});
     let server = common::http::Server::start(vec![
@@ -419,8 +423,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
 #[tokio::test]
 async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1), marker_row(2)]));
+    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
 
@@ -461,8 +464,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
 #[tokio::test]
 async fn installed_local_batch_rejects_membership_changed_before_admission() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1), marker_row(2)]));
+    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
     let status = run_task(app.update(Message::GenerateMarked)).await;
@@ -502,8 +504,7 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
 #[tokio::test]
 async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1), marker_row(2)]));
+    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models": []});
     let server = common::http::Server::start(vec![ollama_reply("/api/tags", tags.clone())]);
@@ -576,9 +577,7 @@ async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats
 #[tokio::test]
 async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.image("2.png", 4, 4);
-    f.write(json!([marker_row(1), marker_row(2)]));
+    f.write(json!([art_marker_row(&f, 1), art_marker_row(&f, 2)]));
     let empty = json!({"models":[]});
     let mut replies = (0..5)
         .map(|_| ollama_reply("/api/tags", empty.clone()))
@@ -744,9 +743,7 @@ fn selecting_local_source_does_not_itself_confirm_install() {
 #[tokio::test]
 async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted() {
     let f = Fixture::new();
-    let image = f.image("1.png", 4, 4);
-    assert!(image.exists());
-    f.write(json!([marker_row(1), row(2, "SCHEDULED")]));
+    f.write(json!([art_marker_row(&f, 1), row(2, "SCHEDULED")]));
     let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
         path: "/chat/completions".into(),
         status: 200,
@@ -964,8 +961,7 @@ async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
 #[tokio::test]
 async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1)]));
+    f.write(json!([art_marker_row(&f, 1)]));
     let server = common::http::Server::start(vec![ollama_reply(
         "/chat/completions",
         json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
@@ -994,8 +990,7 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     use common::http::{Reply, Server};
 
     let f = Fixture::new();
-    f.image("1.png", 4, 4);
-    f.write(json!([marker_row(1)]));
+    f.write(json!([art_marker_row(&f, 1)]));
     let server = Server::start(vec![
         Reply {
             path: "/chat/completions".into(),
@@ -1050,8 +1045,7 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        f.image(&format!("{n}.png"), 4, 4);
-        rows.push(marker_row(n));
+        rows.push(art_marker_row(&f, n));
     }
     f.write(json!(rows));
     let replies = [3, 2, 1].into_iter().map(|n| Reply {

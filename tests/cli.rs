@@ -17,17 +17,6 @@ fn cli(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 fn marked_data(root: &std::path::Path) {
-    fs::write(
-        root.join("publications.json"),
-        json!([{
-            "uuid":"00000000-0000-4000-8000-000000000001",
-            "state":"SCHEDULED", "title":"[[PUBLICATOR:TODO_GENERATE]]",
-            "description":"[[PUBLICATOR:TODO_GENERATE]]", "submissionTimestamp":1700000000,
-            "files":[{"basename":"art.png","sha512sum":"0".repeat(128)}], "apparitions":[]
-        }])
-        .to_string(),
-    )
-    .unwrap();
     assert!(
         Command::new("magick")
             .args(["-size", "4x4", "xc:white"])
@@ -36,6 +25,18 @@ fn marked_data(root: &std::path::Path) {
             .unwrap()
             .success()
     );
+    let hash = publicator::images::file_sha512(&root.join("art.png")).unwrap();
+    fs::write(
+        root.join("publications.json"),
+        json!([{
+            "uuid":"00000000-0000-4000-8000-000000000001",
+            "state":"SCHEDULED", "title":"[[PUBLICATOR:TODO_GENERATE]]",
+            "description":"[[PUBLICATOR:TODO_GENERATE]]", "submissionTimestamp":1700000000,
+            "files":[{"basename":"art.png","sha512sum":hash}], "apparitions":[]
+        }])
+        .to_string(),
+    )
+    .unwrap();
     fs::write(root.join("publicator.toml"), "").unwrap();
 }
 

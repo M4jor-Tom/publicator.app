@@ -305,24 +305,9 @@ fn lookup<'a>(rows: &'a [Value], uuid: &str) -> Result<&'a Value> {
         .find(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
         .ok_or_else(|| Error::NotFound(uuid.into()))
 }
+// AI input is the recorded artwork identity, never a same-named or changed file.
 fn artwork(store: &Store, row: &Value) -> Result<PathBuf> {
-    let basename = row
-        .get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(|f| f.get("basename"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Validation("artwork basename missing".into()))?;
-    let name = std::path::Path::new(basename);
-    if name.components().count() != 1 || name.file_name().and_then(|n| n.to_str()) != Some(basename)
-    {
-        return Err(Error::Validation("invalid artwork basename".into()));
-    }
-    let root = &store.paths().data_dir;
-    let found = crate::images::index_by_basename(root)?
-        .remove(basename)
-        .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
-    Ok(found)
+    crate::artwork::resolve(&store.paths().data_dir, row).map(|artwork| artwork.path)
 }
 fn validate_request(request: &GenerationRequest) -> Result<()> {
     let allowed = VISION_MODELS.iter().any(|model| match request.source {

@@ -39,28 +39,6 @@ prepared/dispatched bytes. They must be acceptable non-WebP content; test the in
 Keep per-record staging, decoded dimensions and alpha checks. Base conversion/rejection on detected
 content, not filename alone. Use a fake worker, no browser.
 
-## ASSET-03 — P1 · Defect · AI input ignores stored artwork identity
-
-Also reported as **META-R01**; one canonical item owns both reports.
-
-**Evidence:** `src/images.rs:446–458` keeps the first basename match in traversal order.
-`src/application.rs:308–326,263–268` resolves and prepares it without comparing the publication's
-hash; both generation paths use it (`94,186–190`). Publishing separately verifies the stored hash
-(`src/publish_journal.rs:207–237`). Confidence: high.
-
-**Trigger/impact:** Replace recorded A with valid B at the same path, or introduce distinct visible
-files sharing a basename. The application can generate from and externally disclose the wrong
-artwork while retaining A's stored identity.
-
-**Existing coverage:** `tests/images.rs:362–373` excludes hidden directories;
-`tests/application_ai.rs:64–120` uses one correct image. Many successful AI fixtures retain the
-placeholder digest from `tests/common/mod.rs:14–16`, masking identity failures.
-
-**Regression / close when:** Store A's real hash, replace it with B, then attempt generation against
-a request recorder: zero provider calls and no generated metadata on mismatch. Test duplicate
-basenames without depending on enumeration order. Resolve by recorded identity or reject ambiguity;
-any identity-refresh policy must be explicit, never silently accept changed bytes.
-
 ## ASSET-04 — P2 · Defect · Changed content can poison an old thumbnail identity
 
 **Evidence:** `src/ui/preview.rs:17–22` trusts its supplied digest; cache fill converts the current
