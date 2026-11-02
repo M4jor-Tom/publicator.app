@@ -129,14 +129,17 @@ impl Config {
         if let Some(ref p) = prompts {
             PromptGrammar::compile(p)?;
         }
-        Ok(Self {
+        let config = Self {
             tiers: raw.deviantart.tiers,
             galleries: raw.deviantart.galleries,
             publicable: raw.publicable,
             tags: raw.tags,
             schedule: raw.schedule,
             prompts,
-        })
+        };
+        // The allocator's own validators, so every command rejects a bad [schedule] up front.
+        crate::scheduling::profiles(&config).and(crate::scheduling::timezone(&config))?;
+        Ok(config)
     }
 }
 impl PromptGrammar {
@@ -208,11 +211,17 @@ pub(crate) fn validate_publications_with(
     config: &Config,
     validator: &jsonschema::Validator,
 ) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
     for row in rows {
-        let uuid = row
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("publication");
+        let id = row.get("uuid").and_then(serde_json::Value::as_str);
+        if let Some(id) = id
+            && !seen.insert(id)
+        {
+            return Err(Error::Validation(format!(
+                "duplicate publication uuid {id}"
+            )));
+        }
+        let uuid = id.unwrap_or("publication");
         for a in row
             .get("apparitions")
             .and_then(serde_json::Value::as_array)

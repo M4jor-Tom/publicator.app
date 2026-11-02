@@ -17,6 +17,8 @@ Publication state records completed phases PICKED, SCHEDULED, DESCRIBED and APPE
 
 ## Invariants
 
+- Publication UUIDs are unique in the document. A duplicate fails validation, so reads and mutations reject it before any callback; nothing picks a winner.
+- An absent `apparitions` field means no targets yet, exactly like `[]`; a non-array is invalid.
 - Blank or TODO-marked required metadata cannot advance or publish. Manual approval and generated complete-pair transitions remain distinct.
 - Mutations validate before atomic replacement; invalid data is an error, never an empty queue.
 - Retry selects fresh registered pending targets and skips recorded successes. A remote send and local durable write cannot be atomic together.
@@ -28,3 +30,5 @@ Publication state records completed phases PICKED, SCHEDULED, DESCRIBED and APPE
 - The persistent lock file must not be deleted as cleanup.
 - A receipt is evidence of an attempted side effect, not proof the remote site rejected it. Resolve ambiguous outcomes before retrying.
 - Migration is a pure validated transformation; title recovery never guesses URL slugs or mutates the original browser profile.
+- Migration infers DESCRIBED for complete metadata with a legacy date or any successful delivery, as `record_delivery` would after a partial send; partial history is never left PICKED. Delivered history is reserved regardless of phase (see [scheduling](scheduling.md)).
+- A recognized legacy `urlElsePublicationName` must be a string; `null` counts as absent, and any other type fails with a contextual error instead of being dropped.

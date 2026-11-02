@@ -1,4 +1,11 @@
-use publicator::{config::Config, migration::migrate, model::Publications};
+mod common;
+use publicator::{
+    calendar::timeline,
+    config::Config,
+    migration::migrate,
+    model::{Publications, effective_schedule},
+    workflow::{DateEdit, edit_date},
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -197,4 +204,70 @@ fn migration_infers_described_for_pending_legacy_metadata() {
     let out = migrate_rows(&vec![row], &[]).unwrap();
     assert_eq!(out[0]["state"], "DESCRIBED");
     assert_eq!(out[0]["title"], "Title");
+}
+
+#[test]
+fn migration_rejects_malformed_legacy_title_types_without_mutation() {
+    for malformed in [json!(7), json!({"title": "kept"})] {
+        let mut row = legacy();
+        row["title"] = json!("Valid title");
+        row["apparitions"][0]["urlElsePublicationName"] = malformed;
+        let rows = vec![row];
+        let before = rows.clone();
+        let error = migrate_rows(&rows, &[(common::id(1).as_str(), "Recovered")]).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!(
+                "{}: apparition 0 urlElsePublicationName must be a string",
+                common::id(1)
+            )),
+            "{error}"
+        );
+        assert_eq!(rows, before);
+    }
+}
+
+#[test]
+fn migrated_partial_delivery_keeps_date_and_calendar_when_another_row_is_rescheduled() {
+    let mut history = legacy();
+    history["title"] = json!("History");
+    history["files"] = json!([]);
+    history["apparitions"] = json!([
+        {"platformName":"deviantart", "state":"published_or_scheduled",
+            "urlElsePublicationName":"https://example.invalid/history"},
+        {"platformName":"pixiv", "state":"unpublished"}
+    ]);
+    let migrated = migrate_rows(&vec![history], &[]).unwrap();
+    assert_eq!(migrated[0]["state"], "DESCRIBED");
+    assert_eq!(migrate_rows(&migrated, &[]).unwrap(), migrated);
+    let f = common::Fixture::new();
+    let mut other = common::row(2, "PICKED");
+    other["files"] = json!([]);
+    f.write(json!([migrated[0], other]));
+    let before = f.store.read().unwrap();
+    let history_events = |rows: &[Value]| {
+        let events = timeline(rows).unwrap();
+        events
+            .into_iter()
+            .filter(|event| event.uuid == common::id(1))
+            .collect::<Vec<_>>()
+    };
+    let now = common::epoch("2026-01-01T00:00:00Z");
+    edit_date(&f.store, &common::id(2), DateEdit::Suggested, now).unwrap();
+    let after = f.store.read().unwrap();
+    assert!(
+        after[1]["apparitionTimestampIfDifferentThanSubmission"]
+            .as_i64()
+            .is_some_and(|ts| ts > now)
+    );
+    assert_eq!(after[0], before[0]);
+    assert_eq!(effective_schedule(&after[0]), Some(1700000000));
+    assert_eq!(
+        after[0]["apparitions"][0]["state"],
+        "published_or_scheduled"
+    );
+    assert_eq!(
+        after[0]["apparitions"][0]["url"],
+        "https://example.invalid/history"
+    );
+    assert_eq!(history_events(&after), history_events(&before));
 }

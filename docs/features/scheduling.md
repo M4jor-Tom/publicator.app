@@ -11,12 +11,13 @@
 
 ## How it works
 
-Approved publications and manual PICKED dates reserve capacity once per publication. Remaining automatic dates are allocated in stored order. A schedule approval freezes the date and advances the state; choosing a preset or suggested date clears the pin, while custom edits are retained.
+Approved publications, manual PICKED dates and rows with any successful delivery reserve capacity once per publication. Remaining automatic dates are allocated in stored order. A schedule approval freezes the date and advances the state; choosing a preset or suggested date clears the pin, while custom edits are retained.
 
 ## Invariants
 
 - Local wall-clock times are interpreted in the configured timezone; do not use host/browser clock math.
 - Approved dates and manual pins do not move during repacking.
+- Delivered history is reserved regardless of phase: a row with any `published_or_scheduled` apparition keeps its date, even if it is still PICKED.
 - Capacity limits apply to automatic allocation only. The horizon does not silently overbook.
 - Unknown or removed profiles with an existing saved timestamp are preserved rather than erased.
 

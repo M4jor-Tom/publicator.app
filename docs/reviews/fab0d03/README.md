@@ -27,7 +27,6 @@ The original audit changed no application code. Publishing these documents fixes
 
 | File | Scope |
 |---|---|
-| [Core](core.md) | Identity/configuration validation, migration, historical scheduling |
 | [Core coverage](core-coverage.md) | Store faults, extensions, contention and date boundaries |
 | [Metadata](metadata.md) | Newer edits, provider tests, deadlines, admission and persistence |
 | [Images](images.md) | Destructive paths, artwork identity, codecs, cache and search parity |

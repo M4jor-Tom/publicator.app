@@ -46,6 +46,16 @@ fn find_mut<'a>(rows: &'a mut [Value], uuid: &str) -> Result<&'a mut Value> {
         .ok_or_else(|| Error::NotFound(uuid.to_owned()))
 }
 
+/// The schema allows an absent collection; it means no targets yet, exactly like `[]`.
+fn apparitions_mut(pub_: &mut Value) -> Result<&mut Vec<Value>> {
+    pub_.as_object_mut()
+        .ok_or_else(|| Error::Validation("publication must be an object".into()))?
+        .entry("apparitions")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| Error::Validation("apparitions must be an array".into()))
+}
+
 fn schedule_zone(config: &Config) -> Result<Tz> {
     config
         .schedule
@@ -374,10 +384,7 @@ fn select_platform(
         .get("scheduleProfile")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let apps = pub_
-        .get_mut("apparitions")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+    let apps = apparitions_mut(pub_)?;
     let existing = apps
         .iter()
         .position(|app| app.get("platformName").and_then(Value::as_str) == Some(name));
@@ -447,10 +454,7 @@ pub fn save_options(store: &Store, uuid: &str, options: PlatformOptions) -> Resu
         if phase(pub_)? != Phase::Described {
             return Err(Error::InvalidState("options require DESCRIBED".into()));
         }
-        let apps = pub_
-            .get_mut("apparitions")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+        let apps = apparitions_mut(pub_)?;
         let app = apps
             .iter_mut()
             .find(|app| app.get("platformName").and_then(Value::as_str) == Some("deviantart"))
@@ -492,10 +496,7 @@ pub fn record_delivery(
     }
     store.mutate(|rows| {
         let pub_ = find_mut(rows, uuid)?;
-        let apps = pub_
-            .get_mut("apparitions")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| Error::Validation("apparitions must be an array".into()))?;
+        let apps = apparitions_mut(pub_)?;
         let app = apps
             .iter_mut()
             .find(|app| app.get("platformName").and_then(Value::as_str) == Some(platform))

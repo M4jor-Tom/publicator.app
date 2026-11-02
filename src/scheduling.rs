@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::model::{Phase, Publications, effective_schedule, phase};
+use crate::model::{Phase, Publications, effective_schedule, has_delivery_success, phase};
 use chrono::{
     DateTime, Datelike, Days, LocalResult, NaiveDateTime, Offset, TimeZone, Utc, Weekday,
 };
@@ -266,6 +266,13 @@ pub fn timezone(config: &Config) -> Result<Tz> {
         .map_err(|_| config_error(format!("unknown timezone {name:?}")))
 }
 
+/// Approved, manually pinned or partially delivered rows keep their date and hold capacity.
+fn is_reserved(row: &JsonValue) -> bool {
+    phase(row).ok() != Some(Phase::Picked)
+        || row.get("scheduleIsManual").and_then(JsonValue::as_bool) == Some(true)
+        || has_delivery_success(row)
+}
+
 pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> {
     let all_profiles = profiles(config)?;
     let zone = timezone(config)?;
@@ -278,8 +285,7 @@ pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> 
         .ok_or_else(|| config_error("profiles is empty"))?;
     let mut occupancy: HashMap<i64, usize> = HashMap::new();
     for row in rows.iter().filter(|row| {
-        phase(row).ok() != Some(Phase::Picked)
-            || row.get("scheduleIsManual").and_then(JsonValue::as_bool) == Some(true)
+        is_reserved(row)
             || row
                 .get("scheduleProfile")
                 .and_then(JsonValue::as_str)
@@ -289,10 +295,7 @@ pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> 
             *occupancy.entry(ts).or_insert(0) += 1;
         }
     }
-    for row in rows.iter_mut().filter(|row| {
-        phase(row).ok() == Some(Phase::Picked)
-            && row.get("scheduleIsManual").and_then(JsonValue::as_bool) != Some(true)
-    }) {
+    for row in rows.iter_mut().filter(|row| !is_reserved(row)) {
         let requested = row.get("scheduleProfile").and_then(JsonValue::as_str);
         let profile = requested.and_then(|name| {
             profile_slots

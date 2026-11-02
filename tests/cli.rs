@@ -832,3 +832,26 @@ fn reconcile_and_submission_options_cannot_be_mixed() {
     );
     assert!(!result.status.success());
 }
+
+#[test]
+fn validate_rejects_invalid_schedule_semantics() {
+    for (config, diagnostic) in [
+        ("[schedule]\nhour = 24\n", "hour must be 0..=23"),
+        ("[schedule]\ntimezone = 7\n", "timezone must be an IANA"),
+        ("[schedule]\nprofiles = []\n", "profiles is empty"),
+    ] {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("publications.json"), "[]").unwrap();
+        fs::write(root.path().join("publicator.toml"), config).unwrap();
+        let output = cli(
+            root.path(),
+            &["validate", "--data-dir", root.path().to_str().unwrap()],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "accepted {config:?}");
+        assert!(
+            stderr.contains(&format!("schedule: {diagnostic}")),
+            "{stderr}"
+        );
+    }
+}

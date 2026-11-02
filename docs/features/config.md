@@ -3,7 +3,7 @@
 - **Does:** Loads and validates data-dir configuration, publication schema and runtime options.
 - **Run:** `nix run .#validate -- --data-dir DIR`
 - **Code:** `src/config.rs`, `src/model.rs`, `src/store.rs`; consumers in `src/scheduling.rs`, `src/prompts.rs`, `src/bin/` and `src/ui/`.
-- **Tests:** `tests/config.rs`, `tests/store.rs`, `tests/docs.rs`.
+- **Tests:** `tests/config.rs`, `tests/store.rs`, `tests/cli.rs`, `tests/docs.rs`.
 - **Config:** `publicator.toml` is optional and resolved relative to `--data-dir` or CWD. It defines publicable image roots, DeviantArt allow-lists, schedule profiles, prompt grammar and tags.
 - **Data:** Config and its paths belong to the separate data directory. `assets/publicationsSchema.json` is a code asset; it does not move with data.
 - **Decisions:** Rust `toml`/serde parsing and named prompt regex captures; unknown/invalid values fail at the boundary rather than falling back to a guessed convention.
@@ -19,6 +19,7 @@ CLI and GUI resolve data paths from the explicit data directory, defaulting to C
 - Missing optional config uses documented defaults; malformed config is a visible error.
 - Paths for artwork, tags and prompt archive resolve under the data directory; schema and packaged skill/worker assets resolve from the application package.
 - `publicable` choices in Pick are a runtime subset of configured roots, never arbitrary filesystem paths or TOML edits.
+- `Config::load` checks `[schedule]` semantics (weekday/hour/capacity, IANA timezone, non-empty unique profiles) with the same `scheduling` validators that allocate dates, so `validate`, the UI and every command reject an invalid schedule up front.
 - DeviantArt tiers/galleries and schedule defaults are validated before persistence; configuration locality follows the selected `--data-dir`, including an external `--json` path.
 
 ## Gotchas

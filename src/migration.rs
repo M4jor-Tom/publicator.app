@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, validate_publications},
     error::{Error, Result},
-    model::{GENERATE_MARKER, Publications},
+    model::{GENERATE_MARKER, Publications, deliveries_complete, has_delivery_success},
 };
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -20,16 +20,7 @@ fn inferred_state(row: &Value) -> String {
     {
         return state.to_owned();
     }
-    let apparitions = row
-        .get("apparitions")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if !apparitions.is_empty()
-        && apparitions
-            .iter()
-            .all(|app| app.get("state").and_then(Value::as_str) == Some("published_or_scheduled"))
-    {
+    if deliveries_complete(row) {
         return "APPEARED".into();
     }
     let complete = ["title", "description"].iter().all(|key| {
@@ -37,11 +28,16 @@ fn inferred_state(row: &Value) -> String {
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty() && !value.contains(GENERATE_MARKER))
     });
-    if row.get(OLD_DATE).is_some() {
-        if complete { "DESCRIBED" } else { "SCHEDULED" }.into()
+    let dated = row.get(OLD_DATE).is_some();
+    // A partial delivery has left the editable stages, as record_delivery would record it.
+    if complete && (dated || has_delivery_success(row)) {
+        "DESCRIBED"
+    } else if dated {
+        "SCHEDULED"
     } else {
-        "PICKED".into()
+        "PICKED"
     }
+    .into()
 }
 
 /// Convert legacy publication documents without mutating the caller's snapshot.
@@ -65,17 +61,7 @@ fn legacy_values(apps: &[Value], uuid: &str) -> Result<(HashSet<String>, HashSet
         let app = app.as_object().ok_or_else(|| {
             Error::Validation(format!("{uuid}: apparition {index} must be an object"))
         })?;
-        if let Some(old) = app
-            .get(OLD_TITLE)
-            .and_then(Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-        {
-            if is_http_url(old) {
-                validate_legacy_url(app, old, uuid)?;
-            } else {
-                names.insert(old.to_owned());
-            }
-        }
+        names.extend(legacy_name(app, index, uuid)?.map(str::to_owned));
         if let Some(date) = app.get(OLD_DATE) {
             let ts = date.as_i64().ok_or_else(|| {
                 Error::Validation(format!("{uuid}: invalid legacy apparition date"))
@@ -94,6 +80,29 @@ fn legacy_values(apps: &[Value], uuid: &str) -> Result<(HashSet<String>, HashSet
         )));
     }
     Ok((names, dates))
+}
+
+/// The legacy title when it names the publication; a URL is checked against `url` instead.
+/// Its type is checked before migration removes the field; null counts as absent.
+fn legacy_name<'a>(
+    app: &'a Map<String, Value>,
+    index: usize,
+    uuid: &str,
+) -> Result<Option<&'a str>> {
+    let old = match app.get(OLD_TITLE) {
+        Some(Value::String(old)) if !old.trim().is_empty() => old.as_str(),
+        None | Some(Value::Null | Value::String(_)) => return Ok(None),
+        Some(_) => {
+            return Err(Error::Validation(format!(
+                "{uuid}: apparition {index} {OLD_TITLE} must be a string"
+            )));
+        }
+    };
+    if is_http_url(old) {
+        validate_legacy_url(app, old, uuid)?;
+        return Ok(None);
+    }
+    Ok(Some(old))
 }
 
 fn validate_legacy_url(app: &Map<String, Value>, old: &str, uuid: &str) -> Result<()> {

@@ -2,6 +2,7 @@ mod common;
 use common::{Fixture, id, row};
 use publicator::{
     config::Config,
+    error::Error,
     workflow::{PlatformOptions, REGISTERED_PLATFORMS, record_delivery, save_options, select},
 };
 use serde_json::json;
@@ -266,4 +267,44 @@ fn recording_delivery_without_url_does_not_invent_one() {
     f.write(json!([p]));
     record_delivery(&f.store, &id(1), "deviantart", None).unwrap();
     assert!(f.read()[0]["apparitions"][0].get("url").is_none());
+}
+
+#[test]
+fn absent_apparitions_behave_like_an_empty_collection() {
+    let absent = || {
+        let mut publication = row(1, "DESCRIBED");
+        publication.as_object_mut().unwrap().remove("apparitions");
+        json!([publication, row(2, "DESCRIBED")])
+    };
+    let pending = json!([{"platformName":"deviantart","state":"unpublished"}]);
+    let f = Fixture::new();
+    f.write(absent());
+    f.store.read().unwrap();
+    let options = save_options(&f.store, &id(1), PlatformOptions::default());
+    assert!(
+        matches!(options, Err(Error::InvalidState(_))),
+        "{options:?}"
+    );
+    let delivery = record_delivery(&f.store, &id(1), "deviantart", None);
+    assert!(matches!(delivery, Err(Error::NotFound(_))), "{delivery:?}");
+    select(&f.store, Some(&id(1)), Some("deviantart"), false).unwrap();
+    let deselected = f.read();
+    assert!(
+        deselected[0]
+            .get("apparitions")
+            .is_none_or(|apps| apps == &json!([]))
+    );
+    assert_eq!(deselected[0]["state"], "DESCRIBED");
+    f.write(absent());
+    select(&f.store, Some(&id(1)), Some("deviantart"), true).unwrap();
+    assert_eq!(f.read()[0]["apparitions"], pending);
+    f.write(absent());
+    select(&f.store, None, None, true).unwrap();
+    let saved = f.read();
+    assert_eq!(saved[0]["apparitions"], pending);
+    assert_eq!(saved[1]["apparitions"], pending);
+    let mut malformed = row(1, "DESCRIBED");
+    malformed["apparitions"] = json!({});
+    f.write(json!([malformed]));
+    assert!(select(&f.store, None, None, true).is_err());
 }

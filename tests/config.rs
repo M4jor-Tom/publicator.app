@@ -1,3 +1,4 @@
+mod common;
 use publicator::config::{Config, Paths, PromptConfig, PromptGrammar, validate_publications};
 use publicator::model::{Publications, validate_metadata};
 use serde_json::json;
@@ -374,4 +375,31 @@ fn metadata_requires_complete_unmarked_title_with_unicode_limit() {
     assert!(validate_metadata("  ", "description").is_err());
     assert!(validate_metadata("Title [[PUBLICATOR:TODO_GENERATE]]", "description").is_err());
     assert!(validate_metadata(&"🦀".repeat(51), "description").is_err());
+}
+
+#[test]
+fn duplicate_uuids_fail_validation_reads_and_mutations_without_writing() {
+    let f = common::Fixture::new();
+    let mut twin = common::row(2, "PICKED");
+    twin["uuid"] = json!(common::id(1));
+    twin["title"] = json!("Other title");
+    let rows: Publications = vec![common::row(1, "PICKED"), twin];
+    let duplicate = format!("duplicate publication uuid {}", common::id(1));
+    let error = validate_publications(&rows, &Config::default()).unwrap_err();
+    assert!(error.to_string().contains(&duplicate), "{error}");
+    f.write(json!(rows));
+    let before = fs::read(&f.store.paths().json).unwrap();
+    let error = f.store.read().unwrap_err();
+    assert!(error.to_string().contains(&duplicate), "{error}");
+    let mut called = false;
+    assert!(
+        f.store
+            .mutate(|_| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!called);
+    assert_eq!(fs::read(&f.store.paths().json).unwrap(), before);
 }
