@@ -18,8 +18,7 @@ pub(super) async fn prepare_lazy(
             .filter(|sha| sha.len() == 128 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .map(Ok)
             .unwrap_or_else(|| crate::images::file_sha512(&source))?;
-        let name = crate::images::thumb_name(&source, &sha)?;
-        crate::images::ensure_thumb(&source, &cache, &name)
+        crate::images::ensure_thumb(&source, &cache, &sha)
     })
     .await
     .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))

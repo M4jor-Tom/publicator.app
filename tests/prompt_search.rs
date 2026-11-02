@@ -307,3 +307,52 @@ mod cfg {
             .collect()
     }
 }
+
+mod common;
+
+#[test]
+fn prompt_search_and_discovery_both_protect_a_referenced_basename_with_changed_bytes() {
+    use publicator::images::{file_sha512, find_candidates};
+    let (dir, cfg) = setup();
+    let digest = cfg::digest(b"A Moonlit Garden");
+    let art = dir.path().join("art");
+    let referenced = art.join(format!("prompt.txt_{digest}.png"));
+    common::solid_image(&referenced, "red", 8, 8);
+    let mut published = common::row(1, "APPEARED");
+    published["files"][0] = serde_json::json!({
+        "basename": format!("prompt.txt_{digest}.png"),
+        "sha512sum": file_sha512(&referenced).unwrap(),
+    });
+    let store = store(&dir, cfg.clone());
+    store
+        .mutate(|rows| {
+            rows.push(published);
+            Ok(())
+        })
+        .unwrap();
+    common::solid_image(&referenced, "blue", 8, 8);
+    let control = art.join(format!("fresh_{digest}.png"));
+    common::solid_image(&control, "green", 8, 8);
+    let paths = Search {
+        limit: 25,
+        paths: vec!["art".into()],
+    };
+
+    let prompted = search(
+        &store,
+        &paths,
+        Some(&archive(dir.path(), &cfg)),
+        Some("moonlit"),
+        None,
+    )
+    .unwrap();
+    let only_control = |candidates: Vec<publicator::images::Candidate>| {
+        assert_eq!(
+            candidates.into_iter().map(|c| c.path).collect::<Vec<_>>(),
+            std::slice::from_ref(&control)
+        )
+    };
+    only_control(prompted.exact);
+    assert!(prompted.maybe.is_empty());
+    only_control(find_candidates(&store, &paths).unwrap());
+}

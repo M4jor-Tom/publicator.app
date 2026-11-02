@@ -4,18 +4,6 @@ These are independently closable testability/policy gaps. Do not interpret every
 a demonstrated defect. Discovery already canonicalizes configured roots and does not follow
 symlink entries; thumbnails are lazy with four preparations in flight, not eager full-corpus work.
 
-## ASSET-C01 — P2 · Gap · Basename filtering masks hash-reference assertions
-
-**Evidence:** `tests/images.rs:124–159` uses candidates whose names are already referenced.
-`src/images.rs:142–153` can reject by basename before exercising hash-key handling. Renamed duplicate
-and changed-basename tests exist (`tests/images.rs:94–120,162–211`), but the key matrix is masked.
-
-**Regression / close when:** Independently parameterize both legacy hash keys across both file lists
-(publication and preview references), case-normalized digests included. Give every candidate a
-*different basename* from its reference so only the hash can reject it. Also test byte-identical
-unpublished files and overlapping roots; explicitly choose content-dedup versus path-count semantics.
-Do not use all-zero placeholder hashes for this proof.
-
 ## ASSET-C02 — P2 · Gap · Root and access checks need adversarial filesystem fixtures
 
 **Evidence:** `src/images.rs:90–129,175–195` handles configured roots/static escapes;
@@ -27,16 +15,6 @@ symlinks, loops, relative data paths from another CWD, spaces/Unicode and unread
 Run permissions cases unprivileged; root can bypass chmod. Preserve non-following traversal and
 configured-root authorization. Final unlink substitution is separately owned by ASSET-01.
 Use only temporary directories; never probe the real data tree.
-
-## ASSET-C03 — P2 · Gap · Cache corruption, path types and simultaneous creators
-
-**Evidence:** `src/images.rs:242–257` trusts existing entries; `tests/images.rs:215–351` proves
-normal naming/reuse, MIME and real resize, not corrupt bytes or unexpected cache-path types.
-
-**Regression / close when:** Exercise a corrupt entry, directory at expected filename, symlinked
-entry and simultaneous creators under isolated cache roots. Assert a defined safe recovery/error
-policy, correct decoded identity/dimensions and no partial entry treated as valid. Coordinate with
-ASSET-04's B-under-A test. Keep valid lazy reuse and deterministic gates; no global cache reset.
 
 ## ASSET-C04 — P2 · Risk / decision · Conversion fallback can cache full-size originals
 

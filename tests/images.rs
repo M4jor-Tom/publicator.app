@@ -1,6 +1,6 @@
 mod common;
 
-use common::{Fixture, row};
+use common::{Fixture, row, solid_image};
 use publicator::{
     config::Config,
     images::{
@@ -9,7 +9,10 @@ use publicator::{
     },
 };
 use serde_json::json;
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[test]
 fn search_accepts_only_configured_unique_paths_and_supported_limits() {
@@ -21,7 +24,7 @@ fn search_accepts_only_configured_unique_paths_and_supported_limits() {
     fs::create_dir_all(f.path("picked")).unwrap();
     fs::create_dir_all(f.path("more")).unwrap();
     f.image("picked/a.png", 10, 10);
-    f.image("more/b.png", 10, 10);
+    f.image("more/b.png", 11, 10);
     for limit in [0, 25, 50, 75, 100] {
         let got = find_candidates(
             &f.store,
@@ -77,7 +80,7 @@ fn search_caps_results_at_the_selected_supported_limit() {
     let f = Fixture::with_config(config);
     fs::create_dir_all(f.path("art")).unwrap();
     for index in 0..30 {
-        f.image(&format!("art/{index}.png"), 1, 1);
+        f.image(&format!("art/{index}.png"), index + 1, 1);
     }
     let candidates = find_candidates(
         &f.store,
@@ -120,41 +123,74 @@ fn discovery_skips_a_duplicate_hash_under_a_new_basename() {
     assert_eq!(candidates[0].path, fresh);
 }
 
+fn discovered(f: &Fixture, paths: &[&str]) -> Vec<PathBuf> {
+    let search = Search {
+        limit: 100,
+        paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+    };
+    let mut found = find_candidates(&f.store, &search)
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    found.sort();
+    found
+}
+
 #[test]
-fn discovery_deduplicates_both_hash_keys_in_files_and_previews() {
+fn discovery_rejects_every_hash_key_and_case_without_basename_help() {
     let config = Config {
         publicable: vec!["picked".into()],
         ..Config::default()
     };
     let f = Fixture::with_config(config);
     fs::create_dir_all(f.path("picked")).unwrap();
-    let a = f.image("picked/a.png", 10, 10);
-    let b = f.image("picked/b.png", 10, 10);
-    let c = f.image("picked/c.png", 10, 10);
-    let d = f.image("picked/d.png", 10, 10);
     let mut published = row(1, "APPEARED");
-    published["files"] =
-        json!([{"basename":"a.png", "sha512sum": file_sha512(&a).unwrap().to_uppercase()}]);
-    published["previewFilesIfNotFree"] = json!([
-        {"basename":"b.png", "fileSha512sum": file_sha512(&b).unwrap()},
-        {"basename":"c.png", "sha512sum": file_sha512(&c).unwrap()},
-        {"basename":"d.png", "fileSha512sum": file_sha512(&d).unwrap()}
-    ]);
-    f.write(json!([published]));
-    assert!(
-        find_candidates(
-            &f.store,
-            &Search {
-                limit: 100,
-                paths: vec!["picked".into()]
+    published["files"] = json!([]);
+    published["previewFilesIfNotFree"] = json!([]);
+    let mut index = 0;
+    for list in ["files", "previewFilesIfNotFree"] {
+        for key in ["sha512sum", "fileSha512sum"] {
+            for upper in [false, true] {
+                index += 1;
+                let candidate = f.image(&format!("picked/candidate-{index}.png"), 10 + index, 10);
+                let sha = file_sha512(&candidate).unwrap();
+                let sha = if upper { sha.to_uppercase() } else { sha };
+                published[list]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"basename": format!("reference-{index}.png"), key: sha}));
             }
-        )
-        .unwrap()
-        .is_empty()
-    );
+        }
+    }
+    let control = f.image("picked/control.png", 9, 9);
+    f.write(json!([published]));
+    assert_eq!(discovered(&f, &["picked"]), [control]);
     assert!(
         !f.path(".thumbs").exists(),
         "discovery must not eagerly thumbnail history"
+    );
+}
+
+#[test]
+fn discovery_offers_one_candidate_per_content_identity() {
+    let config = Config {
+        publicable: vec!["art".into(), "art/nested".into()],
+        ..Config::default()
+    };
+    let f = Fixture::with_config(config);
+    fs::create_dir_all(f.path("art/nested")).unwrap();
+    let first = f.image("art/first.png", 10, 10);
+    fs::copy(&first, f.path("art/copy.png")).unwrap();
+    let nested = f.image("art/nested/other.png", 11, 10);
+
+    let found = discovered(&f, &["art"]);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.contains(&nested));
+    assert_eq!(
+        discovered(&f, &["art", "art/nested"]).len(),
+        2,
+        "overlapping roots must not offer the nested file twice"
     );
 }
 
@@ -237,14 +273,9 @@ fn cache_reuses_content_identity_and_really_resizes() {
     let name = thumb_name(&p, &sha).unwrap();
     assert_eq!(name, format!("{}.png", &sha[..32]));
     let cache = f.path(".thumbs");
-    let t = ensure_thumb(&p, &cache, &name).unwrap();
-    assert_eq!(t.parent(), Some(cache.as_path()));
-    let out = std::process::Command::new("identify")
-        .args(["-format", "%wx%h"])
-        .arg(&t)
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "300x200");
+    let t = ensure_thumb(&p, &cache, &sha).unwrap();
+    assert_eq!(t, cache.join(&name));
+    assert_eq!(identify(&t, "%wx%h"), "300x200");
 
     let duplicate = f.path("duplicate.png");
     fs::copy(&p, &duplicate).unwrap();
@@ -258,20 +289,65 @@ fn cache_reuses_content_identity_and_really_resizes() {
     let cached_bytes = fs::read(&t).unwrap();
     fs::rename(&p, f.path("renamed.png")).unwrap();
     assert_eq!(
-        ensure_thumb(&f.path("renamed.png"), &f.path(".thumbs"), &name).unwrap(),
+        ensure_thumb(&f.path("renamed.png"), &f.path(".thumbs"), &sha).unwrap(),
         t
     );
     assert_eq!(fs::read(&t).unwrap(), cached_bytes);
 }
 
+fn identify(path: &Path, format: &str) -> String {
+    let output = std::process::Command::new("identify")
+        .args(["-format", format])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "identify {}", path.display());
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[test]
-fn ensure_thumb_uses_a_caller_selected_cache_name() {
+fn changed_source_never_fills_the_cache_under_its_old_identity() {
     let f = Fixture::new();
-    let source = f.image("image.png", 10, 10);
-    let cache = f.path("cache");
-    let thumb = ensure_thumb(&source, &cache, "beef.png").unwrap();
-    assert_eq!(thumb.file_name().unwrap(), "beef.png");
-    assert!(thumb.exists());
+    let source = f.path("art.png");
+    solid_image(&source, "red", 8, 8);
+    let red_sha = file_sha512(&source).unwrap();
+    let preserved = f.path("preserved-red.png");
+    fs::copy(&source, &preserved).unwrap();
+    solid_image(&source, "blue", 8, 8);
+    let cache = f.path(".thumbs");
+
+    assert!(ensure_thumb(&source, &cache, &red_sha).is_err());
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 0, "no entry or temp");
+    let thumb = ensure_thumb(&preserved, &cache, &red_sha).unwrap();
+    assert_eq!(identify(&thumb, "%[hex:p{0,0}]"), "FF0000");
+}
+
+#[test]
+fn corrupt_and_symlinked_cache_entries_are_rebuilt_and_directories_refused() {
+    let f = Fixture::new();
+    let source = f.image("large.png", 600, 400);
+    let sha = file_sha512(&source).unwrap();
+    let cache = f.path(".thumbs");
+    let entry = cache.join(thumb_name(&source, &sha).unwrap());
+    fs::create_dir_all(&cache).unwrap();
+
+    fs::write(&entry, b"truncated partial entry").unwrap();
+    assert_eq!(ensure_thumb(&source, &cache, &sha).unwrap(), entry);
+    assert_eq!(identify(&entry, "%m %wx%h"), "PNG 300x200");
+
+    let outside = f.path("outside.txt");
+    fs::write(&outside, b"outside sentinel").unwrap();
+    fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(&outside, &entry).unwrap();
+    assert_eq!(ensure_thumb(&source, &cache, &sha).unwrap(), entry);
+    assert!(fs::symlink_metadata(&entry).unwrap().is_file());
+    assert_eq!(identify(&entry, "%m %wx%h"), "PNG 300x200");
+    assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+
+    fs::remove_file(&entry).unwrap();
+    fs::create_dir(&entry).unwrap();
+    assert!(ensure_thumb(&source, &cache, &sha).is_err());
+    assert!(entry.is_dir(), "a directory entry is never removed");
 }
 
 #[test]
@@ -318,6 +394,40 @@ fn mixed_case_webp_upload_converts_inside_attempt_directory() {
             .stdout,
         b"PNG"
     );
+}
+
+#[test]
+fn upload_converts_webp_by_content_not_filename() {
+    let f = Fixture::new();
+    let webp = f.path("translucent.webp");
+    let made = std::process::Command::new("magick")
+        .args(["-size", "8x8", "xc:rgba(255,0,0,0.5)"])
+        .args(["-define", "webp:lossless=true"])
+        .arg(&webp)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let misnamed = f.path("art.png");
+    fs::copy(&webp, &misnamed).unwrap();
+    assert_eq!(identify(&misnamed, "%m"), "WEBP");
+    assert!(
+        validate_upload(&misnamed).is_err(),
+        "WebP content is refused"
+    );
+
+    let attempt = f.path("attempt");
+    let prepared = prepare_upload(&misnamed, &attempt).unwrap();
+    assert_eq!(prepared, attempt.join("upload.png"));
+    let pixel = "%m %wx%h %A %[hex:p{0,0}]";
+    assert_eq!(identify(&prepared, pixel), "PNG 8x8 Blend FF000080");
+    validate_upload(&prepared).unwrap();
+
+    let png_named_webp = f.path("real.webp");
+    fs::copy(f.image("real.png", 4, 4), &png_named_webp).unwrap();
+    let inverse = prepare_upload(&png_named_webp, &f.path("inverse")).unwrap();
+    assert_eq!(inverse.extension().and_then(|e| e.to_str()), Some("png"));
+    assert_eq!(identify(&inverse, "%m %wx%h"), "PNG 4x4");
+    validate_upload(&inverse).unwrap();
 }
 
 #[test]

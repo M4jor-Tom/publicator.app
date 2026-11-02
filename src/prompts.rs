@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, ImageIdentity, PromptConfig, PromptGrammar},
     error::{Error, Result},
-    images::{Candidate, Search, published_hashes, unreferenced_candidate, validate_search},
+    images::{Candidate, References, Search, validate_search},
     store::Store,
 };
 use std::{
@@ -540,7 +540,7 @@ pub fn search(
         return Ok(SearchMatches::default());
     }
     let paths = configured_files(&store.paths().data_dir, &search.paths)?;
-    let referenced = published_hashes(&store.read()?);
+    let mut references = References::new(&store.read()?);
     let needle = needle.filter(|s| !s.is_empty()).map(str::to_lowercase);
     let (mut exact, mut maybe, skipped) =
         matching_paths(archive, paths, needle.as_deref(), lineage)?;
@@ -549,8 +549,8 @@ pub fn search(
         || exact.len().saturating_add(maybe.len()) > search.limit;
     exact.truncate(SEARCH_GROUP_LIMIT);
     maybe.truncate(SEARCH_GROUP_LIMIT);
-    let exact = unreferenced_candidates(&exact, &referenced, search.limit);
-    let maybe = unreferenced_candidates(&maybe, &referenced, search.limit - exact.len());
+    let exact = unreferenced_candidates(&exact, &mut references, search.limit);
+    let maybe = unreferenced_candidates(&maybe, &mut references, search.limit - exact.len());
     Ok(SearchMatches {
         exact,
         maybe,
@@ -601,12 +601,12 @@ fn version_matches(version: &PromptVersion, needle: Option<&str>, lineage: Optio
 
 fn unreferenced_candidates(
     paths: &[PathBuf],
-    referenced: &HashSet<String>,
+    references: &mut References,
     limit: usize,
 ) -> Vec<Candidate> {
     paths
         .iter()
-        .filter_map(|path| unreferenced_candidate(path, referenced))
+        .filter_map(|path| references.admit(path))
         .take(limit)
         .collect()
 }

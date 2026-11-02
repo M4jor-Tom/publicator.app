@@ -84,3 +84,15 @@ impl Fixture {
         publication
     }
 }
+
+/// Writes a decodable solid-colour image; the format follows the path suffix.
+pub fn solid_image(path: &std::path::Path, color: &str, width: u32, height: u32) {
+    let status = std::process::Command::new("magick")
+        .arg("-size")
+        .arg(format!("{width}x{height}"))
+        .arg(format!("xc:{color}"))
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "magick failed for {}", path.display());
+}
