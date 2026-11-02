@@ -6,13 +6,13 @@ use publicator::{
     metadata::{Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS},
     model::{GENERATE_MARKER, Phase, phase},
     prompts::{PromptArchive, audit},
-    publish_journal::{PublishJournal, ReconcileOutcome},
-    publishing::{PublishRequest, Publisher, first_pending_uuid},
+    publish_journal::{self, PublishJournal, ReconcileOutcome},
+    publishing::{PublishReport, PublishRequest, Publisher, first_pending_uuid},
     store::Store,
 };
 use std::{
     io::{self, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
@@ -355,8 +355,8 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
         return reconcile(&paths, &store, &attempt, outcome, url);
     }
     let ids = publication_ids(&store, uuid, all)?;
-    let app = Application::new(store, metadata_client()).with_publisher(publisher);
-    let report = app
+    let app = Application::new(store.clone(), metadata_client()).with_publisher(publisher);
+    let result = app
         .publish(
             PublishRequest {
                 uuids: ids,
@@ -364,8 +364,47 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
             },
             Arc::new(AtomicBool::new(false)),
         )
-        .await?;
-    print_publish_report(report, verbose)
+        .await;
+    print_unresolved(&paths.data_dir, &store, &result);
+    print_publish_report(result?, verbose)
+}
+/// Operator guidance for attempts whose remote outcome is unknown; mirrors the skill's recovery prose.
+fn print_unresolved(data_dir: &Path, store: &Store, result: &Result<PublishReport>) {
+    let unresolved = match result {
+        Ok(report) => report.unknown > 0,
+        Err(error) => matches!(error, Error::ReconciliationRequired(_)),
+    };
+    if !unresolved {
+        return;
+    }
+    let blocked = publish_journal::publisher_lock(data_dir)
+        .and_then(|_lock| PublishJournal::new(data_dir)?.blocked_attempts_locked(store));
+    let blocked = match blocked {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            eprintln!("could not list unresolved attempts: {error}");
+            return;
+        }
+    };
+    if blocked.is_empty() {
+        return;
+    }
+    let dir = data_dir.display();
+    for attempt in &blocked {
+        let (id, uuid, reason) = (&attempt.attempt_id, &attempt.uuid, &attempt.reason);
+        eprintln!("UNRESOLVED {id} ({uuid}): {reason}");
+        eprintln!(
+            "  on DeviantArt: da-publish --data-dir {dir} --reconcile-attempt {id} --outcome scheduled [--url URL]"
+        );
+        eprintln!(
+            "  absent:        da-publish --data-dir {dir} --reconcile-attempt {id} --outcome not-submitted"
+        );
+    }
+    eprintln!(
+        "DeviantArt may already hold these submissions: do not resubmit or redo them by hand.\n\
+         Inspect DeviantArt first, then record what you found with one command above.\n\
+         Retry or upload by hand only after --outcome not-submitted. Never delete .publicator/ receipts."
+    );
 }
 fn reconcile(
     paths: &Paths,
@@ -401,10 +440,7 @@ fn publication_ids(store: &Store, uuid: Option<String>, all: bool) -> Result<Opt
         Some(first_pending_uuid(&rows)?.into_iter().collect())
     })
 }
-fn print_publish_report(
-    report: publicator::publishing::PublishReport,
-    verbose: bool,
-) -> Result<()> {
+fn print_publish_report(report: PublishReport, verbose: bool) -> Result<()> {
     println!(
         "published: {}, failed: {}, unknown: {}, unattempted: {}",
         report.published, report.failed, report.unknown, report.unattempted

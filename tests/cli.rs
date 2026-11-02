@@ -856,3 +856,80 @@ fn validate_rejects_invalid_schedule_semantics() {
         );
     }
 }
+
+/// Phrases the CLI unknown-outcome guidance and the skill's recovery prose must share.
+const RECOVERY_PHRASES: [&str; 7] = [
+    "UNRESOLVED",
+    "--reconcile-attempt",
+    "--outcome scheduled",
+    "--outcome not-submitted",
+    "Inspect DeviantArt first",
+    "do not resubmit or redo",
+    ".publicator/",
+];
+
+fn assert_recovery_guidance(stderr: &[u8], attempt: &str) {
+    let text = String::from_utf8_lossy(stderr);
+    for phrase in RECOVERY_PHRASES {
+        assert!(text.contains(phrase), "missing {phrase:?}: {text}");
+    }
+    let listed = format!("UNRESOLVED {attempt} (00000000-0000-4000-8000-000000000001)");
+    let release = format!("--reconcile-attempt {attempt} --outcome not-submitted");
+    assert!(text.contains(&listed) && text.contains(&release), "{text}");
+}
+
+#[test]
+fn unknown_publish_outcome_prints_reconcile_guidance_matching_the_skill() {
+    let f = publish_fixture();
+    let root = f.root.path();
+    let first = run_publish_worker(
+        root,
+        "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo '{\"protocol\":1,\"type\":\"ready\"}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *) exit 0 ;; esac; done\n",
+    );
+    assert!(!first.status.success());
+    let attempts: Vec<String> = fs::read_dir(root.join(".publicator/publish"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    let [attempt] = attempts.as_slice() else {
+        panic!("{attempts:?}")
+    };
+    let blocked = publish_command(root).output().unwrap();
+    assert!(!blocked.status.success());
+    assert_recovery_guidance(&first.stderr, attempt);
+    assert_recovery_guidance(&blocked.stderr, attempt);
+    assert!(
+        root.join(format!(".publicator/publish/{attempt}/receipt.json"))
+            .is_file()
+    );
+
+    let skill = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/skills/publish-deviantart/SKILL.md"
+    ))
+    .unwrap();
+    for phrase in RECOVERY_PHRASES {
+        assert!(skill.contains(phrase), "skill lacks {phrase:?}");
+    }
+    assert!(!skill.contains("AUTOMATION FAILED"));
+    assert!(!skill.contains("Fall through to the manual steps"));
+
+    let data_dir = root.to_str().unwrap();
+    let reconciled = cli(
+        root,
+        &[
+            "da-publish",
+            "--data-dir",
+            data_dir,
+            "--reconcile-attempt",
+            attempt,
+            "--outcome",
+            "not-submitted",
+        ],
+    );
+    assert!(
+        reconciled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reconciled.stderr)
+    );
+}

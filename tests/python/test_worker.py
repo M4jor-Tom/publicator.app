@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from publicator_da import worker
 
 
@@ -150,5 +152,21 @@ def test_worker_rejects_bad_submit_before_session_mutation(tmp_path):
             return super().submit(job)
     output = io.StringIO()
     assert worker.serve(io.StringIO(json.dumps({"protocol": 1, "type": "open", "login_profile": str(tmp_path / ".deviantart-login"), "work_profile": str(tmp_path / ".deviantart-session"), "headless": False, "timezone": "Europe/Paris"}) + "\n" + json.dumps(commands) + "\n"), output, tmp_path, Session) != 0
+    assert not touched
+    assert [json.loads(line)["type"] for line in output.getvalue().splitlines()] == ["ready", "fatal"]
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity", "1e400"])
+def test_worker_rejects_nonfinite_price_frame_before_session_mutation(tmp_path, token):
+    open_line, submit_line, close_line = valid_commands(tmp_path).splitlines()
+    submit_line = submit_line.replace('"price": 0,', f'"price": {token},')
+    assert f'"price": {token},' in submit_line
+    touched = []
+    class Session(FakeSession):
+        def submit(self, job):
+            touched.append(job)
+            return super().submit(job)
+    output = io.StringIO()
+    assert worker.serve(io.StringIO("\n".join((open_line, submit_line, close_line)) + "\n"), output, tmp_path, Session) != 0
     assert not touched
     assert [json.loads(line)["type"] for line in output.getvalue().splitlines()] == ["ready", "fatal"]

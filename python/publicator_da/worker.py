@@ -55,7 +55,8 @@ def _validate(command, data_root):
         expected = datetime(s["year"], s["month"], s["day"], s["hour"], s["minute"], tzinfo=ZoneInfo(s["timezone"])).timestamp()
         if int(expected) != s["epoch"]:
             raise ValueError("schedule epoch does not match wall time")
-        if "price" in command and (type(command["price"]) not in (int, float) or command["price"] < 0):
+        # `price < 0` alone lets NaN through; json.loads accepts NaN/Infinity tokens.
+        if "price" in command and (type(command["price"]) not in (int, float) or not 0 <= command["price"] < float("inf")):
             raise ValueError("invalid price")
     return kind
 

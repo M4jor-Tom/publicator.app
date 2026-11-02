@@ -1,6 +1,6 @@
 ---
 name: publish-deviantart
-description: Publish or schedule the next unpublished art piece to DeviantArt. Try the automated app first; if it exits non-zero, finish by hand in the #login Firefox, using the pw-daemon Chromium only to probe the DOM.
+description: Publish or schedule the next unpublished art piece to DeviantArt. Try the automated app first; if it exits non-zero, reconcile any UNRESOLVED attempt before anything else, and finish by hand in the #login Firefox only after a safe failure, using the pw-daemon Chromium only to probe the DOM.
 ---
 
 Every command reads its **publication database** (`publications.json` + images +
@@ -19,10 +19,35 @@ Publishes ONE entry — the first `DESCRIBED` publication with an unpublished
 DeviantArt apparition in `publications.json` (add `--uuid <id>` to target a
 specific one). If it exits 0, the publication is done — stop here.
 
-If it exits non-zero, it prints `AUTOMATION FAILED: <reason>` to stderr and
-closes the browser cleanly. Fall through to the manual steps below to finish the
-current publication, then update `python/publicator_da/browser.py` to cover whatever
-tripped it (so the next worker run doesn't fall through).
+## If it exits non-zero: classify before any manual step
+
+The summary line is `published: N, failed: N, unknown: N, unattempted: N`.
+
+**Unknown outcome — reconcile, never redo.** stderr lists one
+`UNRESOLVED <attempt> (<uuid>): <reason>` line per attempt (after `unknown: 1` or
+more, or when a later run refuses with `reconciliation required`). The submit may
+have reached DeviantArt, so do not resubmit or redo it by hand and do not rerun the
+automation. Inspect DeviantArt first (scheduled deviations, submissions, drafts),
+then record what you found with the command printed under that line:
+
+```sh
+# it is on DeviantArt:
+nix run .#da-publish -- --data-dir <dir> --reconcile-attempt <attempt> --outcome scheduled [--url <deviation-url>]
+# it is absent:
+nix run .#da-publish -- --data-dir <dir> --reconcile-attempt <attempt> --outcome not-submitted
+```
+
+Retry the automation or follow the manual steps only after `--outcome not-submitted`.
+Never delete `.publicator/` receipts to unblock a run.
+
+**Busy.** `a publish batch or reconciliation is active` means another run holds the
+publisher lock: wait for it; do not publish by hand meanwhile.
+
+**Safe failure — manual fallback allowed.** `unknown: 0` and no `UNRESOLVED` line
+(e.g. `failed: 1`, or an error before any submission): nothing was submitted. Check
+DeviantArt for a leftover draft, finish the current publication with the manual
+steps below, then update `python/publicator_da/browser.py` to cover whatever tripped
+it (so the next worker run doesn't fall through).
 
 ## Values for the current publication
 
@@ -34,7 +59,7 @@ metadata-approved publication with an unpublished DeviantArt apparition in
 nix run <publicator.py>#echo-first -- --data-dir .
 ```
 
-## Manual fallback: finish in the #login Firefox, probe with the daemon
+## Manual fallback (safe failures only): finish in the #login Firefox, probe with the daemon
 
 ```sh
 nix run .#pw-daemon
@@ -47,11 +72,14 @@ login page. Use it to probe the DOM (find the label a step now times out on). Do
 steps below by hand in the real, signed-in Firefox: `nix run .#login` opens it on
 the `.deviantart-login/` profile.
 
-Daemon FIFO `/tmp/pw.cmd`, output `/tmp/pw.log`, screenshot `/tmp/pw.png`; scope
-has `page`, `context`, `p`. Send a command chunk, e.g.:
+On startup the daemon creates a fresh private `pw-XXXXXXXX` directory (mode 0700)
+in the system temp dir and prints its command FIFO (`.../pw.cmd`), output log
+(`.../pw.log`) and screenshot (`.../pw.png`) paths; it refuses to start if any of
+them already exists. Scope has `page`, `context`, `p`. Send a command chunk to the
+printed FIFO, e.g.:
 
 ```sh
-printf '%s' 'page.goto("https://www.deviantart.com")' > /tmp/pw.cmd
+printf '%s' 'page.goto("https://www.deviantart.com")' > <printed pw.cmd path>
 ```
 
 ### Steps
