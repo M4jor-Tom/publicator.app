@@ -5,10 +5,11 @@ use iced::{
     Background, Border, Color, ContentFit, Element, Font, Length, Theme, color, font,
     theme::Palette,
     widget::{
-        Button, Container, button, container, grid, image, pick_list, text, text_editor, text_input,
+        Button, Container, button, container, grid, image, pick_list, sensor, text, text_editor,
+        text_input,
     },
 };
-use std::{ops::Range, path::Path};
+use std::path::Path;
 
 pub const ACCENT: Color = color!(0x88aacc);
 const WARNING: Color = color!(0xe0a800);
@@ -43,54 +44,6 @@ pub fn theme() -> Theme {
     )
 }
 
-/// The last scrolled viewport of a tab's list.
-#[derive(Clone, Copy, Debug)]
-pub struct Viewport {
-    pub offset: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Default for Viewport {
-    /// The initial window's list area, until the list reports its own viewport.
-    fn default() -> Self {
-        Self {
-            offset: 0.0,
-            width: 1060.0,
-            height: 600.0,
-        }
-    }
-}
-
-impl From<iced::widget::scrollable::Viewport> for Viewport {
-    fn from(viewport: iced::widget::scrollable::Viewport) -> Self {
-        Self {
-            offset: viewport.absolute_offset().y,
-            width: viewport.bounds().width,
-            height: viewport.bounds().height,
-        }
-    }
-}
-
-/// Columns `cards` lays out at `width` (same formula as `grid::fluid`).
-pub fn columns(width: f32) -> usize {
-    (((width + GAP) / (CARD_WIDTH + GAP)).ceil() as usize).max(1)
-}
-
-/// Item indices visible in a `columns`-wide list of rows about `row_height` tall, plus one row.
-// ponytail: estimated row height; measure real rows if thumbnails visibly stall.
-pub fn visible_range(
-    viewport: Viewport,
-    columns: usize,
-    row_height: f32,
-    len: usize,
-) -> Range<usize> {
-    let first = (viewport.offset.max(0.0) / row_height) as usize;
-    let last =
-        ((viewport.offset.max(0.0) + viewport.height.max(0.0)) / row_height).ceil() as usize + 1;
-    (first * columns).min(len)..(last * columns).min(len)
-}
-
 /// Cards in a responsive grid, as many columns as fit.
 pub fn cards<'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     grid(children)
@@ -107,11 +60,14 @@ pub fn card<'a>(content: impl Into<Element<'a, Message>>) -> Container<'a, Messa
         .style(|_| boxed(color!(0x2a2a2a), Border::default().rounded(8)))
 }
 
-/// A thumbnail at most `height` tall, or the reason it is missing.
+/// A thumbnail at most `height` tall, or the reason it is missing. A pending placeholder
+/// reports, under preview `key`, when it comes within one thumbnail of the visible list: the
+/// rendered layout decides what loads, at any window size, row height or scroll jump.
 pub fn art<'a>(
     preview: Option<&Option<Result<std::path::PathBuf, String>>>,
     missing: bool,
     height: f32,
+    key: String,
 ) -> Element<'a, Message> {
     match preview {
         Some(Some(Ok(path))) => thumbnail(path, height),
@@ -119,8 +75,27 @@ pub fn art<'a>(
         Some(Some(Err(error))) => text(format!("Preview unavailable: {error}"))
             .color(MUTED)
             .into(),
-        _ => text("Loading preview…").color(MUTED).into(),
+        _ => placeholder(height, key),
     }
+}
+
+fn placeholder<'a>(height: f32, key: String) -> Element<'a, Message> {
+    let hidden = Message::PreviewShown {
+        key: key.clone(),
+        shown: false,
+    };
+    sensor(text("Loading preview…").color(MUTED))
+        .on_show({
+            let key = key.clone();
+            move |_| Message::PreviewShown {
+                key: key.clone(),
+                shown: true,
+            }
+        })
+        .on_hide(hidden)
+        .anticipate(height)
+        .key(key)
+        .into()
 }
 
 /// Like the web's `max-width: 100%; max-height`: scaled down to fit, never up.
@@ -287,36 +262,5 @@ pub fn select(_: &Theme, status: pick_list::Status) -> pick_list::Style {
             CONTROL
         }),
         border: Border::default().rounded(4).width(1).color(CONTROL_BORDER),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn at(offset: f32, width: f32, height: f32) -> Viewport {
-        Viewport {
-            offset,
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn visible_range_follows_grid_columns_and_clamps_to_the_list() {
-        assert_eq!(columns(300.0), 1);
-        assert_eq!(columns(1060.0), 3);
-        assert_eq!(columns(1900.0), 6);
-        // One column: rows 0..=2 visible, plus one.
-        assert_eq!(visible_range(at(0.0, 300.0, 600.0), 1, 300.0, 50), 0..3);
-        // Three columns, scrolled two rows down: rows 2..=4 plus one.
-        assert_eq!(visible_range(at(600.0, 1060.0, 600.0), 3, 300.0, 50), 6..15);
-        // A wider window after resize covers more items for the same rows.
-        assert_eq!(
-            visible_range(at(600.0, 1900.0, 600.0), 6, 300.0, 50),
-            12..30
-        );
-        // The last partial row clamps to the list length.
-        assert_eq!(visible_range(at(900.0, 1060.0, 600.0), 3, 300.0, 10), 9..10);
     }
 }

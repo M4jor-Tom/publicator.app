@@ -1,4 +1,4 @@
-use super::{App, Message, Tab, style};
+use super::{App, Message, style};
 use crate::{
     application::Application,
     images::{self, Candidate, Search},
@@ -85,16 +85,13 @@ pub fn pick_candidate(
 }
 
 const LIMITS: [usize; 5] = [0, 25, 50, 75, 100];
-const ROW_HEIGHT: f32 = 380.0;
+
+/// The key a candidate card's preview placeholder reports when it is on screen.
+pub fn preview_key(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
 
 pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
-    let viewport = app.viewport(Tab::Pick);
-    let visible = style::visible_range(
-        viewport,
-        style::columns(viewport.width),
-        ROW_HEIGHT,
-        app.candidates.len(),
-    );
     let cache = app.application.store().paths().data_dir.join(".thumbs");
     let capacity = 4usize.saturating_sub(
         app.previews
@@ -105,9 +102,10 @@ pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
     let candidates: Vec<_> = app
         .candidates
         .iter()
-        .skip(visible.start)
-        .take(visible.len())
-        .filter(|candidate| !app.previews.contains_key(&candidate.path))
+        .filter(|candidate| {
+            app.shown_previews.contains(&preview_key(&candidate.path))
+                && !app.previews.contains_key(&candidate.path)
+        })
         .take(capacity)
         .cloned()
         .collect();
@@ -153,6 +151,15 @@ pub(super) fn pick_task(app: &mut App, candidate: Candidate) -> Task<Message> {
         },
         Message::PickFinished,
     )
+}
+
+/// Keeps the candidates still offerable after a reload: on disk and not referenced by a
+/// publication (a pick or another tool may have claimed them since the search).
+pub(super) fn retain_offerable(candidates: &mut Vec<Candidate>, rows: &[serde_json::Value]) {
+    let references = images::References::new(rows);
+    candidates.retain(|candidate| {
+        candidate.path.exists() && !references.protects(&candidate.path, &candidate.sha512)
+    });
 }
 
 pub fn delete_candidate(
@@ -242,7 +249,8 @@ pub fn view(state: &App) -> Element<'_, Message> {
         content = content.push(
             container(
                 row![
-                    text(format!("Delete {}?", candidate.path.display())),
+                    // Wraps, so a long path never pushes the buttons out of the window.
+                    text(format!("Delete {}?", candidate.path.display())).width(Length::Fill),
                     button("Confirm delete").on_press(Message::ConfirmDelete),
                     button("Cancel").on_press(Message::CancelDelete)
                 ]
@@ -255,14 +263,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
         );
     }
     content = candidate_groups(state, content, controls.into());
-    scrollable(content)
-        .height(Length::Fill)
-        .on_scroll(|viewport| Message::Viewport(Tab::Pick, viewport.into()))
-        .into()
+    scrollable(content).height(Length::Fill).into()
 }
 
 /// The search controls lead the first grid, as the web page's first grid cell.
-// ponytail: lineage groups are separate grids; visible_range treats them as one list.
 fn candidate_groups<'a>(
     state: &'a App,
     mut content: iced::widget::Column<'a, Message>,
@@ -310,7 +314,7 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
     let preview = state.previews.get(&candidate.path);
     let missing = matches!(preview, Some(Some(Err(_)))) && !candidate.path.exists();
     let mut content = column![
-        style::art(preview, missing, 240.0),
+        style::art(preview, missing, 240.0, preview_key(&candidate.path)),
         text(
             candidate
                 .path

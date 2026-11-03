@@ -27,9 +27,6 @@ The original audit changed no application code. Publishing these documents fixes
 
 | File | Scope |
 |---|---|
-
-| [Native UI](native-ui.md) | Reproducible interactions and actual viewport geometry |
-| [Fixtures](fixtures.md) | Offline synthetic-data requirements beyond fake image filenames |
 | [Validation](validation.md) | Recorded commands/results, limits and future verification gates |
 
 ## Priority and evidence

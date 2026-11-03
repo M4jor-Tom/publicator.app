@@ -13,7 +13,7 @@
 
 Pick scans configured roots and supports a runtime subset. Candidate limits are Empty/0, 25, 50, 75, or 100; startup defaults to 25 and all configured `publicable` paths selected. The four workflow phases have distinct actions. UI actions call Rust application operations, which persist validated state. Refresh and restart reconstruct the workflow and history from disk.
 
-Thumbnails load lazily for the visible part of each list (grid columns follow the window width) and keep filling as previews finish; calendar events are compact chips whose artwork loads when expanded.
+Thumbnails load lazily: each pending placeholder reports when it comes within one thumbnail of the visible list (an Iced sensor on the rendered layout, so any row height, column count, resize or scroll jump loads exactly the cards on screen), at most four at a time, and loading keeps filling as previews finish; calendar events are compact chips whose artwork loads when expanded.
 
 Publish selection is separate from submission. Only registered platform cells are executable; completed sends remain locked and retries skip persisted successes. Calendar is read-only and navigates to the relevant workflow phase.
 

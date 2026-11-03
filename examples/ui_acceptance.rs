@@ -85,7 +85,9 @@ fn arg(name: &str) -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: ui_acceptance --fixture-dir DIR --scenario empty|history|mixed|reopen");
+    eprintln!(
+        "usage: ui_acceptance --fixture-dir DIR --scenario empty|history|mixed|reopen|publish|calendar|prompt-search|prompt-search-missing-archive|gallery"
+    );
     std::process::exit(2)
 }
 
@@ -245,6 +247,120 @@ fn prompt_search_missing_archive_fixture(dir: &Path) -> (Vec<Value>, Config) {
             ..Config::default()
         },
     )
+}
+
+/// Cards per long list in the `gallery` scenario: more than one viewport in every tab.
+const GALLERY_CARDS: usize = 32;
+/// Candidates in the gallery's second search root.
+const GALLERY_EXTRA: usize = 4;
+
+/// Every list holds more distinguishable cards than one viewport, with long prompt
+/// panels, long Unicode/newline/literal-markup metadata, plural options and named presets.
+/// `gallery-fixture-manifest.json` maps each basename to its solid colour for pixel identity.
+fn gallery_fixture(dir: &Path) -> (Vec<Value>, Config) {
+    let (art, more) = (dir.join("art"), dir.join("more"));
+    let archive = dir.join("prompt-archive");
+    for path in [&art, &more, &archive] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let prompt = (0..8)
+        .map(|line| format!("GALLERY PROMPT LINE {line} — <literal markup> & 雪 ünïcödé, long enough to wrap inside a card"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(archive.join("gallery.txt"), &prompt).unwrap();
+    initialize_prompt_archive(&archive, "Gallery Fixture", "gallery@example.invalid");
+    let prompts = PromptConfig {
+        repo: "prompt-archive".into(),
+        filename: r"(?P<lineage>[a-z]+)-[0-9]+_(?P<version>[0-9a-f]{40})\.png".into(),
+        version_hash: "sha1".into(),
+    };
+    let digest = PromptGrammar::compile(&prompts)
+        .unwrap()
+        .digest(prompt.as_bytes())
+        .unwrap();
+    let mut manifest = Vec::new();
+    // A second, smaller root lets Pick search a subset of the configured roots.
+    for index in 0..GALLERY_CARDS + GALLERY_EXTRA {
+        let (root, lineage) = if index < GALLERY_CARDS {
+            (&art, "gallery")
+        } else {
+            (&more, "more")
+        };
+        let (name, color) = (
+            format!("{lineage}-{index:02}_{digest}.png"),
+            gallery_color(index),
+        );
+        image(&root.join(&name), color);
+        manifest.push(json!({"basename": name, "rgb": color}));
+    }
+    let mut rows = Vec::new();
+    for (state, count) in [
+        ("PICKED", 12),
+        ("SCHEDULED", GALLERY_CARDS),
+        ("DESCRIBED", GALLERY_CARDS),
+        ("APPEARED", 4),
+    ] {
+        for _ in 0..count {
+            let color = gallery_color(manifest.len());
+            let mut row = row(20_000 + rows.len() as u64, state, color, &art);
+            gallery_metadata(&mut row, rows.len());
+            manifest.push(json!({"basename": row["files"][0]["basename"], "rgb": color}));
+            rows.push(row);
+        }
+    }
+    fs::write(
+        dir.join("gallery-fixture-manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut config = Config {
+        publicable: vec!["art".into(), "more".into()],
+        prompts: Some(prompts),
+        ..Config::default()
+    };
+    let profile = |name: &str, day: &str, hour: i64| {
+        toml::Value::Table(toml::Table::from_iter([
+            ("name".to_owned(), name.into()),
+            ("day".to_owned(), day.into()),
+            ("hour".to_owned(), hour.into()),
+        ]))
+    };
+    config.schedule.insert(
+        "profiles".into(),
+        toml::Value::Array(vec![
+            profile("Weekday evening", "wednesday", 18),
+            profile("Weekend morning", "saturday", 9),
+        ]),
+    );
+    (rows, config)
+}
+
+/// A 6×6×4 colour grid: neighbours differ by at least 40 in one channel and none is UI grey.
+fn gallery_color(index: usize) -> [u8; 3] {
+    const LEVELS: [u8; 6] = [40, 80, 120, 160, 200, 240];
+    const BLUES: [u8; 4] = [60, 110, 170, 230];
+    [
+        LEVELS[index % 6],
+        LEVELS[index / 6 % 6],
+        BLUES[index / 36 % 4],
+    ]
+}
+
+/// Odd rows keep generation markers; even rows carry long Unicode, newlines and literal markup
+/// (titles stay within the 50-character limit) and plural publish options.
+fn gallery_metadata(row: &mut Value, index: usize) {
+    if row["state"] == "SCHEDULED" && index % 2 == 1 {
+        return;
+    }
+    row["title"] = json!(format!("Gallery {index:03} <b>雪</b> & ünïcödé"));
+    row["description"] = json!(format!(
+        "Line one of {index} — 雪の夜 <i>not markup</i> &amp; **not bold**\nLine two keeps\ttabs and [brackets](not-a-link)\n\nLine four after a blank line — {}",
+        "long text ".repeat(12)
+    ));
+    if row["state"] == "DESCRIBED" {
+        row["apparitions"][0]["tiers"] = json!(["Fixture Basic", "Fixture Premium"]);
+        row["apparitions"][0]["galleries"] = json!(["Fixture Gallery B"]);
+    }
 }
 
 fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
@@ -549,18 +665,15 @@ fn initialize_publications_if_absent(path: &Path, rows: &[Value]) -> std::io::Re
 
 fn load_fixture_settings(dir: &Path) -> FixtureSettings {
     let path = dir.join("native-fixture.json");
-    let defaults = serde_json::to_vec_pretty(&FixtureSettings::default()).unwrap();
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => file.write_all(&defaults).expect("write fixture settings"),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create fixture settings: {error}"),
-    }
-    serde_json::from_slice(&fs::read(path).expect("read fixture settings"))
-        .expect("parse fixture settings")
+    let settings: FixtureSettings = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).expect("parse fixture settings"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FixtureSettings::default(),
+        Err(error) => panic!("read fixture settings: {error}"),
+    };
+    // The fake executables read this file directly: persist the defaults a partial file omits.
+    fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap())
+        .expect("write fixture settings");
+    settings
 }
 
 fn write_llmfit(path: &Path, settings_path: &Path) {
@@ -963,6 +1076,55 @@ mod tests {
     }
 
     #[test]
+    fn gallery_fixture_is_valid_with_distinct_colours_and_exact_prompts_beyond_a_viewport() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, mut config) = gallery_fixture(dir.path());
+        // main() takes plural options from the fixture settings.
+        let settings = FixtureSettings::default();
+        (config.tiers, config.galleries) = (settings.tiers, settings.galleries);
+        let store = Store::new(
+            Paths::resolve(Some(dir.path()), None).unwrap(),
+            config.clone(),
+        )
+        .unwrap();
+        store
+            .mutate(|saved| {
+                *saved = rows.clone();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(publicator::scheduling::profiles(&config).unwrap().len(), 2);
+        let manifest: Vec<Value> = serde_json::from_slice(
+            &fs::read(dir.path().join("gallery-fixture-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let colours: std::collections::HashSet<_> = manifest
+            .iter()
+            .map(|entry| entry["rgb"].to_string())
+            .collect();
+        assert_eq!(colours.len(), manifest.len());
+        assert_eq!(manifest.len(), GALLERY_CARDS + GALLERY_EXTRA + rows.len());
+        let archive =
+            publicator::prompts::PromptArchive::new(dir.path(), config.prompts.as_ref().unwrap())
+                .unwrap();
+        let candidates = publicator::images::find_candidates(
+            &store,
+            &publicator::images::Search {
+                limit: 100,
+                paths: config.publicable.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), GALLERY_CARDS + GALLERY_EXTRA);
+        for candidate in &candidates {
+            assert!(matches!(
+                archive.resolve_path(&candidate.path),
+                Ok(publicator::prompts::PromptMatch::Exact(_))
+            ));
+        }
+    }
+
+    #[test]
     fn executable_fixture_survives_a_concurrent_fork_before_exec() {
         use std::os::{
             fd::AsRawFd,
@@ -1335,6 +1497,8 @@ fn main() -> iced::Result {
         prompt_search_fixture(&dir)
     } else if scenario == "prompt-search-missing-archive" {
         prompt_search_missing_archive_fixture(&dir)
+    } else if scenario == "gallery" {
+        gallery_fixture(&dir)
     } else {
         let seed_scenario = if scenario == "reopen" {
             "mixed"

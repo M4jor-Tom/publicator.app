@@ -1,4 +1,4 @@
-use super::{App, Message, Tab, style};
+use super::{App, Message, style};
 use crate::{
     model::{Phase, phase},
     publish_journal::{AttemptState, AttemptStatus, ReconcileOutcome},
@@ -11,8 +11,6 @@ use iced::{
 use serde_json::Value;
 
 const SCROLL_ID: &str = "publish-publications";
-/// Estimated table row height, for lazy thumbnails.
-pub(super) const ROW_HEIGHT: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionState {
@@ -98,12 +96,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
     }
     content = publish_actions(state, content, &selections);
     content
-        .push(
-            scrollable(list)
-                .id(SCROLL_ID)
-                .height(Length::Fill)
-                .on_scroll(|viewport| Message::Viewport(Tab::Publish, viewport.into())),
-        )
+        .push(scrollable(list).id(SCROLL_ID).height(Length::Fill))
         .into()
 }
 
@@ -185,7 +178,7 @@ fn summary<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Message> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     column![
-        style::art(state.row_previews.get(uuid), false, 90.0),
+        style::art(state.row_previews.get(uuid), false, 90.0, uuid.to_owned()),
         text(title).font(style::BOLD),
         text(super::schedule::date_label(state, publication)).font(style::BOLD),
     ]

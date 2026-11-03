@@ -175,6 +175,19 @@
             '';
           }}/bin/quality";
         };
+        # Unattended native-window replay of the acceptance stories on a private Xvfb display
+        # (fake services only); scripts/native-ui-smoke.sh stays the supervised human tool.
+        native-acceptance = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "native-acceptance";
+            runtimeInputs = [ pkgs.git pkgs.nix ];
+            text = ''
+              cd "$(git rev-parse --show-toplevel)"
+              exec nix develop --command python3 scripts/native-ui-replay.py "$@"
+            '';
+          }}/bin/native-acceptance";
+        };
         # `ui` is the native Iced frontend; browser publishing remains a CLI worker.
         ui = {
           type = "app";

@@ -11,35 +11,19 @@ use serde_json::Value;
 
 const SCROLL_ID: &str = "describe-publications";
 
-const ROW_HEIGHT: f32 = 560.0;
-
-/// Publication thumbnails for the visible rows of the Schedule, Describe or Publish list;
+/// Publication thumbnails for the on-screen rows of the Schedule, Describe or Publish list;
 /// other tabs have no publication rows.
 pub(super) fn preview_tasks(state: &mut App, tab: Tab) -> Task<Message> {
     let Some(rows) = state.publications.as_ref() else {
         return Task::none();
     };
     let target = state.revealed_publication();
-    let viewport = state.viewport(tab);
-    let (rows, columns, row_height) = match tab {
-        Tab::Schedule => (
-            super::schedule::ordered_rows(rows, target),
-            style::columns(viewport.width),
-            super::schedule::ROW_HEIGHT,
-        ),
-        Tab::Publish => (
-            super::publish::ordered_rows(rows, target),
-            1,
-            super::publish::ROW_HEIGHT,
-        ),
-        Tab::Describe => (
-            ordered_rows(rows, target),
-            style::columns(viewport.width),
-            ROW_HEIGHT,
-        ),
+    let rows = match tab {
+        Tab::Schedule => super::schedule::ordered_rows(rows, target),
+        Tab::Publish => super::publish::ordered_rows(rows, target),
+        Tab::Describe => ordered_rows(rows, target),
         Tab::Pick | Tab::Calendar => return Task::none(),
     };
-    let visible = style::visible_range(viewport, columns, row_height, rows.len());
     let capacity = 4usize.saturating_sub(
         state
             .row_previews
@@ -49,11 +33,9 @@ pub(super) fn preview_tasks(state: &mut App, tab: Tab) -> Task<Message> {
     );
     let records: Vec<_> = rows
         .into_iter()
-        .skip(visible.start)
-        .take(visible.len())
         .filter_map(|row| {
             let uuid = row.get("uuid")?.as_str()?.to_owned();
-            if state.row_previews.contains_key(&uuid) {
+            if !state.shown_previews.contains(&uuid) || state.row_previews.contains_key(&uuid) {
                 return None;
             }
             let (basename, sha) = preview_identity(row)?;
@@ -145,14 +127,14 @@ pub fn view(state: &App) -> Element<'_, Message> {
         scrollable(style::cards(cards))
             .id(SCROLL_ID)
             .height(Length::Fill)
-            .on_scroll(|viewport| Message::Viewport(Tab::Describe, viewport.into()))
     ]
     .spacing(12);
     if state.local_install_consent_pending() {
         content = content.push(
             container(
                 row![
-                    text(format!("Install {} and generate?", state.model.ollama_name)),
+                    text(format!("Install {} and generate?", state.model.ollama_name))
+                        .width(Length::Fill),
                     button("Confirm install and generate").on_press(Message::ConfirmLocalInstall),
                     button("Cancel").on_press(Message::CancelLocalInstall),
                 ]
@@ -203,7 +185,7 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
     let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0),
+        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);

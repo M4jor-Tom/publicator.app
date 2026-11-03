@@ -16,6 +16,7 @@ Calendar projects each apparition as a distinct event, falling back to publicati
 ## Invariants
 
 - Date bucketing uses the configured schedule timezone.
+- A day shows every event: its cell keeps the web's 78 px as a minimum and grows with its events and any opened one.
 - Every apparition is retained with its platform, delivery state and actual URL; title/date remain publication-shared.
 - Preview/cache access is limited to known artwork; missing files do not fabricate previews.
 - Prompt content is shared with the Pick view; a nearest match is never represented as exact prompt text.

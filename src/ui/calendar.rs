@@ -8,7 +8,7 @@ use crate::{
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use iced::{
     Element, Length, Task,
-    widget::{button, column, container, row, scrollable, text},
+    widget::{button, column, container, row, scrollable, space, text},
 };
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -113,24 +113,17 @@ fn month_view<'a>(
         let date = month.with_day(day).unwrap();
         let mut cell =
             column![text(day.to_string()).size(11).color(iced::color!(0x777777))].spacing(2);
-        let mut expanded = false;
         for event in events
             .iter()
             .filter(|event| event_date(event, zone) == Some(date))
         {
-            expanded |= state.calendar_expanded.contains(&event_key(event));
             cell = cell.push(event_view(state, event, now, zone));
         }
-        // ponytail: fixed day height like the web's 78px; expanded events stretch only their own cell.
-        let height = if expanded {
-            Length::Shrink
-        } else {
-            Length::Fixed(78.0)
-        };
+        // Like the web's 78px table cell: a minimum that grows to show every event.
+        // ponytail: only the day's own cell grows, not its whole week row; equalize if that reads badly.
         week = week.push(
-            container(cell)
+            container(row![space().height(74.0), cell])
                 .width(Length::Fill)
-                .height(height)
                 .padding(2)
                 .style(style::day(Some(date) == today)),
         );

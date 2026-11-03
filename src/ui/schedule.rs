@@ -1,4 +1,4 @@
-use super::{App, Message, Tab, style};
+use super::{App, Message, style};
 use crate::{
     application::Application,
     error::Result,
@@ -15,8 +15,6 @@ use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCROLL_ID: &str = "schedule-publications";
-/// Estimated card row height, for lazy thumbnails.
-pub(super) const ROW_HEIGHT: f32 = 440.0;
 
 pub fn edit_date(application: &Application, uuid: &str, edit: DateEdit, now: i64) -> Result<()> {
     application.mutate(Some(uuid), |store| {
@@ -166,8 +164,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         text("Schedule dates are shown in the configured timezone.").color(style::MUTED),
         scrollable(style::cards(cards))
             .id(SCROLL_ID)
-            .height(Length::Fill)
-            .on_scroll(|viewport| Message::Viewport(Tab::Schedule, viewport.into())),
+            .height(Length::Fill),
     ]
     .spacing(8)
     .into()
@@ -180,7 +177,7 @@ fn scheduled_card<'a>(
     title: &str,
 ) -> Element<'a, Message> {
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0),
+        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
         text(format!("{title} — {}", date_label(state, row))),
     ]
     .spacing(8);
@@ -200,7 +197,7 @@ fn picked_card<'a>(
 ) -> Element<'a, Message> {
     let (date, time) = date_parts(state, row);
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0),
+        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
         text(format!("{title} — {}", date_label(state, row))),
     ]
     .spacing(8);

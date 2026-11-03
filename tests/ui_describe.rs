@@ -6,18 +6,31 @@ use iced::Element;
 use publicator::{
     application::Application,
     metadata::{Endpoints, MetadataClient, Source, VISION_MODELS, available_sources},
-    ui::{App, Message, Tab, UiOptions, describe, style::Viewport},
+    ui::{App, Message, Tab, UiOptions, describe},
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
-/// A one-column list viewport, so each card is its own row.
-fn column_at(offset: f32, height: f32) -> Viewport {
-    Viewport {
-        offset,
-        width: 300.0,
-        height,
+/// The placeholder sensor's report that the preview `key` is (`shown`) or is not on screen.
+fn shown(key: impl Into<String>, shown: bool) -> Message {
+    Message::PreviewShown {
+        key: key.into(),
+        shown,
     }
+}
+
+/// Cached thumbnail file names.
+fn thumbs(f: &Fixture) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(f.path(".thumbs"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
@@ -752,8 +765,10 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
     assert_eq!(saved[1]["state"], "SCHEDULED");
 }
 
+/// What loads follows the placeholders actually on screen, not estimated row heights:
+/// the last card of a long list loads as soon as it is shown, and nothing else does.
 #[tokio::test]
-async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_cards() {
+async fn pick_previews_load_exactly_the_shown_placeholders_anywhere_in_the_list() {
     let config = publicator::config::Config {
         publicable: vec!["images".into()],
         ..publicator::config::Config::default()
@@ -780,65 +795,66 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
         },
     );
     let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
-    let _ = app.update(Message::Viewport(Tab::Pick, column_at(0.0, 700.0)));
     let candidates =
         publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
     assert_eq!(candidates.len(), 10);
     let task = app.update(Message::SearchFinished {
         request_id: 0,
-        result: Ok(candidates),
+        result: Ok(candidates.clone()),
     });
     common::ui::settle(&mut app, task).await;
-    let cache = f.path(".thumbs");
-    let initial = std::fs::read_dir(&cache).unwrap().count();
-    assert!(initial < 10);
-    let task = app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0)));
+    assert!(thumbs(&f).is_empty(), "nothing is on screen yet");
+    let thumb = |candidate: &publicator::images::Candidate| {
+        publicator::images::thumb_name(&candidate.path, &candidate.sha512).unwrap()
+    };
+    let key = |candidate: &publicator::images::Candidate| {
+        publicator::ui::pick::preview_key(&candidate.path)
+    };
+    let (last, hidden) = (&candidates[9], &candidates[4]);
+    let _ = app.update(shown(key(hidden), true));
+    let _ = app.update(shown(key(hidden), false));
+    let task = app.update(shown(key(last), true));
     common::ui::settle(&mut app, task).await;
-    let after_scroll = std::fs::read_dir(&cache).unwrap().count();
-    assert!(after_scroll > initial);
+    assert_eq!(thumbs(&f), [thumb(last)]);
     assert!(
-        common::ui::run(app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0))))
+        common::ui::run(app.update(shown(key(last), true)))
             .await
             .messages
-            .is_empty()
+            .is_empty(),
+        "a loaded preview is not prepared again"
     );
-    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), after_scroll);
 }
 
 #[tokio::test]
-async fn describe_previews_share_lazy_scroll_boundary() {
+async fn row_previews_load_the_shown_rows_of_the_active_tab() {
     let f = Fixture::new();
     let mut rows = Vec::new();
+    let mut digests = Vec::new();
     for n in 1..=10 {
         let image = f.image(&format!("{n}.png"), 3 + n as u32, 3);
-        assert!(image.exists());
         let mut publication = row(n, "SCHEDULED");
-        let digest = openssl::sha::sha512(&std::fs::read(image).unwrap())
+        let digest = openssl::sha::sha512(&std::fs::read(&image).unwrap())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         publication["files"][0]["sha512sum"] = json!(digest);
+        digests.push(publicator::images::thumb_name(&image, &digest).unwrap());
         rows.push(publication);
     }
     f.write(json!(rows));
-    assert_eq!(f.store.read().unwrap().len(), 10);
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
-    let task = app.update(Message::Viewport(Tab::Describe, column_at(0.0, 600.0)));
+    let task = app.update(Message::Navigate(Tab::Describe));
     common::ui::settle(&mut app, task).await;
-    let cache = f.path(".thumbs");
-    let initial = std::fs::read_dir(&cache).unwrap().count();
-    assert!(initial < 10);
-    let task = app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0)));
+    assert!(thumbs(&f).is_empty(), "nothing is on screen yet");
+    let task = app.update(shown(id(10), true));
     common::ui::settle(&mut app, task).await;
-    let after_scroll = std::fs::read_dir(&cache).unwrap().count();
-    assert!(after_scroll > initial);
+    assert_eq!(thumbs(&f), [digests[9].clone()]);
     assert!(
-        common::ui::run(app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0))))
+        common::ui::run(app.update(shown(id(10), true)))
             .await
             .messages
             .is_empty()
     );
-    assert_eq!(std::fs::read_dir(cache).unwrap().count(), after_scroll);
 }
 
 #[tokio::test]

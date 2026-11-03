@@ -1662,6 +1662,15 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
         Some(PromptMatch::Unknown(_))
     ));
     let _: iced::Element<'_, Message> = publicator::ui::pick::view(&app);
+    // Only an on-screen placeholder loads its preview: the exact candidate's.
+    common::ui::send(
+        &mut app,
+        Message::PreviewShown {
+            key: publicator::ui::pick::preview_key(&exact_path),
+            shown: true,
+        },
+    )
+    .await;
 
     let calendar_messages = common::ui::send(&mut app, Message::Navigate(Tab::Calendar)).await;
     assert!(calendar_messages.messages.iter().any(|message| matches!(message,

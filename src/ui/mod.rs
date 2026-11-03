@@ -160,7 +160,11 @@ pub enum Message {
         source: std::path::PathBuf,
         result: Result<std::path::PathBuf, String>,
     },
-    Viewport(Tab, style::Viewport),
+    /// A thumbnail placeholder entered (`shown`) or left the visible part of its list.
+    PreviewShown {
+        key: String,
+        shown: bool,
+    },
     RowPreviewFinished {
         uuid: String,
         result: Result<std::path::PathBuf, String>,
@@ -318,7 +322,8 @@ pub struct App {
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
     row_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
-    viewports: HashMap<Tab, style::Viewport>,
+    /// Preview keys (candidate paths, row UUIDs) whose placeholder is on screen.
+    shown_previews: HashSet<String>,
     description_editors: HashMap<String, iced::widget::text_editor::Content>,
 
     pending_delete: Option<Candidate>,
@@ -412,7 +417,7 @@ impl App {
             candidates: Vec::new(),
             previews: HashMap::new(),
             row_previews: HashMap::new(),
-            viewports: HashMap::new(),
+            shown_previews: HashSet::new(),
             description_editors: HashMap::new(),
             pending_delete: None,
             custom_dates: HashMap::new(),
@@ -501,10 +506,7 @@ impl App {
     pub fn revealed_publication(&self) -> Option<&str> {
         self.revealed_publication.as_deref()
     }
-    fn viewport(&self, tab: Tab) -> style::Viewport {
-        self.viewports.get(&tab).copied().unwrap_or_default()
-    }
-    /// Thumbnails for the visible part of `tab`'s list (the calendar loads on expand).
+    /// Thumbnails for the on-screen part of `tab`'s list (the calendar loads on expand).
     fn preview_tasks(&mut self, tab: Tab) -> Task<Message> {
         match tab {
             Tab::Pick => pick::preview_tasks(self),
@@ -732,7 +734,7 @@ impl App {
             | Message::PromptSearchFinished { .. }
             | Message::PromptMatchesFinished(..) => self.update_search_results(message),
             Message::PreviewFinished { .. }
-            | Message::Viewport(..)
+            | Message::PreviewShown { .. }
             | Message::RowPreviewFinished { .. }
             | Message::CalendarPrepared(..)
             | Message::CalendarPreviewFinished { .. }
@@ -1150,6 +1152,15 @@ impl App {
         request_id == self.search_request_id && self.search_authorized
     }
 
+    fn on_preview_shown(&mut self, key: String, shown: bool) -> Task<Message> {
+        if !shown {
+            self.shown_previews.remove(&key);
+            return Task::none();
+        }
+        self.shown_previews.insert(key);
+        self.preview_tasks(self.active_tab)
+    }
+
     fn update_previews(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::CalendarPrepared(_, Ok(prepared)) => {
@@ -1175,15 +1186,12 @@ impl App {
                 }
                 return calendar::preview_tasks(self);
             }
-            // Each finished preview frees a slot: keep filling the visible range.
+            // Each finished preview frees a slot: keep filling the on-screen placeholders.
             Message::PreviewFinished { source, result } => {
                 self.previews.insert(source, Some(result));
                 return pick::preview_tasks(self);
             }
-            Message::Viewport(tab, viewport) => {
-                self.viewports.insert(tab, viewport);
-                return self.preview_tasks(tab);
-            }
+            Message::PreviewShown { key, shown } => return self.on_preview_shown(key, shown),
             Message::RowPreviewFinished { uuid, result } => {
                 self.row_previews.insert(uuid, Some(result));
                 return describe::preview_tasks(self, self.active_tab);
@@ -1290,6 +1298,7 @@ impl App {
 
     fn on_load_finished_loaded(&mut self, rows: Vec<Value>) -> Task<Message> {
         self.rebase_drafts(&rows);
+        pick::retain_offerable(&mut self.candidates, &rows);
         self.description_editors.retain(|uuid, _| {
             rows.iter()
                 .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
@@ -2003,6 +2012,8 @@ impl App {
             self.publish_keyboard_focus = None;
         }
         self.active_tab = tab;
+        // The new tab's placeholders report themselves; the old tab's never report hiding.
+        self.shown_previews.clear();
         self.revealed_publication = reveal.clone();
         let mut tasks = vec![match tab {
             Tab::Calendar => calendar::prepare_task(self),
@@ -3096,6 +3107,35 @@ mod tests {
         }
     }
 
+    /// A reload drops candidates it shows were picked (now referenced) or deleted, so the
+    /// Pick list never offers them again.
+    #[test]
+    fn reload_removes_picked_and_deleted_candidates_from_the_pick_list() {
+        let (mut app, root) = app();
+        let candidate = |name: &str, bytes: &[u8]| {
+            let path = root.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            Candidate {
+                sha512: crate::images::file_sha512(&path).unwrap(),
+                path,
+            }
+        };
+        let (picked, deleted, kept) = (
+            candidate("picked.png", b"picked"),
+            candidate("deleted.png", b"deleted"),
+            candidate("kept.png", b"kept"),
+        );
+        app.candidates = vec![picked.clone(), deleted.clone(), kept.clone()];
+        std::fs::remove_file(&deleted.path).unwrap();
+        let row = serde_json::json!({
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "state": "PICKED",
+            "files": [{"basename": "elsewhere.png", "sha512sum": picked.sha512}],
+        });
+        let _ = app.update(Message::LoadFinished(app.load_generation, Ok(vec![row])));
+        assert_eq!(app.candidates, [kept]);
+    }
+
     #[test]
     fn reverse_search_completions_cannot_restore_stale_candidates_or_errors() {
         let (mut app, root) = app();
@@ -3609,6 +3649,8 @@ done
             path: root.path().join(format!("prompt.txt_{digest}.png")),
             sha512: "0".repeat(128),
         };
+        // A reload keeps only candidates still on disk.
+        std::fs::write(&candidate.path, b"candidate").unwrap();
         let config = Config {
             prompts: Some(archive_config()),
             ..Config::default()
@@ -3790,6 +3832,47 @@ done
         for id in [&one, &two, &three] {
             assert_eq!(shown(&app, id), stored(&app, id));
         }
+    }
+
+    /// Whether a task ends the application, as `close_now` does.
+    async fn exits(task: Task<Message>) -> bool {
+        let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+            return false;
+        };
+        while let Some(action) = actions.next().await {
+            if matches!(action, Action::Exit) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_after_a_failed_then_retried_save_saves_the_newer_edit_before_exiting() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let mut app = loaded_offline_app(root.path(), &[art_row(root.path(), 1)]).await;
+        let id = uuid(1);
+        let writable = |mode| {
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        edit(&mut app, &id, Field::Title, "Kept through failure");
+        writable(0o555);
+        send(&mut app, Message::SaveDraft(id.clone())).await;
+        writable(0o755);
+        assert!(app.result.as_deref().unwrap().starts_with("Save failed"));
+        assert_eq!(stored(&app, &id).0, "Title");
+        send(&mut app, Message::RetrySave).await;
+        assert_eq!(stored(&app, &id).0, "Kept through failure");
+
+        edit(&mut app, &id, Field::Title, "Saved by close");
+        let save = app.update(Message::CloseRequested);
+        assert!(app.pending_close);
+        let finished = run_task(save).await;
+        assert_eq!(stored(&app, &id).0, "Saved by close");
+        assert_eq!(finished.len(), 1);
+        let close = app.update(finished.into_iter().next().unwrap());
+        assert!(exits(close).await, "close waits for the save, then exits");
     }
 
     fn calendar_row(basename: &str) -> Value {
