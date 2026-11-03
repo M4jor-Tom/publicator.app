@@ -7,10 +7,8 @@
 mod common;
 use common::{Fixture, id, row};
 use publicator::{
-    application::Application,
     config::Config,
     error::{Error, Result},
-    metadata::{Endpoints, MetadataClient},
     publish_journal::{PublishJournal, ReconcileOutcome},
     publish_protocol::read_frame,
     publishing::{PublishReport, PublishRequest, Publisher},
@@ -96,16 +94,8 @@ fn with_image(f: &Fixture) -> Value {
 }
 
 async fn publish(f: &Fixture, worker: &Path) -> Result<PublishReport> {
-    let metadata = MetadataClient::new(
-        reqwest::Client::new(),
-        Endpoints {
-            openrouter: "http://127.0.0.1:1".into(),
-            ollama: "http://127.0.0.1:1".into(),
-        },
-        "llmfit".into(),
-    );
     let skill = PathBuf::from(REPO).join("skills/publish-deviantart/SKILL.md");
-    let app = Application::new(Arc::new(f.store.clone()), metadata)
+    let app = common::offline_app(Arc::new(f.store.clone()))
         .with_publisher(Publisher::new(worker.to_owned(), skill));
     let request = PublishRequest {
         uuids: None,

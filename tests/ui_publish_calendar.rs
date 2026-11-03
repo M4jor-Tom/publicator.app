@@ -192,26 +192,14 @@ fn publishing_ui_app(
     iced::Task<publicator::ui::Message>,
 ) {
     use publicator::{
-        application::Application,
-        metadata::{Endpoints, MetadataClient},
         publishing::Publisher,
         ui::{App, UiOptions},
     };
     use std::{sync::Arc, time::Duration};
     let store = Arc::new(f.store.clone());
     let application = Arc::new(
-        Application::new(
-            store.clone(),
-            MetadataClient::new(
-                reqwest::Client::new(),
-                Endpoints {
-                    openrouter: "http://127.0.0.1:1".into(),
-                    ollama: "http://127.0.0.1:1".into(),
-                },
-                "llmfit".into(),
-            ),
-        )
-        .with_publisher(Publisher::new(worker.to_owned(), f.path("skill.md"))),
+        common::offline_app(store.clone())
+            .with_publisher(Publisher::new(worker.to_owned(), f.path("skill.md"))),
     );
     let (app, init) = App::from_application(
         application,
@@ -1563,7 +1551,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
         prompts::PromptMatch,
         ui::{App, Message, Tab, UiOptions},
     };
-    use std::{process::Command, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     let config = PromptConfig {
         repo: "prompt-archive".into(),
@@ -1577,24 +1565,8 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     });
     let repo = f.path("prompt-archive");
     std::fs::create_dir_all(repo.join("archive")).unwrap();
-    // Inherited repository variables (a Git hook's GIT_DIR, ...) never redirect these commits.
-    let git = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    };
+    let git = |args: &[&str]| common::git::git(&repo, args);
     git(&["init", "-q"]);
-    git(&["config", "user.name", "Fixture"]);
-    git(&["config", "user.email", "fixture@example.invalid"]);
     std::fs::write(repo.join("archive/lineage"), "exact <prompt>\nline two").unwrap();
     git(&["add", "--", "archive/lineage"]);
     git(&["commit", "-qm", "archive prompt"]);
@@ -1608,14 +1580,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     let nearest_path = art.join(format!("lineage_{}.png", "f".repeat(40)));
     let unknown_path = art.join(format!("unknown_{}.png", "e".repeat(40)));
     for path in [&exact_path, &nearest_path, &unknown_path] {
-        assert!(
-            Command::new("magick")
-                .args(["-size", "4x3", "xc:white"])
-                .arg(path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        common::solid_image(path, "white", 4, 3);
     }
     let exact_basename = exact_path.file_name().unwrap().to_str().unwrap().to_owned();
     f.write(serde_json::json!([

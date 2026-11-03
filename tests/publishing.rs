@@ -2,7 +2,6 @@ mod common;
 use common::{Fixture, row};
 use publicator::{
     application::Application,
-    metadata::{Endpoints, MetadataClient},
     publishing::{PublishRequest, Publisher},
 };
 use serde_json::json;
@@ -26,23 +25,10 @@ fn app_with_timezone(f: &Fixture, timezone: Option<&str>) -> Application {
             .schedule
             .insert("timezone".into(), toml::Value::String(timezone.into()));
     }
-    Application::new(
-        Arc::new(
-            publicator::store::Store::new(
-                publicator::config::Paths::resolve(Some(f.root.path()), None).unwrap(),
-                config,
-            )
-            .unwrap(),
-        ),
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints {
-                openrouter: "http://127.0.0.1:1".into(),
-                ollama: "http://127.0.0.1:1".into(),
-            },
-            "llmfit".into(),
-        ),
-    )
+    let paths = publicator::config::Paths::resolve(Some(f.root.path()), None).unwrap();
+    common::offline_app(Arc::new(
+        publicator::store::Store::new(paths, config).unwrap(),
+    ))
 }
 #[tokio::test]
 async fn historical_only_publications_do_not_start_worker() {
@@ -893,15 +879,7 @@ async fn another_process_publisher_lock_prevents_worker_start() {
     let f = configured_fixture();
     let ready = f.path("lock-ready");
     let release = f.path("lock-release");
-    /// Kills and reaps the lock holder even when an assertion fails first.
-    struct Reaped(std::process::Child);
-    impl Drop for Reaped {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut holder = Reaped(
+    let mut holder = common::Reaped(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "publisher_lock_holder_child", "--nocapture"])
             .env("PUBLICATOR_PUBLISH_LOCK_ROOT", f.root.path())

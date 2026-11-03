@@ -20,3 +20,10 @@ pub mod workflow;
 #[cfg(test)]
 #[path = "../tests/common/executable.rs"]
 mod executable_fixture;
+#[cfg(test)]
+#[path = "../tests/common/git.rs"]
+mod git_fixture;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/common/process.rs"]
+mod process_fixture;

@@ -1,6 +1,6 @@
 mod common;
 use common::http::{Reply, Server};
-use common::{Fixture, id, row};
+use common::{Fixture, eventually, id, row, run_child_test, running, with_markers};
 use publicator::{
     application::Application,
     config::{Config, Paths},
@@ -27,27 +27,17 @@ fn request(source: Source) -> GenerationRequest {
         install_missing: false,
     }
 }
-fn reply(path: &str, body: serde_json::Value) -> Reply {
-    Reply {
-        path: path.into(),
-        status: 200,
-        body: body.to_string(),
-    }
-}
 /// Each record's OpenRouter failure: the selected model answers 500, then the rescue catalogue does.
 fn provider_failures(records: usize) -> Vec<Reply> {
-    let failure = |path: &str| Reply {
-        path: path.into(),
-        status: 500,
-        body: "fixture failure".into(),
-    };
+    let failure = |path: &str| Reply::new(path, 500, "fixture failure");
     (0..records)
         .flat_map(|_| [failure("/chat/completions"), failure("/models")])
         .collect()
 }
 fn completion(title: &str) -> Reply {
-    reply(
+    Reply::new(
         "/chat/completions",
+        200,
         json!({"choices":[{"message":{"content":content(title)}}]}),
     )
 }
@@ -90,9 +80,7 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
     let json_path = external.path().join("rows.json");
 
     let make_row = |gallery: &str| {
-        let mut publication = row(1, "SCHEDULED");
-        publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+        let mut publication = with_markers(row(1, "SCHEDULED"));
         publication["files"][0]["basename"] = json!("art.png");
         publication["files"][0]["sha512sum"] =
             json!(publicator::images::file_sha512(&f.path("art.png")).unwrap());
@@ -105,8 +93,9 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
     let allowed_paths = Paths::resolve(Some(f.root.path()), Some(&json_path)).unwrap();
     let allowed_store = Store::new(allowed_paths, config.clone()).unwrap();
     std::fs::write(&json_path, json!([make_row("Allowed")]).to_string()).unwrap();
-    let server = Server::start(vec![reply(
+    let server = Server::start(vec![Reply::new(
         "/chat/completions",
+        200,
         json!({"choices":[{"message":{"content":content("Allowed title")}}]}),
     )]);
     let allowed_app = Application::new(Arc::new(allowed_store), client(server.url().to_owned()));
@@ -166,10 +155,7 @@ async fn empty_local_marked_batch_is_noop_without_model_or_service_setup() {
 async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    f.write(json!([publication]));
+    f.write(json!([with_markers(row(1, "SCHEDULED"))]));
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
@@ -217,11 +203,7 @@ async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
 async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_work() {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
-    let (server, app, task, release_tx) = paused_generation(&f, common::http::Reply {
-        path: "/chat/completions".into(),
-        status: 200,
-        body: json!({"choices":[{"message":{"content":json!({"title":"Generated title","description":"A generated description."}).to_string()}}]}).to_string(),
-    })
+    let (server, app, task, release_tx) = paused_generation(&f, Reply::new("/chat/completions", 200, json!({"choices":[{"message":{"content":json!({"title":"Generated title","description":"A generated description."}).to_string()}}]})))
     .await;
     assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
     assert!(
@@ -242,23 +224,21 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        let mut publication = f.art_row(n, "SCHEDULED");
-        publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        rows.push(publication);
+        rows.push(f.marked_row(n));
     }
     rows[2]["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
     rows[2]["description"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
     f.write(json!(rows));
     let server = Server::start(vec![
-        Reply {
-            path: "/chat/completions".into(),
-            status: 500,
-            body: json!({"error":{"message":"fixture failure"}}).to_string(),
-        },
-        reply("/models", json!({"data":[]})),
-        reply(
+        Reply::new(
             "/chat/completions",
+            500,
+            json!({"error":{"message":"fixture failure"}}),
+        ),
+        Reply::new("/models", 200, json!({"data":[]})),
+        Reply::new(
+            "/chat/completions",
+            200,
             json!({"choices":[{"message":{"content":content("Generated")}}]}),
         ),
     ]);
@@ -298,10 +278,7 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        let mut publication = f.art_row(n, "SCHEDULED");
-        publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        rows.push(publication);
+        rows.push(f.marked_row(n));
     }
     f.write(json!(rows));
     // The second (failing) record's request is held until the first success is on disk.
@@ -362,24 +339,28 @@ async fn successful_batches_save_in_provider_order() {
             expected
                 .iter()
                 .map(|n| {
-                    reply(
+                    Reply::new(
                         "/chat/completions",
+                        200,
                         json!({"choices":[{"message":{"content":content(&format!("title-{n}"))}}]}),
                     )
                 })
                 .collect()
         } else {
-            let mut replies = vec![reply(
+            let mut replies = vec![Reply::new(
                 "/api/tags",
+                200,
                 json!({"models":[{"name":VISION_MODELS[0].ollama_name}]}),
             )];
             for n in &expected {
-                replies.push(reply(
+                replies.push(Reply::new(
                     "/api/tags",
+                    200,
                     json!({"models":[{"name":VISION_MODELS[0].ollama_name}]}),
                 ));
-                replies.push(reply(
+                replies.push(Reply::new(
                     "/api/chat",
+                    200,
                     json!({"message":{"content":content(&format!("title-{n}"))}}),
                 ));
             }
@@ -571,19 +552,22 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
         {"id":"google/model-c:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}}
     ]});
     let success = |title: &str| {
-        reply(
+        Reply::new(
             "/chat/completions",
+            200,
             json!({"choices":[{"message":{"content":content(title)}}]}),
         )
     };
-    let failed = || Reply {
-        path: "/chat/completions".into(),
-        status: 500,
-        body: json!({"error":{"message":"temporary"}}).to_string(),
+    let failed = || {
+        Reply::new(
+            "/chat/completions",
+            500,
+            json!({"error":{"message":"temporary"}}),
+        )
     };
     let server = Server::start(vec![
         failed(),
-        reply("/models", catalog.clone()),
+        Reply::new("/models", 200, catalog.clone()),
         success("one"),
         failed(),
         success("two"),
@@ -613,13 +597,6 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
     );
 }
 
-fn generated_reply() -> Reply {
-    reply(
-        "/chat/completions",
-        json!({"choices":[{"message":{"content":content("Generated")}}]}),
-    )
-}
-
 #[tokio::test]
 async fn changed_artwork_bytes_make_no_provider_call_and_save_nothing() {
     let f = Fixture::new();
@@ -629,7 +606,7 @@ async fn changed_artwork_bytes_make_no_provider_call_and_save_nothing() {
     f.write(json!([publication]));
     f.colored("1.png", "blue");
     let before = std::fs::read(&f.store.paths().json).unwrap();
-    let server = Server::start(vec![generated_reply()]);
+    let server = Server::start(vec![completion("Generated")]);
     let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
 
     let error = app
@@ -667,7 +644,7 @@ async fn duplicate_basenames_resolve_to_the_recorded_hash_in_any_directory_order
         let mut publication = row(1, "SCHEDULED");
         publication["files"][0]["sha512sum"] = json!(red_hash);
         f.write(json!([publication]));
-        let server = Server::start(vec![generated_reply()]);
+        let server = Server::start(vec![completion("Generated")]);
         let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
 
         app.generate_one(&id(1), request(Source::OpenRouter))
@@ -732,11 +709,12 @@ async fn complete_after_newer_edit(reply: Reply) -> (serde_json::Value, bool) {
 
 #[tokio::test]
 async fn single_generation_completion_keeps_fields_saved_by_another_writer() {
-    let malformed = reply(
+    let malformed = Reply::new(
         "/chat/completions",
+        200,
         json!({"choices":[{"message":{"content":"not a metadata object"}}]}),
     );
-    for (reply, succeeded) in [(generated_reply(), true), (malformed, false)] {
+    for (reply, succeeded) in [(completion("Generated"), true), (malformed, false)] {
         let (saved, outcome) = complete_after_newer_edit(reply).await;
         assert_eq!(outcome, succeeded);
         assert_eq!(saved["title"], "Newer title");
@@ -749,26 +727,6 @@ async fn single_generation_completion_keeps_fields_saved_by_another_writer() {
 }
 
 const STALLED_TOOL_DIR: &str = "PUBLICATOR_TEST_STALLED_TOOL_DIR";
-
-/// True once `condition` holds, polling until `limit` elapses.
-fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + limit;
-    while !condition() {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    true
-}
-
-/// Whether `pid` is a live process, neither reaped nor a zombie.
-fn running(pid: &str) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat.rsplit(')').next().unwrap_or("").trim_start();
-        !state.starts_with(['Z', 'X'])
-    })
-}
 
 /// The parent is a watchdog: only its child test process gets a PATH whose `identify` records
 /// its PID and a descendant's, then blocks. Whatever outlives the child is killed and fails.
@@ -788,33 +746,29 @@ async fn stalled_image_preparation_fails_within_the_generation_deadline() {
         std::iter::once(bin.path().to_owned()).chain(std::env::split_paths(&inherited)),
     )
     .unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
+    let child = std::panic::catch_unwind(|| {
+        run_child_test(
             "stalled_image_preparation_fails_within_the_generation_deadline",
-            "--nocapture",
-        ])
-        .env("PATH", path)
-        .env(STALLED_TOOL_DIR, bin.path())
-        .spawn()
-        .unwrap();
-    let exited = eventually(Duration::from_secs(60), || {
-        child.try_wait().unwrap().is_some()
+            bin.path(),
+            &[
+                ("PATH", path.as_os_str()),
+                (STALLED_TOOL_DIR, bin.path().as_os_str()),
+            ],
+        )
     });
-    if !exited {
-        let _ = child.kill();
-    }
-    let status = child.wait().unwrap();
     let pids = std::fs::read_to_string(bin.path().join("pids")).unwrap_or_default();
-    let lingering: Vec<&str> = pids.split_whitespace().filter(|pid| running(pid)).collect();
-    for pid in &lingering {
-        unsafe { libc::kill(pid.parse().unwrap(), libc::SIGKILL) };
+    let lingering: Vec<i32> = pids
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .filter(|&pid| running(pid))
+        .collect();
+    for &pid in &lingering {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     assert!(
-        exited,
-        "generation outlived the watchdog: preparation is unbounded"
+        child.is_ok(),
+        "stalled-preparation child failed or outlived its watchdog: preparation is unbounded"
     );
-    assert!(status.success(), "stalled-preparation child failed");
     assert!(
         lingering.is_empty(),
         "image tools outlived generation: {lingering:?}"
@@ -824,7 +778,7 @@ async fn stalled_image_preparation_fails_within_the_generation_deadline() {
 async fn stalled_preparation_child(bin: &std::path::Path) {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED")]));
-    let server = Server::start(vec![generated_reply()]);
+    let server = Server::start(vec![completion("Generated")]);
     let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let mut bounded = request(Source::OpenRouter);
     bounded.timeout = Duration::from_millis(500);
@@ -850,17 +804,11 @@ async fn stalled_preparation_child(bin: &std::path::Path) {
         "stalled image tool was not reaped"
     );
     assert!(
-        eventually(Duration::from_secs(5), || !running(descendant)),
+        eventually(Duration::from_secs(5), || !running(
+            descendant.parse().unwrap()
+        )),
         "image tool descendant outlived the deadline"
     );
-}
-
-/// `f.art_row(n)` with both fields carrying the exact generation marker.
-fn marked(f: &Fixture, n: u64) -> serde_json::Value {
-    let mut publication = f.art_row(n, "SCHEDULED");
-    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    publication
 }
 
 /// A local app whose llmfit touches `entered`, then reports a fit once `release` exists.
@@ -896,7 +844,7 @@ async fn wait_for(path: std::path::PathBuf) {
 #[tokio::test]
 async fn reordered_expected_batch_is_rejected_before_any_local_work() {
     let f = Fixture::new();
-    f.write(json!([marked(&f, 1), marked(&f, 2)]));
+    f.write(json!([f.marked_row(1), f.marked_row(2)]));
     let (app, entered, release) = gated_local_app(&f);
     std::fs::write(release, "").unwrap();
     let before = std::fs::read(&f.store.paths().json).unwrap();
@@ -918,8 +866,8 @@ async fn reordered_expected_batch_is_rejected_before_any_local_work() {
 async fn paused_batch_preflight_reserves_exactly_the_admitted_rows() {
     let f = Fixture::new();
     f.write(json!([
-        marked(&f, 1),
-        marked(&f, 2),
+        f.marked_row(1),
+        f.marked_row(2),
         f.art_row(3, "SCHEDULED")
     ]));
     let (app, entered, release) = gated_local_app(&f);
@@ -942,7 +890,7 @@ async fn paused_batch_preflight_reserves_exactly_the_admitted_rows() {
 #[tokio::test]
 async fn aborted_generation_releases_its_reservation() {
     let f = Fixture::new();
-    f.write(json!([marked(&f, 1)]));
+    f.write(json!([f.marked_row(1)]));
     let (app, entered, release) = gated_local_app(&f);
     let task = {
         let app = Arc::clone(&app);
@@ -965,7 +913,7 @@ async fn invalid_single_generation_source_runs_no_local_preflight() {
     std::fs::write(release, "").unwrap();
     let mut unscheduled = f.art_row(1, "PICKED");
     unscheduled["title"] = json!("Kept");
-    let mut incomplete = marked(&f, 1);
+    let mut incomplete = f.marked_row(1);
     incomplete
         .as_object_mut()
         .unwrap()

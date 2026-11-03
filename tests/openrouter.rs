@@ -145,21 +145,9 @@ async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
         {"id":"vendor/sibling:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}}
     ]}).to_string();
     let server = common::http::Server::start(vec![
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 429,
-            body: "busy".into(),
-        },
-        common::http::Reply {
-            path: "/models".into(),
-            status: 200,
-            body: catalog,
-        },
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: completion("other/model:free"),
-        },
+        Reply::new("/chat/completions", 429, "busy"),
+        Reply::new("/models", 200, catalog),
+        Reply::new("/chat/completions", 200, completion("other/model:free")),
     ]);
     let got = client(server.url())
         .openrouter_generate(&img, &request(), None)
@@ -184,21 +172,13 @@ async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
 async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 400,
-            body: r#"{"error":{"message":"response_format is not supported"}}"#.into(),
-        },
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: completion("vendor/model"),
-        },
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: completion("vendor/model"),
-        },
+        Reply::new(
+            "/chat/completions",
+            400,
+            r#"{"error":{"message":"response_format is not supported"}}"#,
+        ),
+        Reply::new("/chat/completions", 200, completion("vendor/model")),
+        Reply::new("/chat/completions", 200, completion("vendor/model")),
     ]);
     let c = client(server.url());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -220,16 +200,16 @@ async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
 async fn response_model_alias_never_becomes_paid_preference() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: completion("vendor/canonical-without-free"),
-        },
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: completion("vendor/canonical-without-free"),
-        },
+        Reply::new(
+            "/chat/completions",
+            200,
+            completion("vendor/canonical-without-free"),
+        ),
+        Reply::new(
+            "/chat/completions",
+            200,
+            completion("vendor/canonical-without-free"),
+        ),
     ]);
     let c = client(server.url());
     let first = c.openrouter_generate(&img, &request(), None).await.unwrap();
@@ -248,11 +228,11 @@ async fn response_model_alias_never_becomes_paid_preference() {
 #[tokio::test]
 async fn upstream_error_diagnostics_redact_credentials_and_image_data_and_are_bounded() {
     let (_dir, img) = image();
-    let server = common::http::Server::start(vec![common::http::Reply {
-        path: "/chat/completions".into(),
-        status: 400,
-        body: json!({"error":{"message":format!("response_format unsupported; echoed DUMMY-test-credential and data:image/png;base64,cG5nIGJ5dGVz {}", "x".repeat(2000))}}).to_string(),
-    }]);
+    let server = common::http::Server::start(vec![Reply::new(
+        "/chat/completions",
+        400,
+        json!({"error":{"message":format!("response_format unsupported; echoed DUMMY-test-credential and data:image/png;base64,cG5nIGJ5dGVz {}", "x".repeat(2000))}}),
+    )]);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let error = client(server.url())
         .openrouter_attempt(&img, "vendor/model", false, deadline)
@@ -273,10 +253,11 @@ async fn upstream_error_diagnostics_redact_credentials_and_image_data_and_are_bo
 #[tokio::test]
 async fn clipped_data_uri_in_upstream_error_is_redacted_without_losing_classification() {
     let (_dir, img) = image();
-    let server = common::http::Server::start(vec![common::http::Reply {
-        path: "/chat/completions".into(), status: 400,
-        body: json!({"error":{"message":"DUMMY-test-credential echoed data:image/png;base64,cG5nIGJ5 response_format unsupported"}}).to_string(),
-    }]);
+    let server = common::http::Server::start(vec![Reply::new(
+        "/chat/completions",
+        400,
+        json!({"error":{"message":"DUMMY-test-credential echoed data:image/png;base64,cG5nIGJ5 response_format unsupported"}}),
+    )]);
     let error = client(server.url())
         .openrouter_attempt(
             &img,
@@ -298,11 +279,11 @@ async fn clipped_data_uri_in_upstream_error_is_redacted_without_losing_classific
 #[tokio::test]
 async fn unrelated_bad_request_does_not_trigger_schema_retry() {
     let (_dir, img) = image();
-    let server = common::http::Server::start(vec![common::http::Reply {
-        path: "/chat/completions".into(),
-        status: 400,
-        body: r#"{"error":{"message":"invalid prompt"}}"#.into(),
-    }]);
+    let server = common::http::Server::start(vec![Reply::new(
+        "/chat/completions",
+        400,
+        r#"{"error":{"message":"invalid prompt"}}"#,
+    )]);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     assert!(
         client(server.url())
@@ -316,11 +297,11 @@ async fn unrelated_bad_request_does_not_trigger_schema_retry() {
 #[tokio::test]
 async fn successful_selected_model_does_not_fetch_catalogue() {
     let (_dir, img) = image();
-    let server = common::http::Server::start(vec![common::http::Reply {
-        path: "/chat/completions".into(),
-        status: 200,
-        body: completion("vendor/model"),
-    }]);
+    let server = common::http::Server::start(vec![Reply::new(
+        "/chat/completions",
+        200,
+        completion("vendor/model"),
+    )]);
     client(server.url())
         .openrouter_generate(&img, &request(), None)
         .await
@@ -332,16 +313,8 @@ async fn successful_selected_model_does_not_fetch_catalogue() {
 async fn malformed_rescue_catalogue_preserves_original_model_error() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 429,
-            body: "original busy".into(),
-        },
-        common::http::Reply {
-            path: "/models".into(),
-            status: 200,
-            body: "{bad".into(),
-        },
+        Reply::new("/chat/completions", 429, "original busy"),
+        Reply::new("/models", 200, "{bad"),
     ]);
     let err = client(server.url())
         .openrouter_generate(&img, &request(), None)
@@ -356,13 +329,6 @@ async fn malformed_rescue_catalogue_preserves_original_model_error() {
 
 const SELECTED: &str = "google/gemma-4-26b-a4b-it:free";
 
-fn reply(path: &str, status: u16, body: &str) -> Reply {
-    Reply {
-        path: path.into(),
-        status,
-        body: body.into(),
-    }
-}
 fn vision_request(timeout: Duration) -> GenerationRequest {
     GenerationRequest {
         source: Source::OpenRouter,
@@ -393,9 +359,9 @@ fn mixed_catalogue() -> String {
 /// The selected model fails, the rescue catalogue arrives, its first candidate fails.
 fn failing_rescue() -> Vec<Reply> {
     vec![
-        reply("/chat/completions", 429, "busy"),
-        reply("/models", 200, &mixed_catalogue()),
-        reply(
+        Reply::new("/chat/completions", 429, "busy"),
+        Reply::new("/models", 200, mixed_catalogue()),
+        Reply::new(
             "/chat/completions",
             500,
             r#"{"error":{"message":"upstream failed"}}"#,
@@ -404,7 +370,7 @@ fn failing_rescue() -> Vec<Reply> {
 }
 /// A valid pair answered under an alias, never to become the recorded model.
 fn answered() -> Reply {
-    reply("/chat/completions", 200, &completion("third/answers"))
+    Reply::new("/chat/completions", 200, completion("third/answers"))
 }
 /// Each request's chat model, or its path when it carries none.
 fn attempts(requests: &[Value]) -> Vec<&str> {
@@ -445,7 +411,7 @@ async fn rescue_shares_one_budget_and_sends_nothing_after_it_expires() {
         ],
     );
     for (mut replies, index, mut expected) in [expired_selected, expired_rescue] {
-        replies.push(reply("/probe", 200, "{}"));
+        replies.push(Reply::new("/probe", 200, "{}"));
         expected.push("/probe");
         let (_dir, img) = image();
         let (server, captured, release) = Server::start_paused_at(replies, index);
@@ -501,20 +467,14 @@ fn sent_image(request: &Value) -> (String, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sent");
     std::fs::write(&path, openssl::base64::decode_block(data).unwrap()).unwrap();
-    let magick = |args: &[&str]| {
-        let output = Command::new("magick")
-            .arg(&path)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        output.stdout
-    };
-    let geometry = String::from_utf8(magick(&["-format", "%m %w %h", "info:"])).unwrap();
-    (
-        format!("{mime} {geometry}"),
-        magick(&["-depth", "8", "RGB:-"]),
-    )
+    let geometry = common::identify(&path, "%m %w %h");
+    let rgb = Command::new("magick")
+        .arg(&path)
+        .args(["-depth", "8", "RGB:-"])
+        .output()
+        .unwrap();
+    assert!(rgb.status.success(), "{rgb:?}");
+    (format!("{mime} {geometry}"), rgb.stdout)
 }
 fn assert_artwork(request: &Value, expected: &str, halves: [[u8; 3]; 2]) {
     let (description, rgb) = sent_image(request);

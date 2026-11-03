@@ -294,25 +294,17 @@ fn dangling_json_symlink_is_rejected_instead_of_becoming_an_empty_database() {
 #[cfg(target_os = "linux")]
 mod process_lock {
     use super::*;
+    use crate::common::{Reaped, eventually};
     use publicator::store::Store;
     use std::{
         os::unix::fs::{MetadataExt, symlink},
         path::{Path, PathBuf},
-        process::{Child, Command, Stdio},
-        time::{Duration, Instant},
+        process::{Command, Stdio},
+        time::Duration,
     };
 
     const CHILD: &str = "PUBLICATOR_STORE_LOCK_CHILD";
     const HOLD: &str = "PUBLICATOR_STORE_LOCK_HOLD";
-
-    /// Kills and reaps a helper child even when an assertion fails first.
-    struct Reaped(Child);
-    impl Drop for Reaped {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 
     fn store_at(path: &Path) -> Store {
         Store::new(
@@ -364,14 +356,8 @@ mod process_lock {
         (f, alias, lock, inode)
     }
 
-    /// Polls observable state up to a bound; the poll interval is never the proof.
-    fn eventually(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !done() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
+    /// Bound on polled observable state; the poll interval is never the proof.
+    const WITHIN: Duration = Duration::from_secs(10);
 
     /// The kernel lists flock(2) holders, and blocked requesters as `->` waiters.
     fn flock_listed(pid: u32, inode: u64, waiting: bool) -> bool {
@@ -410,15 +396,21 @@ mod process_lock {
         let test = "process_lock::aliased_child_writer_blocks_at_the_lock_until_release";
         let mut child = spawn_child(test, &alias, false);
         let pid = child.0.id();
-        eventually("child blocked in flock", || flock_listed(pid, inode, true));
+        assert!(
+            eventually(WITHIN, || flock_listed(pid, inode, true)),
+            "timed out waiting for child blocked in flock"
+        );
         assert!(child.0.try_wait().unwrap().is_none());
         assert_eq!(f.read(), json!([row(1, "PICKED")]), "writer entered early");
         fs2::FileExt::unlock(&lock).unwrap();
         let mut status = None;
-        eventually("child exit after release", || {
-            status = child.0.try_wait().unwrap();
-            status.is_some()
-        });
+        assert!(
+            eventually(WITHIN, || {
+                status = child.0.try_wait().unwrap();
+                status.is_some()
+            }),
+            "timed out waiting for child exit after release"
+        );
         assert!(status.unwrap().success());
         assert_eq!(uuids(&f), [id(1), id(2)]);
         assert!(alias.is_symlink());
@@ -435,9 +427,10 @@ mod process_lock {
         let test = "process_lock::killed_lock_holder_does_not_block_a_restarted_writer";
         let mut child = spawn_child(test, &alias, true);
         let pid = child.0.id();
-        eventually("child holding the Store lock", || {
-            flock_listed(pid, inode, false)
-        });
+        assert!(
+            eventually(WITHIN, || flock_listed(pid, inode, false)),
+            "timed out waiting for child holding the Store lock"
+        );
         child.0.kill().unwrap();
         child.0.wait().unwrap();
         assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);

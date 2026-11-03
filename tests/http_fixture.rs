@@ -1,30 +1,21 @@
 //! The loopback HTTP fixture reports unmet expectations instead of hanging the harness.
-//! Each scenario runs in a child test process owned by `common::bounded_output`.
+//! Each scenario runs in a child test process owned by `common::failing_child_test`.
 mod common;
 
 use common::http::{Reply, Server};
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    process::Command,
     time::Duration,
 };
-
-fn reply(path: &str) -> Reply {
-    Reply {
-        path: path.into(),
-        status: 200,
-        body: "{}".into(),
-    }
-}
 
 #[test]
 #[ignore = "child process of the watchdog tests below"]
 fn scenario() {
     match std::env::var("HTTP_FIXTURE_SCENARIO").unwrap().as_str() {
-        "unrequested" => Server::start(vec![reply("/never")]).finish(),
+        "unrequested" => Server::start(vec![Reply::new("/never", 200, "{}")]).finish(),
         "unreleased" => {
-            let (server, started, _held) = Server::start_paused(reply("/held"));
+            let (server, started, _held) = Server::start_paused(Reply::new("/held", 200, "{}"));
             let mut client =
                 TcpStream::connect(server.url().trim_start_matches("http://")).unwrap();
             write!(client, "GET /held HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
@@ -32,7 +23,7 @@ fn scenario() {
             server.finish();
         }
         "unwinding" => {
-            let server = Server::start(vec![reply("/expected")]);
+            let server = Server::start(vec![Reply::new("/expected", 200, "{}")]);
             let mut client =
                 TcpStream::connect(server.url().trim_start_matches("http://")).unwrap();
             write!(client, "GET /other HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
@@ -46,15 +37,7 @@ fn scenario() {
 
 /// Runs one scenario under a watchdog; it must fail as a test (exit 101), not hang or abort.
 fn run(name: &str) -> String {
-    let output = common::bounded_output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "scenario", "--ignored", "--nocapture"])
-            .env("HTTP_FIXTURE_SCENARIO", name),
-        Duration::from_secs(60),
-    );
-    let text = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(101), "{text}");
-    text.into_owned()
+    common::failing_child_test("scenario", &[("HTTP_FIXTURE_SCENARIO", name.as_ref())])
 }
 
 #[test]

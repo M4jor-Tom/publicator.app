@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::{
     ffi::OsStr,
     net::TcpListener,
-    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -66,15 +65,8 @@ fn silent() -> (TcpListener, String) {
     let url = format!("http://{}", listener.local_addr().unwrap());
     (listener, url)
 }
-fn reply(path: &str, status: u16, body: Value) -> Reply {
-    Reply {
-        path: path.into(),
-        status,
-        body: body.to_string(),
-    }
-}
 fn chat(content: &str) -> Reply {
-    reply("/api/chat", 200, json!({"message":{"content":content}}))
+    Reply::new("/api/chat", 200, json!({"message":{"content":content}}))
 }
 fn local_request(install_missing: bool, timeout: Duration) -> GenerationRequest {
     GenerationRequest {
@@ -109,7 +101,7 @@ fn assert_chat_request(request: &Value) {
 
 #[tokio::test]
 async fn model_is_not_pulled_without_consent() {
-    let server = Server::start(vec![reply("/api/tags", 200, json!({"models":[]}))]);
+    let server = Server::start(vec![Reply::new("/api/tags", 200, json!({"models":[]}))]);
     let (client, _llmfit) = local_client_for_test(&server);
     let result = client
         .prepare_local(
@@ -153,11 +145,7 @@ async fn refused_or_silent_ollama_is_unavailable_and_never_pulled_or_chatted() {
 /// (refused and silent services are covered above).
 #[tokio::test]
 async fn malformed_tags_reply_is_a_protocol_error_not_unavailability() {
-    let not_json = Reply {
-        path: "/api/tags".into(),
-        status: 200,
-        body: "<html>not Ollama</html>".into(),
-    };
+    let not_json = Reply::new("/api/tags", 200, "<html>not Ollama</html>");
     let server = Server::start(vec![not_json]);
     let (client, _llmfit) = local_client_for_test(&server);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -183,7 +171,7 @@ async fn inherited_key_child() {
     let (openrouter, openrouter_url) = silent();
     let installed = json!({"models":[{"name":"gemma4:26b-a4b"}]});
     let valid = r#"{"title":"Local","description":"From Ollama."}"#;
-    let server = Server::start(vec![reply("/api/tags", 200, installed), chat(valid)]);
+    let server = Server::start(vec![Reply::new("/api/tags", 200, installed), chat(valid)]);
     let (client, _llmfit) = fitting_client(&openrouter_url, server.url());
     let (_dir, image) = prepared_image();
     let request = local_request(false, Duration::from_secs(5));
@@ -210,16 +198,19 @@ fn an_inherited_openrouter_key_never_redirects_local_generation() {
 async fn consented_pull_failure_never_advances_to_chat() {
     for (pull, expected) in [
         (
-            reply("/api/pull", 500, json!({"error":"no space"})),
+            Reply::new("/api/pull", 500, json!({"error":"no space"})),
             "provider error: Ollama HTTP 500",
         ),
         (
-            reply("/api/pull", 200, json!({"status":"failed"})),
+            Reply::new("/api/pull", 200, json!({"status":"failed"})),
             "provider error: Ollama failed to pull gemma4:26b-a4b",
         ),
     ] {
         // No chat reply is scripted: a chat attempt would end on the closed endpoint instead.
-        let server = Server::start(vec![reply("/api/tags", 200, json!({"models":[]})), pull]);
+        let server = Server::start(vec![
+            Reply::new("/api/tags", 200, json!({"models":[]})),
+            pull,
+        ]);
         let (client, _llmfit) = local_client_for_test(&server);
         let (_dir, image) = prepared_image();
         let error = client
@@ -240,8 +231,8 @@ async fn consented_pull_failure_never_advances_to_chat() {
 #[tokio::test]
 async fn local_chat_sends_schema_and_image_and_parses_pair() {
     let server = Server::start(vec![
-        reply("/api/tags", 200, json!({"models":[]})),
-        reply("/api/pull", 200, json!({"status":"success"})),
+        Reply::new("/api/tags", 200, json!({"models":[]})),
+        Reply::new("/api/pull", 200, json!({"status":"success"})),
         chat("{\"title\":\"A title\",\"description\":\"A scene unfolds.\"}"),
     ]);
     let (client, _llmfit) = local_client_for_test(&server);
@@ -279,7 +270,7 @@ async fn local_chat_rejects_malformed_or_empty_metadata() {
             "validation error: complete unmarked metadata required",
         ),
         (
-            reply("/api/chat", 200, json!({"message":{}})),
+            Reply::new("/api/chat", 200, json!({"message":{}})),
             "protocol error: Ollama response missing message content",
         ),
     ] {
@@ -304,7 +295,7 @@ async fn local_chat_rejects_malformed_or_empty_metadata() {
 #[tokio::test]
 #[ignore = "child process of unexpected_local_request_fails_the_test_visibly"]
 async fn unexpected_request_scenario() {
-    let server = Server::start(vec![reply("/api/tags", 200, json!({"models":[]}))]);
+    let server = Server::start(vec![Reply::new("/api/tags", 200, json!({"models":[]}))]);
     let (client, _llmfit) = local_client_for_test(&server);
     let (_dir, image) = prepared_image();
     let result = client
@@ -315,17 +306,7 @@ async fn unexpected_request_scenario() {
 
 #[test]
 fn unexpected_local_request_fails_the_test_visibly() {
-    let output = common::bounded_output(
-        Command::new(std::env::current_exe().unwrap()).args([
-            "--exact",
-            "unexpected_request_scenario",
-            "--ignored",
-            "--nocapture",
-        ]),
-        Duration::from_secs(60),
-    );
-    let text = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(101), "{text}");
+    let text = common::failing_child_test("unexpected_request_scenario", &[]);
     for witness in [
         "unexpected test HTTP path",
         r#"left: "/api/chat""#,
@@ -340,8 +321,10 @@ fn unexpected_local_request_fails_the_test_visibly() {
 async fn withheld_chat_body_ends_at_the_shared_local_deadline() {
     let installed = json!({"models":[{"name":"gemma4:26b-a4b"}]});
     let valid = "{\"title\":\"Late\",\"description\":\"Arrives after the deadline.\"}";
-    let (server, captured, release) =
-        Server::start_paused_at(vec![reply("/api/tags", 200, installed), chat(valid)], 1);
+    let (server, captured, release) = Server::start_paused_at(
+        vec![Reply::new("/api/tags", 200, installed), chat(valid)],
+        1,
+    );
     let (client, _llmfit) = local_client_for_test(&server);
     let (_dir, image) = prepared_image();
     let timeout = Duration::from_secs(1);
@@ -375,7 +358,7 @@ async fn tags_without_models_is_a_protocol_error_that_leaves_publications_intact
     f.write(json!([publication]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     for batch in [false, true] {
-        let server = Server::start(vec![reply("/api/tags", 200, json!({"status":"ok"}))]);
+        let server = Server::start(vec![Reply::new("/api/tags", 200, json!({"status":"ok"}))]);
         let (client, _llmfit) = local_client_for_test(&server);
         let app = Application::new(Arc::new(f.store.clone()), client);
         let request = local_request(false, Duration::from_secs(2));

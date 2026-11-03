@@ -120,20 +120,6 @@ fn discovery_skips_a_duplicate_hash_under_a_new_basename() {
     assert_eq!(candidates[0].path, fresh);
 }
 
-fn discovered(f: &Fixture, paths: &[&str]) -> Vec<PathBuf> {
-    let search = Search {
-        limit: 100,
-        paths: paths.iter().map(|path| (*path).to_owned()).collect(),
-    };
-    let mut found = find_candidates(&f.store, &search)
-        .unwrap()
-        .into_iter()
-        .map(|candidate| candidate.path)
-        .collect::<Vec<_>>();
-    found.sort();
-    found
-}
-
 #[test]
 fn discovery_rejects_every_hash_key_and_case_without_basename_help() {
     let config = Config {
@@ -162,7 +148,7 @@ fn discovery_rejects_every_hash_key_and_case_without_basename_help() {
     }
     let control = f.image("picked/control.png", 9, 9);
     f.write(json!([published]));
-    assert_eq!(discovered(&f, &["picked"]), [control]);
+    assert_eq!(common::found(&f, &["picked"]).unwrap(), [control]);
     assert!(
         !f.path(".thumbs").exists(),
         "discovery must not eagerly thumbnail history"
@@ -181,11 +167,11 @@ fn discovery_offers_one_candidate_per_content_identity() {
     fs::copy(&first, f.path("art/copy.png")).unwrap();
     let nested = f.image("art/nested/other.png", 11, 10);
 
-    let found = discovered(&f, &["art"]);
+    let found = common::found(&f, &["art"]).unwrap();
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found.contains(&nested));
     assert_eq!(
-        discovered(&f, &["art", "art/nested"]).len(),
+        common::found(&f, &["art", "art/nested"]).unwrap().len(),
         2,
         "overlapping roots must not offer the nested file twice"
     );
@@ -391,14 +377,10 @@ fn mixed_case_webp_upload_converts_inside_attempt_directory() {
 #[test]
 fn upload_converts_webp_by_content_not_filename() {
     let f = Fixture::new();
-    let webp = f.path("translucent.webp");
-    let made = std::process::Command::new("magick")
-        .args(["-size", "8x8", "xc:rgba(255,0,0,0.5)"])
-        .args(["-define", "webp:lossless=true"])
-        .arg(&webp)
-        .status()
-        .unwrap();
-    assert!(made.success());
+    let webp = f.generated(
+        "translucent.webp",
+        &["-size", "8x8", "xc:rgba(255,0,0,0.5)"],
+    );
     let misnamed = f.path("art.png");
     fs::copy(&webp, &misnamed).unwrap();
     assert_eq!(identify(&misnamed, "%m"), "WEBP");

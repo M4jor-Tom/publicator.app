@@ -2,13 +2,12 @@
 //! lives in a temporary directory; the real data tree is never probed.
 mod common;
 
-use common::{Fixture, identify, run_child_test, solid_image};
+use common::{Fixture, found, identify, run_child_test, search, solid_image};
 use publicator::{
     config::{Config, Paths},
-    error::{Error, Result},
+    error::Error,
     images::{
-        Candidate, Search, delete_candidate, ensure_thumb, file_sha512, find_candidates,
-        prepare_upload, validate_upload,
+        Candidate, delete_candidate, ensure_thumb, file_sha512, prepare_upload, validate_upload,
     },
     store::Store,
 };
@@ -26,23 +25,6 @@ fn configured(roots: &[&str]) -> Fixture {
         publicable: roots.iter().map(|root| (*root).into()).collect(),
         ..Config::default()
     })
-}
-
-fn search(store: &Store, roots: &[&str]) -> Result<Vec<Candidate>> {
-    let search = Search {
-        limit: 100,
-        paths: roots.iter().map(|root| (*root).into()).collect(),
-    };
-    find_candidates(store, &search)
-}
-
-fn found(f: &Fixture, roots: &[&str]) -> Result<Vec<PathBuf>> {
-    let mut paths = search(&f.store, roots)?
-        .into_iter()
-        .map(|candidate| candidate.path)
-        .collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
 }
 
 fn canonical(f: &Fixture, names: &[&str]) -> Vec<PathBuf> {

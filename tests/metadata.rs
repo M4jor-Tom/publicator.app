@@ -9,6 +9,7 @@ use serde_json::json;
 use std::time::Duration;
 
 mod common;
+use common::http::Reply;
 
 #[test]
 fn parses_fenced_pair_but_not_partial_metadata() {
@@ -94,11 +95,7 @@ fn image_data_url_encodes_bytes_with_the_prepared_image_mime() {
 
 #[tokio::test]
 async fn loopback_http_fixture_serves_scripted_response_and_captures_body() {
-    let server = common::http::Server::start(vec![common::http::Reply {
-        path: "/probe".into(),
-        status: 200,
-        body: "ok".into(),
-    }]);
+    let server = common::http::Server::start(vec![Reply::new("/probe", 200, "ok")]);
     let response = reqwest::Client::new()
         .post(format!("{}{}/probe", server.url(), ""))
         .json(&json!({"safe": true}))

@@ -15,14 +15,7 @@ fn cli(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 fn marked_data(root: &std::path::Path) {
-    assert!(
-        Command::new("magick")
-            .args(["-size", "4x4", "xc:white"])
-            .arg(root.join("art.png"))
-            .status()
-            .unwrap()
-            .success()
-    );
+    common::solid_image(&root.join("art.png"), "white", 4, 4);
     let hash = publicator::images::file_sha512(&root.join("art.png")).unwrap();
     fs::write(
         root.join("publications.json"),
@@ -57,14 +50,7 @@ fn publication_batch(root: &std::path::Path) {
     let mut rows = vec![historical, unrelated];
     for n in 3..=4 {
         let image = root.join(format!("art{n}.png"));
-        assert!(
-            Command::new("magick")
-                .args(["-size", "4x4", "xc:white"])
-                .arg(&image)
-                .status()
-                .unwrap()
-                .success()
-        );
+        common::solid_image(&image, "white", 4, 4);
         let mut item = row(n, "DESCRIBED");
         item["files"][0]["basename"] = json!(format!("art{n}.png"));
         item["files"][0]["sha512sum"] = json!(publicator::images::file_sha512(&image).unwrap());
@@ -107,14 +93,6 @@ done
     );
     common::executable::write_executable(&worker, &script);
     (worker, calls)
-}
-
-fn local_reply(path: &str, value: Value) -> Reply {
-    Reply {
-        path: path.into(),
-        status: 200,
-        body: value.to_string(),
-    }
 }
 
 fn run_local(root: &std::path::Path, server: &Server, args: &[&str]) -> std::process::Output {
@@ -498,13 +476,14 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
     let expected =
         json!({"title":"Generated title","description":"Generated description"}).to_string();
     let tags = |installed: bool| {
-        local_reply(
+        Reply::new(
             "/api/tags",
+            200,
             json!({"models": if installed { vec![json!({"name":"gemma4:26b-a4b"})] } else { vec![] }}),
         )
     };
-    let pull = || local_reply("/api/pull", json!({"status":"success"}));
-    let chat = || local_reply("/api/chat", json!({"message":{"content":expected}}));
+    let pull = || Reply::new("/api/pull", 200, json!({"status":"success"}));
+    let chat = || Reply::new("/api/chat", 200, json!({"message":{"content":expected}}));
 
     // A non-terminal refusal fails before generation and leaves exact source bytes untouched.
     let root = tempdir().unwrap();
@@ -871,16 +850,6 @@ fn validate_rejects_invalid_schedule_semantics() {
     }
 }
 
-/// Kills and reaps the CLI even when an assertion fails first.
-struct ReapedChild(std::process::Child);
-
-impl Drop for ReapedChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 #[test]
 fn sigint_during_publish_stops_the_worker_group_and_keeps_the_attempt_blocked() {
     let f = publish_fixture();
@@ -892,7 +861,7 @@ fn sigint_during_publish_stops_the_worker_group_and_keeps_the_attempt_blocked() 
     );
     fs::write(root.join("skill.md"), "fixture skill").unwrap();
     let _watchdog = common::GroupWatchdog(&gate);
-    let mut cli = ReapedChild(
+    let mut cli = common::Reaped(
         publish_command(root)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -976,14 +945,7 @@ done"#,
         let (ok, _, stderr) = run(&[]);
         assert!(!ok && stderr.contains("unresolved"), "{stderr}");
         assert_eq!(sent(), 1);
-        let attempt = fs::read_dir(root.join(".publicator/publish"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .file_name()
-            .into_string()
-            .unwrap();
+        let attempt = common::only_attempt(root);
         let (ok, stdout, stderr) =
             run(&[&["--reconcile-attempt", &attempt][..], &decision].concat());
         assert!(
@@ -1050,13 +1012,7 @@ fn unknown_publish_outcome_prints_reconcile_guidance_matching_the_skill() {
         "#!/bin/sh\nif [ \"$1\" = \"--check-steps\" ]; then exit 0; fi\nwhile IFS= read -r line; do case \"$line\" in *'\"type\":\"open\"'*) echo '{\"protocol\":1,\"type\":\"ready\"}' ;; *'\"type\":\"submit\"'*) echo malformed ;; *) exit 0 ;; esac; done\n",
     );
     assert!(!first.status.success());
-    let attempts: Vec<String> = fs::read_dir(root.join(".publicator/publish"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    let [attempt] = attempts.as_slice() else {
-        panic!("{attempts:?}")
-    };
+    let attempt = &common::only_attempt(root);
     let blocked = run_publish(root);
     assert!(!blocked.status.success());
     assert_recovery_guidance(&first.stderr, attempt);

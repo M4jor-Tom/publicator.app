@@ -936,6 +936,7 @@ pub(crate) mod timeout_tests {
     use crate::{
         config::{Config, Paths},
         metadata::{Endpoints, MetadataClient},
+        process_fixture::{eventually, running},
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -1410,30 +1411,12 @@ done"#,
             .collect()
     }
 
-    fn alive(pid: i32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| stat.rsplit_once(')')?.1.trim_start().chars().next())
-            .is_some_and(|state| !matches!(state, 'Z' | 'X'))
-    }
-
-    fn all_dead(pids: &[i32]) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while pids.iter().any(|&pid| alive(pid)) {
-            if std::time::Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
     /// SIGKILLs the PIDs recorded in a gate file if the test fails before the publisher does.
     struct KillRecorded(PathBuf);
 
     impl Drop for KillRecorded {
         fn drop(&mut self) {
-            for pid in recorded(&self.0).into_iter().filter(|&pid| alive(pid)) {
+            for pid in recorded(&self.0).into_iter().filter(|&pid| running(pid)) {
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
@@ -1462,7 +1445,12 @@ done"#,
     fn assert_reaped(gate: &Path) {
         let pids = recorded(gate);
         assert_eq!(pids.len(), 2, "{pids:?}");
-        assert!(all_dead(&pids), "fixture tree survived: {pids:?}");
+        assert!(
+            eventually(Duration::from_secs(5), || !pids
+                .iter()
+                .any(|&pid| running(pid))),
+            "fixture tree survived: {pids:?}"
+        );
     }
 
     /// Step checker that hangs with a same-group child after recording "<pid> <child pid>".
@@ -1578,7 +1566,7 @@ done"#,
         );
         let pids = recorded(&holder);
         assert!(
-            pids.len() == 1 && alive(pids[0]),
+            pids.len() == 1 && running(pids[0]),
             "holder must outlive the worker group: {pids:?}"
         );
     }

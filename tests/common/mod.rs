@@ -1,8 +1,12 @@
 #![allow(dead_code)]
+pub mod git;
 pub mod http;
+pub mod process;
+pub use process::*;
 
 use publicator::{
     config::{Config, Paths},
+    images::{Candidate, Search, find_candidates},
     store::Store,
 };
 use serde_json::{Value, json};
@@ -50,30 +54,26 @@ impl Fixture {
     }
     pub fn image(&self, name: &str, width: u32, height: u32) -> std::path::PathBuf {
         let path = self.path(name);
-        std::process::Command::new("magick")
-            .arg("-size")
-            .arg(format!("{width}x{height}"))
-            .arg("xc:white")
-            .arg(&path)
-            .status()
-            .unwrap()
-            .success()
-            .then_some(())
-            .unwrap();
+        solid_image(&path, "white", width, height);
         path
     }
-}
-impl Fixture {
     /// A tiny solid-color PNG (parents created); distinct colors give distinct content identities.
     pub fn colored(&self, name: &str, color: &str) -> std::path::PathBuf {
         let path = self.path(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let status = std::process::Command::new("magick")
-            .args(["-size", "2x2", &format!("xc:{color}")])
+        solid_image(&path, color, 2, 2);
+        path
+    }
+    /// Runs `magick <args> <name>`; WebP output is lossless so pixels can be compared exactly.
+    pub fn generated(&self, name: &str, args: &[&str]) -> std::path::PathBuf {
+        let path = self.path(name);
+        let made = std::process::Command::new("magick")
+            .args(args)
+            .args(["-define", "webp:lossless=true"])
             .arg(&path)
             .status()
             .unwrap();
-        assert!(status.success());
+        assert!(made.success(), "magick failed for {name}");
         path
     }
     /// `row(n, state)` whose `{n}.png` artwork exists and carries its real SHA-512, as Pick records it.
@@ -84,43 +84,47 @@ impl Fixture {
             json!(publicator::images::file_sha512(&image).unwrap());
         publication
     }
-}
-
-/// `/proc/PID/stat` state, parent PID and process group.
-pub fn proc_stat(pid: i32) -> Option<(char, i32, i32)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    let mut fields = fields.split_whitespace();
-    Some((
-        fields.next()?.chars().next()?,
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-    ))
-}
-
-pub fn live_process_group_members(pgid: i32) -> Vec<(i32, char)> {
-    let mut members = std::fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
-        .filter_map(|pid| proc_stat(pid).map(|(state, _, group)| (pid, state, group)))
-        .filter(|(_, state, group)| *group == pgid && !matches!(state, 'Z' | 'X'))
-        .map(|(pid, state, _)| (pid, state))
-        .collect::<Vec<_>>();
-    members.sort_unstable();
-    members
-}
-
-/// Poll `ready` every 10 ms until it holds or `timeout` passes.
-pub fn eventually(timeout: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while !ready() {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    /// A SCHEDULED `art_row` marked for generation, as AI generation requires.
+    pub fn marked_row(&self, n: u64) -> Value {
+        with_markers(self.art_row(n, "SCHEDULED"))
     }
-    true
+}
+
+/// Discovery over the configured `roots`, at most 100 candidates.
+pub fn search(store: &Store, roots: &[&str]) -> publicator::error::Result<Vec<Candidate>> {
+    let search = Search {
+        limit: 100,
+        paths: roots.iter().map(|root| (*root).into()).collect(),
+    };
+    find_candidates(store, &search)
+}
+
+/// The sorted paths discovery offers over `roots`.
+pub fn found(f: &Fixture, roots: &[&str]) -> publicator::error::Result<Vec<std::path::PathBuf>> {
+    let mut paths = search(&f.store, roots)?
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+/// `row` with both fields carrying the exact generation marker.
+pub fn with_markers(mut row: Value) -> Value {
+    row["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    row["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    row
+}
+
+/// An Application over `store` whose AI providers are unreachable loopback endpoints.
+pub fn offline_app(store: std::sync::Arc<Store>) -> publicator::application::Application {
+    use publicator::metadata::{Endpoints, MetadataClient};
+    let endpoints = Endpoints {
+        openrouter: "http://127.0.0.1:1".into(),
+        ollama: "http://127.0.0.1:1".into(),
+    };
+    let metadata = MetadataClient::new(reqwest::Client::new(), endpoints, "llmfit".into());
+    publicator::application::Application::new(store, metadata)
 }
 
 /// Worker that logs each submit to `calls`, then hangs with a same-group child after
@@ -140,26 +144,6 @@ done"#,
     )
 }
 
-pub fn gate_pids(gate: &std::path::Path) -> Option<(i32, i32)> {
-    let text = std::fs::read_to_string(gate).ok()?;
-    let mut pids = text.split_whitespace().map(str::parse);
-    Some((pids.next()?.ok()?, pids.next()?.ok()?))
-}
-
-/// SIGKILLs the live members of the process group recorded in `gate` on drop, so a failed
-/// assertion never strands fixture processes.
-pub struct GroupWatchdog<'a>(pub &'a std::path::Path);
-
-impl Drop for GroupWatchdog<'_> {
-    fn drop(&mut self) {
-        if let Some((group, _)) = gate_pids(self.0) {
-            for (pid, _) in live_process_group_members(group) {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-        }
-    }
-}
-
 /// After an abrupt stop mid-submit: the worker group is gone, the publisher lock is free and
 /// the one sent attempt keeps its terminal-less intent receipt.
 pub fn assert_abandoned_attempt(
@@ -176,14 +160,23 @@ pub fn assert_abandoned_attempt(
         live_process_group_members(group)
     );
     drop(publicator::publish_journal::publisher_lock(root).expect("publisher lock is free"));
-    let attempts = std::fs::read_dir(root.join(".publicator/publish"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path().join("receipt.json"))
-        .collect::<Vec<_>>();
-    assert_eq!(attempts.len(), 1, "{attempts:?}");
-    let receipt: Value = serde_json::from_slice(&std::fs::read(&attempts[0]).unwrap()).unwrap();
+    let receipt = root
+        .join(".publicator/publish")
+        .join(only_attempt(root))
+        .join("receipt.json");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
     assert!(receipt["terminal"].is_null(), "{receipt}");
     assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
+}
+
+/// The ID of the one publish attempt recorded under `root`.
+pub fn only_attempt(root: &std::path::Path) -> String {
+    let mut attempts = std::fs::read_dir(root.join(".publicator/publish"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    attempts.pop().unwrap()
 }
 
 /// Writes a decodable solid-colour image; the format follows the path suffix.
@@ -198,63 +191,6 @@ pub fn solid_image(path: &std::path::Path, color: &str, width: u32, height: u32)
     assert!(status.success(), "magick failed for {}", path.display());
 }
 
-/// Runs `command` to completion within `limit`. On timeout or panic the still-running
-/// process group (including grandchildren such as a worker) is killed and reaped.
-pub fn bounded_output(
-    command: &mut std::process::Command,
-    limit: std::time::Duration,
-) -> std::process::Output {
-    use std::{
-        io::{Read, Seek},
-        os::unix::process::CommandExt,
-        process::Stdio,
-        time::Instant,
-    };
-    struct Reaped(std::process::Child);
-    impl Drop for Reaped {
-        fn drop(&mut self) {
-            if let Ok(None) = self.0.try_wait() {
-                // An unreaped leader keeps its pid, so the group id cannot be reused yet.
-                unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
-                let _ = self.0.wait();
-            }
-        }
-    }
-    // Files, not pipes: a chatty child cannot block on a full pipe while we poll.
-    let files = [(); 2].map(|_| tempfile::tempfile().unwrap());
-    let mut child = Reaped(
-        command
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(files[0].try_clone().unwrap())
-            .stderr(files[1].try_clone().unwrap())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{command:?} did not exit within {limit:?}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    let [stdout, stderr] = files.map(|mut file| {
-        let mut bytes = Vec::new();
-        file.rewind().unwrap();
-        file.read_to_end(&mut bytes).unwrap();
-        bytes
-    });
-    std::process::Output {
-        status,
-        stdout,
-        stderr,
-    }
-}
-
 /// Decodes `path` with ImageMagick's `identify -format`, failing the test if it cannot.
 pub fn identify(path: &std::path::Path, format: &str) -> String {
     let output = std::process::Command::new("identify")
@@ -264,25 +200,6 @@ pub fn identify(path: &std::path::Path, format: &str) -> String {
         .unwrap();
     assert!(output.status.success(), "identify {}", path.display());
     String::from_utf8(output.stdout).unwrap()
-}
-
-/// Runs one test of the current test binary in a child process, so it can use another working
-/// directory or `PATH` without touching this process; `timeout` kills and reaps a hung child.
-pub fn run_child_test(test: &str, cwd: &std::path::Path, envs: &[(&str, &std::ffi::OsStr)]) {
-    let output = std::process::Command::new("timeout")
-        .args(["-k", "5", "120"])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
-        .current_dir(cwd)
-        .envs(envs.iter().copied())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && stdout.contains("1 passed"),
-        "child test {test} failed:\n{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 /// Drives Iced tasks the way the runtime would, keeping lifecycle effects observable:

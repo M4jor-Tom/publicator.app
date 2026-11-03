@@ -480,11 +480,11 @@ mod persistence_tests {
 
     fn completion(title: &str) -> Reply {
         let content = json!({"title": title, "description": "A generated description."});
-        Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: json!({"choices":[{"message":{"content": content.to_string()}}]}).to_string(),
-        }
+        Reply::new(
+            "/chat/completions",
+            200,
+            json!({"choices":[{"message":{"content": content.to_string()}}]}),
+        )
     }
 
     fn app(store: &Store, server: &Server) -> Application {
@@ -538,16 +538,12 @@ mod persistence_tests {
     async fn provider_failure_with_failed_marker_save_surfaces_the_persistence_failure() {
         let (_root, store) = fixture(false);
         let server = Server::start(vec![
-            Reply {
-                path: "/chat/completions".into(),
-                status: 500,
-                body: json!({"error":{"message":"fixture failure"}}).to_string(),
-            },
-            Reply {
-                path: "/models".into(),
-                status: 200,
-                body: json!({"data": []}).to_string(),
-            },
+            Reply::new(
+                "/chat/completions",
+                500,
+                json!({"error":{"message":"fixture failure"}}),
+            ),
+            Reply::new("/models", 200, json!({"data": []})),
         ]);
         let app = app(&store, &server);
         let before = fs::read(&store.paths().json).unwrap();

@@ -5,28 +5,14 @@ use publicator::{
 };
 use std::{path::Path, process::Command};
 
+mod common;
+
 fn setup() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("prompts");
     std::fs::create_dir(&repo).unwrap();
-    // Inherited repository variables (a Git hook's GIT_DIR, ...) never redirect these commits.
-    let git = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        )
-    };
+    let git = |args: &[&str]| common::git::git(&repo, args);
     git(&["init", "-q"]);
-    git(&["config", "user.name", "Test"]);
-    git(&["config", "user.email", "test@example.invalid"]);
     let file = repo.join("lineage/prompt.txt");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, "A Moonlit Garden").unwrap();
@@ -377,8 +363,6 @@ fn search_limit_counts_available_results_past_referenced_unreadable_and_malforme
         "exactly `limit` available results are complete"
     );
 }
-
-mod common;
 
 #[test]
 fn prompt_search_and_discovery_both_protect_a_referenced_basename_with_changed_bytes() {

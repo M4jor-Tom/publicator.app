@@ -1,7 +1,7 @@
 #![cfg(feature = "desktop")]
 
 mod common;
-use common::{Fixture, id, row};
+use common::{Fixture, http::Reply, id, row, with_markers};
 use iced::Element;
 use publicator::{
     application::Application,
@@ -88,15 +88,6 @@ fn edit_manual_metadata(app: &mut App) {
 fn marker_row(n: u64) -> serde_json::Value {
     with_markers(row(n, "SCHEDULED"))
 }
-/// `marker_row` whose `{n}.png` exists with its real hash, as AI generation requires.
-fn art_marker_row(f: &Fixture, n: u64) -> serde_json::Value {
-    with_markers(f.art_row(n, "SCHEDULED"))
-}
-fn with_markers(mut row: serde_json::Value) -> serde_json::Value {
-    row["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    row["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    row
-}
 
 fn fake_llmfit(f: &Fixture, level: &str, notes: &[&str]) -> std::path::PathBuf {
     let shell = std::process::Command::new("sh")
@@ -162,14 +153,6 @@ fn local_fixture_app(
     (app, application)
 }
 
-fn ollama_reply(path: &str, body: serde_json::Value) -> common::http::Reply {
-    common::http::Reply {
-        path: path.into(),
-        status: 200,
-        body: body.to_string(),
-    }
-}
-
 fn good_local_status_app(f: &Fixture, installed: bool) -> (App, common::http::Server) {
     let models = if installed {
         json!([{"name": VISION_MODELS[0].ollama_name}])
@@ -178,7 +161,7 @@ fn good_local_status_app(f: &Fixture, installed: bool) -> (App, common::http::Se
     };
     let server = common::http::Server::start(
         (0..2)
-            .map(|_| ollama_reply("/api/tags", json!({"models":models})))
+            .map(|_| Reply::new("/api/tags", 200, json!({"models":models})))
             .collect(),
     );
     let (app, _) = local_fixture_app(
@@ -242,16 +225,17 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
 #[tokio::test]
 async fn installed_good_local_model_generates_without_pull_or_install_modal() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1)]));
+    f.write(json!([f.marked_row(1)]));
     let model_name = VISION_MODELS[0].ollama_name.clone();
     let tags = json!({"models":[{"name":model_name}]});
     let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags),
-        ollama_reply(
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags),
+        Reply::new(
             "/api/chat",
+            200,
             json!({"message":{"content":json!({"title":"Installed model","description":"Generated locally."}).to_string()}}),
         ),
     ]);
@@ -287,17 +271,18 @@ async fn installed_good_local_model_generates_without_pull_or_install_modal() {
 #[tokio::test]
 async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1)]));
+    f.write(json!([f.marked_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models":[]});
     let server = common::http::Server::start(vec![
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags.clone()),
-        ollama_reply("/api/tags", tags),
-        ollama_reply("/api/pull", json!({"status":"success"})),
-        ollama_reply(
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags.clone()),
+        Reply::new("/api/tags", 200, tags),
+        Reply::new("/api/pull", 200, json!({"status":"success"})),
+        Reply::new(
             "/api/chat",
+            200,
             json!({"message":{"content":json!({"title":"Installed after consent","description":"Generated locally."}).to_string()}}),
         ),
     ]);
@@ -351,7 +336,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
     f.write(json!([marker_row(1), marker_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let server =
-        common::http::Server::start(vec![ollama_reply("/api/tags", json!({"models": []}))]);
+        common::http::Server::start(vec![Reply::new("/api/tags", 200, json!({"models": []}))]);
     let (mut app, _) = local_fixture_app(
         &f,
         fake_llmfit(&f, "Good", &["Fits host"]),
@@ -402,7 +387,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
 #[tokio::test]
 async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), marker_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
 
@@ -443,7 +428,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
 #[tokio::test]
 async fn installed_local_batch_rejects_membership_changed_before_admission() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), marker_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
     let status = common::ui::first_output(app.update(Message::GenerateMarked)).await;
@@ -483,10 +468,10 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
 #[tokio::test]
 async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), marker_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models": []});
-    let server = common::http::Server::start(vec![ollama_reply("/api/tags", tags.clone())]);
+    let server = common::http::Server::start(vec![Reply::new("/api/tags", 200, tags.clone())]);
     let (mut app, _) = local_fixture_app(
         &f,
         fake_llmfit(&f, "Good", &["Fits host"]),
@@ -556,13 +541,13 @@ async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats
 #[tokio::test]
 async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1), art_marker_row(&f, 2)]));
+    f.write(json!([f.marked_row(1), f.marked_row(2)]));
     let empty = json!({"models":[]});
     let mut replies = (0..5)
-        .map(|_| ollama_reply("/api/tags", empty.clone()))
+        .map(|_| Reply::new("/api/tags", 200, empty.clone()))
         .collect::<Vec<_>>();
-    replies.push(ollama_reply("/api/pull", json!({"status":"success"})));
-    replies.push(ollama_reply("/api/chat", json!({"message":{"content":json!({"title":"Only second","description":"Consent bound to target."}).to_string()}})));
+    replies.push(Reply::new("/api/pull", 200, json!({"status":"success"})));
+    replies.push(Reply::new("/api/chat", 200, json!({"message":{"content":json!({"title":"Only second","description":"Consent bound to target."}).to_string()}})));
     let server = common::http::Server::start(replies);
     let (mut app, _) = local_fixture_app(
         &f,
@@ -724,12 +709,12 @@ fn selecting_local_source_does_not_itself_confirm_install() {
 #[tokio::test]
 async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1), row(2, "SCHEDULED")]));
-    let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
-        path: "/chat/completions".into(),
-        status: 200,
-        body: json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Saved after provider completion."}).to_string()}}]}).to_string(),
-    });
+    f.write(json!([f.marked_row(1), row(2, "SCHEDULED")]));
+    let (server, started_rx, release_tx) = common::http::Server::start_paused(Reply::new(
+        "/chat/completions",
+        200,
+        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Saved after provider completion."}).to_string()}}]}),
+    ));
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let task = tokio::spawn(common::ui::first_output(
         app.update(Message::GenerateOne(id(1))),
@@ -979,9 +964,10 @@ async fn repeated_explicit_save_lands_the_newest_revision_last() {
 #[tokio::test]
 async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1)]));
-    let server = common::http::Server::start(vec![ollama_reply(
+    f.write(json!([f.marked_row(1)]));
+    let server = common::http::Server::start(vec![Reply::new(
         "/chat/completions",
+        200,
         json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
     )]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
@@ -1008,23 +994,19 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     use common::http::{Reply, Server};
 
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1)]));
+    f.write(json!([f.marked_row(1)]));
     let server = Server::start(vec![
-        Reply {
-            path: "/chat/completions".into(),
-            status: 500,
-            body: json!({"error":{"message":"fixture failure"}}).to_string(),
-        },
-        common::http::Reply {
-            path: "/models".into(),
-            status: 200,
-            body: json!({"data":[]}).to_string(),
-        },
-        common::http::Reply {
-            path: "/chat/completions".into(),
-            status: 200,
-            body: json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}).to_string(),
-        },
+        Reply::new(
+            "/chat/completions",
+            500,
+            json!({"error":{"message":"fixture failure"}}),
+        ),
+        Reply::new("/models", 200, json!({"data":[]})),
+        Reply::new(
+            "/chat/completions",
+            200,
+            json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
+        ),
     ]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
 
@@ -1063,13 +1045,10 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
     let f = Fixture::new();
     let mut rows = Vec::new();
     for n in 1..=3 {
-        rows.push(art_marker_row(&f, n));
+        rows.push(f.marked_row(n));
     }
     f.write(json!(rows));
-    let replies = [3, 2, 1].into_iter().map(|n| Reply {
-        path: "/chat/completions".into(), status: 200,
-        body: json!({"choices":[{"message":{"content":json!({"title":format!("title-{n}"),"description":"Generated description."}).to_string()}}]}).to_string(),
-    }).collect();
+    let replies = [3, 2, 1].into_iter().map(|n| Reply::new("/chat/completions", 200, json!({"choices":[{"message":{"content":json!({"title":format!("title-{n}"),"description":"Generated description."}).to_string()}}]}))).collect();
     let server = Server::start(replies);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let completion = common::ui::first_output(app.update(Message::GenerateMarked)).await;
@@ -1095,9 +1074,10 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
 #[tokio::test]
 async fn startup_model_option_selects_the_model_sent_to_the_provider() {
     let f = Fixture::new();
-    f.write(json!([art_marker_row(&f, 1)]));
-    let server = common::http::Server::start(vec![ollama_reply(
+    f.write(json!([f.marked_row(1)]));
+    let server = common::http::Server::start(vec![Reply::new(
         "/chat/completions",
+        200,
         json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
     )]);
     let (mut app, _) =

@@ -13,21 +13,7 @@ use publicator::{
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
 };
-
-/// Runs `magick <args> <name>`; WebP output is lossless so pixels can be compared exactly.
-fn generated(f: &Fixture, name: &str, args: &[&str]) -> PathBuf {
-    let path = f.path(name);
-    let made = Command::new("magick")
-        .args(args)
-        .args(["-define", "webp:lossless=true"])
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(made.success(), "magick failed for {name}");
-    path
-}
 
 /// Two 8×8 frames (pages for TIFF): red, then blue.
 const TWO_FRAMES: &[&str] = &["-size", "8x8", "xc:red", "xc:blue"];
@@ -47,7 +33,7 @@ fn sequences_are_detected_and_previewed_by_their_first_frame() {
         ("pages.tiff", "image/tiff"),
         ("anim.webp", "image/webp"),
     ] {
-        let source = generated(&f, name, TWO_FRAMES);
+        let source = f.generated(name, TWO_FRAMES);
         assert_eq!(identify(&source, "%n "), "2 2 ", "{name} has two frames");
         let preview = prepare_ai_image(&source, &f.path(".thumbs"), None).unwrap();
         assert_eq!(preview.mime, mime, "{name}");
@@ -59,7 +45,7 @@ fn sequences_are_detected_and_previewed_by_their_first_frame() {
 #[test]
 fn an_animated_gif_uploads_byte_identical_and_still_animated() {
     let f = Fixture::new();
-    let source = generated(&f, "anim.gif", TWO_FRAMES);
+    let source = f.generated("anim.gif", TWO_FRAMES);
     let upload = stage(&source, &f.path("attempt")).unwrap();
     assert_eq!(fs::read(&upload).unwrap(), fs::read(&source).unwrap());
     assert_eq!(identify(&upload, "%n "), "2 2 ");
@@ -68,7 +54,7 @@ fn an_animated_gif_uploads_byte_identical_and_still_animated() {
 #[test]
 fn an_animated_webp_upload_stays_rejected() {
     let f = Fixture::new();
-    let animated = generated(&f, "anim.webp", TWO_FRAMES);
+    let animated = f.generated("anim.webp", TWO_FRAMES);
     fs::copy(&animated, f.path("anim.png")).unwrap();
     for name in ["anim.webp", "anim.png"] {
         let attempt = f.path(&format!("attempt-{name}"));
@@ -108,7 +94,7 @@ fn two_tone(f: &Fixture, name: &str, alpha: bool) -> (PathBuf, String) {
     let args = [
         "-size", "300x400", "xc:red", "-size", "300x400", right, "+append",
     ];
-    (generated(f, name, &args), format!("600x400 {expected}"))
+    (f.generated(name, &args), format!("600x400 {expected}"))
 }
 
 #[test]
@@ -144,11 +130,11 @@ fn admitted_formats_keep_dimensions_pixels_and_alpha_in_previews_and_uploads() {
 #[test]
 fn one_pixel_and_portrait_sources_keep_their_shape_and_pixels() {
     let f = Fixture::new();
-    let dot = generated(&f, "dot.png", &["-size", "1x1", "xc:red"]);
+    let dot = f.generated("dot.png", &["-size", "1x1", "xc:red"]);
     let halves = [
         "-size", "200x600", "xc:red", "-size", "200x600", "xc:blue", "+append",
     ];
-    let portrait = generated(&f, "portrait.jpg", &halves);
+    let portrait = f.generated("portrait.jpg", &halves);
     for (source, size, preview_size, pixels) in [
         (dot, "1x1", "1x1", "100 100"),
         (portrait, "400x600", "200x300", "100 001"),
@@ -168,7 +154,7 @@ fn one_pixel_and_portrait_sources_keep_their_shape_and_pixels() {
 fn truncated_text_and_missing_sources_are_refused_and_cache_nothing() {
     let f = Fixture::new();
     for name in ["cut.png", "cut.webp", "cut.jpg"] {
-        let path = generated(&f, name, &["-size", "64x64", "gradient:red-blue"]);
+        let path = f.generated(name, &["-size", "64x64", "gradient:red-blue"]);
         let whole = fs::read(&path).unwrap();
         fs::write(&path, &whole[..whole.len() / 2]).unwrap();
     }
@@ -190,8 +176,8 @@ fn truncated_text_and_missing_sources_are_refused_and_cache_nothing() {
 #[test]
 fn webp_staging_repeats_in_one_attempt_and_stays_independent_per_record() {
     let f = Fixture::new();
-    let red = generated(&f, "red.webp", &["-size", "4x4", "xc:red"]);
-    let blue = generated(&f, "blue.webp", &["-size", "4x4", "xc:blue"]);
+    let red = f.generated("red.webp", &["-size", "4x4", "xc:red"]);
+    let blue = f.generated("blue.webp", &["-size", "4x4", "xc:blue"]);
     let attempt = f.path("attempt-red");
     let first = stage(&red, &attempt).unwrap();
     let again = stage(&red, &attempt).unwrap();
@@ -211,7 +197,7 @@ fn webp_staging_repeats_in_one_attempt_and_stays_independent_per_record() {
 #[test]
 fn decodable_media_outside_the_admitted_formats_is_refused() {
     let f = Fixture::new();
-    let pixmap = generated(&f, "art.ppm", &["-size", "8x8", "xc:red"]);
+    let pixmap = f.generated("art.ppm", &["-size", "8x8", "xc:red"]);
     assert_eq!(identify(&pixmap, "%m"), "PPM", "the fixture is valid media");
     let cache = f.path(".thumbs");
     assert!(prepare_ai_image(&pixmap, &cache, None).is_err());
@@ -231,8 +217,8 @@ fn discovery_admits_the_tiff_suffix_but_not_tif() {
     };
     let f = Fixture::with_config(config);
     fs::create_dir(f.path("art")).unwrap();
-    let tiff = generated(&f, "art/page.tiff", &["-size", "4x4", "xc:red"]);
-    let tif = generated(&f, "art/page.tif", &["-size", "4x4", "xc:blue"]);
+    let tiff = f.generated("art/page.tiff", &["-size", "4x4", "xc:red"]);
+    let tif = f.generated("art/page.tif", &["-size", "4x4", "xc:blue"]);
     assert_eq!(identify(&tif, "%m"), "TIFF");
     let search = Search {
         limit: 25,

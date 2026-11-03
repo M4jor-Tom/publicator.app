@@ -3518,28 +3518,13 @@ done
         format!("00000000-0000-4000-8000-{n:012}")
     }
 
-    /// Inherited repository variables (a Git hook's `GIT_DIR`, ...) never redirect `-C dir`.
-    fn git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::git_fixture::git;
 
     /// `root/archive`, a Git prompt archive whose HEAD holds `lineage/prompt.txt` = `prompt`.
     fn prompt_archive(root: &Path, prompt: &str) -> PathBuf {
         let dir = root.join("archive");
         std::fs::create_dir_all(dir.join("lineage")).unwrap();
         git(&dir, &["init", "-q"]);
-        git(&dir, &["config", "user.name", "Test"]);
-        git(&dir, &["config", "user.email", "test@example.invalid"]);
         std::fs::write(dir.join("lineage/prompt.txt"), prompt).unwrap();
         git(&dir, &["add", "."]);
         git(&dir, &["commit", "-qm", "fixture"]);

@@ -712,21 +712,7 @@ mod tests {
         assert_eq!(blobs.values().collect::<Vec<_>>(), [b"hello"]);
     }
 
-    /// Developer config and inherited repository variables never reach these commits.
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(dir)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::git_fixture::git;
 
     /// An archive in `<root>/prompts` with one committed `scene.txt` revision per `commit` call.
     struct Repo {

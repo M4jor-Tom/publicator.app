@@ -3,6 +3,9 @@ mod executable_fixture;
 use executable_fixture::write_executable;
 #[cfg(test)]
 use executable_fixture::write_executable_observed;
+#[path = "../tests/common/git.rs"]
+mod git_fixture;
+use git_fixture::{git, git_command};
 
 use chrono::{Datelike, TimeZone};
 use publicator::{
@@ -161,35 +164,9 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
     }
 }
 
-/// Git for the disposable archive: inherited repository variables (a Git hook's `GIT_DIR`, ...)
-/// would otherwise redirect `-C archive` to the caller's repository.
-fn git_command() -> std::process::Command {
-    let mut git = std::process::Command::new("git");
-    git.env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
-    git
-}
-
-fn initialize_prompt_archive(archive: &Path, name: &str, email: &str) {
-    let git = |args: &[&str]| {
-        let output = git_command()
-            .arg("-C")
-            .arg(archive)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "fixture git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q"]);
-    git(&["config", "user.name", name]);
-    git(&["config", "user.email", email]);
-    git(&["add", "--all"]);
+fn initialize_prompt_archive(archive: &Path) {
+    git(archive, &["init", "-q"]);
+    git(archive, &["add", "--all"]);
     commit_prompt_archive_if_changed(archive).expect("commit disposable prompt archive");
 }
 
@@ -200,11 +177,7 @@ fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
     fs::create_dir_all(&picked).unwrap();
     let prompt = "MOONLIT EXACT PROMPT — <literal> 雪";
     fs::write(archive.join("lineage/prompt.txt"), prompt).unwrap();
-    initialize_prompt_archive(
-        &archive,
-        "Prompt Search Fixture",
-        "prompt-search@example.invalid",
-    );
+    initialize_prompt_archive(&archive);
     let prompt_config = PromptConfig {
         repo: "prompt-archive".into(),
         filename: r"(?P<lineage>[^_]+)_(?P<version>[0-9a-f]{40})\.png".into(),
@@ -268,7 +241,7 @@ fn gallery_fixture(dir: &Path) -> (Vec<Value>, Config) {
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(archive.join("gallery.txt"), &prompt).unwrap();
-    initialize_prompt_archive(&archive, "Gallery Fixture", "gallery@example.invalid");
+    initialize_prompt_archive(&archive);
     let prompts = PromptConfig {
         repo: "prompt-archive".into(),
         filename: r"(?P<lineage>[a-z]+)-[0-9]+_(?P<version>[0-9a-f]{40})\.png".into(),
@@ -393,7 +366,7 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
     }
-    initialize_prompt_archive(&archive, "Calendar Fixture", "calendar@example.invalid");
+    initialize_prompt_archive(&archive);
     let exact_digest = PromptGrammar::compile(&prompt_config)
         .unwrap()
         .digest(exact_text.as_bytes())
@@ -617,18 +590,14 @@ fn calendar_publication(
 }
 
 fn commit_prompt_archive_if_changed(archive: &Path) -> Result<(), String> {
-    let diff = git_command()
-        .arg("-C")
-        .arg(archive)
+    let diff = git_command(archive)
         .args(["diff", "--cached", "--quiet", "--exit-code"])
         .output()
         .map_err(|error| format!("check staged prompt archive changes: {error}"))?;
     match diff.status.code() {
         Some(0) => Ok(()),
         Some(1) => {
-            let commit = git_command()
-                .arg("-C")
-                .arg(archive)
+            let commit = git_command(archive)
                 .args(["commit", "-qm", "archive disposable calendar prompts"])
                 .output()
                 .map_err(|error| format!("commit prompt archive changes: {error}"))?;
@@ -1286,16 +1255,12 @@ mod tests {
         fs::write(&publications, serde_json::to_vec(&saved).unwrap()).unwrap();
         let manifest = fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap();
         let archive = dir.path().join("prompt-archive");
-        let head = git_command()
-            .arg("-C")
-            .arg(&archive)
+        let head = git_command(&archive)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
         assert!(head.status.success());
-        let archive_status = git_command()
-            .arg("-C")
-            .arg(&archive)
+        let archive_status = git_command(&archive)
             .args(["status", "--porcelain"])
             .output()
             .unwrap();
@@ -1312,17 +1277,13 @@ mod tests {
             fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap(),
             manifest
         );
-        let second_head = git_command()
-            .arg("-C")
-            .arg(&archive)
+        let second_head = git_command(&archive)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
         assert!(second_head.status.success());
         assert_eq!(second_head.stdout, head.stdout);
-        let second_status = git_command()
-            .arg("-C")
-            .arg(&archive)
+        let second_status = git_command(&archive)
             .args(["status", "--porcelain"])
             .output()
             .unwrap();

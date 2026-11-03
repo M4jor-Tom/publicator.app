@@ -41,11 +41,9 @@ CONTROL_PRESSED = (0xD0, 0xD0, 0xD7)  # active tab or choice; hovered pick list
 HOVER = (0xC7, 0xC7, 0xD9)  # hovered button, checkbox or scrollbar thumb
 CARD = (0x2A, 0x2A, 0x2A)  # workflow cards and calendar chips
 HEADER = (0x11, 0x11, 0x11)  # header and footer bars
-PAGE = (0x1A, 0x1A, 0x1A)
 WHITE = (0xFF, 0xFF, 0xFF)  # text inputs and editors
 NOTICE = (0xFF, 0xF3, 0xCD)  # amber confirmation banners and nearest prompts
 WARNING = (0xE0, 0xA8, 0x00)
-ERROR = (0xFF, 0x90, 0x90)
 ACCENT = (0x88, 0xAA, 0xCC)
 MUTED = (0x88, 0x88, 0x88)
 DAY = (0x22, 0x22, 0x22)
@@ -353,11 +351,13 @@ class App:
         wait_until(lambda: self.geometry() == (width, height), f"window size {width}x{height}")
 
     def shot(self):
-        width, height = self.geometry()
-        data = tool("import", "-silent", "-window", self.wid, "-depth", "8", "rgb:-",
+        data = tool("import", "-silent", "-window", self.wid, "-depth", "8", "ppm:-",
                     env=self.display.env(), timeout=30)
-        check(len(data) == width * height * 3, "window capture size mismatch")
-        self.last = Image(width, height, data)
+        header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
+        check(header, "window capture is not a binary PPM")
+        width, height, pixels = int(header[1]), int(header[2]), data[header.end():]
+        check(len(pixels) == width * height * 3, "window capture size mismatch")
+        self.last = Image(width, height, pixels)
         return self.last
 
     def park(self):
@@ -521,7 +521,7 @@ def buttons(img, region, min_w=30):
 
 
 def cards(img, region):
-    return [box for box in img.boxes(CARD, region, 150, 100)]
+    return img.boxes(CARD, region, 150, 100)
 
 
 def notice(img, region=None):
@@ -780,16 +780,12 @@ def search(app, limit_index=None):
     """Press Search (optionally choosing a candidate limit first) at the top of Pick, and wait
     for its result line: until then the screen still shows the previous list."""
     navigate(app, "Pick")
-    jump_top(app)
+    jump(app, 0.0)
     if limit_index is not None:
         choose(app, app.look(pick_controls, "Pick controls")[0], limit_index, 5)
     status = header_status(app.shot())
     app.click(center(app.look(pick_controls, "Pick controls")[-1]))
     app.look(lambda img: header_status(img) != status, "the search's result line")
-
-
-def jump_top(app):
-    jump(app, 0.0)
 
 
 def list_names(app, palette, what):
@@ -798,7 +794,7 @@ def list_names(app, palette, what):
     viewport per stop. Cards growing as they load drift the view further, which can skip a row,
     so a stop sharing no card with the previous one backs up: each view is a contiguous run of
     the list, so overlapping views leave no gap. (xdotool wheel clicks do not reach Iced on Xvfb.)"""
-    jump_top(app)
+    jump(app, 0.0)
     seen, previous, backups = [], [], 0
     while True:
         names = [name for name, _ in previews(app, palette, what)[2]]
@@ -818,7 +814,7 @@ def list_names(app, palette, what):
 
 def search_paths(app):
     """The Pick search-path checkboxes (scrolled into view) with their states."""
-    jump_top(app)
+    jump(app, 0.0)
     return app.look(lambda img: checkboxes(img, (0, 0, 400, img.h)), "search path checkboxes")
 
 
@@ -848,7 +844,7 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     app.click(center(search_paths(app)[0][0]))
     app.look(lambda img: checkboxes(img, (0, 0, 400, img.h))[0][1], "art ticked")
     search(app)
-    jump_top(app)
+    jump(app, 0.0)
     img, region, blocks = previews(app, palette, "Pick")
     # Selection: the card showing image A is the candidate A that becomes PICKED.
     name, box = blocks[0]
@@ -858,7 +854,7 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     wait_until(lambda: name in phase_names(app, ("PICKED",)), f"{name} to be picked")
     app.look(lambda img: tabs(img)[1][1], "Pick to open Schedule")
     navigate(app, "Pick")
-    jump_top(app)
+    jump(app, 0.0)
     img, region, blocks = previews(app, palette, "Pick")
     check(name not in [n for n, _ in blocks], f"picked {name} is still offered in Pick")
     # Delete: cancel keeps the file; confirm removes it and its card. Narrower, the banner's long
@@ -869,7 +865,7 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     target = app.fixture / ("art" if name in art else "more") / name
     before = app.digest()
     for confirm in (False, True):
-        card = card_of(app.look(lambda img: img, "cards"), region, name, palette)
+        card = card_of(app.shot(), region, name, palette)
         app.click(center(wide_buttons(app.shot(), card)[1]))
         banner, found = app.look(notice, "delete confirmation")
         # Whole buttons: "Cancel", the narrower, is about 72 px wide.
@@ -905,7 +901,7 @@ def schedule_custom_preset_refresh_and_persistence(ctx):
     date, time_ = inputs(img, area(card))[:2]
     type_into(app, date, "2031-02-03")
     type_into(app, time_, "04:05")
-    app.click(center(wide_buttons(app.look(lambda img: img, "card"), card)[0]))
+    app.click(center(wide_buttons(app.shot(), card)[0]))
     wanted = int(datetime.datetime(2031, 2, 3, 4, 5, tzinfo=PARIS).timestamp())
     wait_until(lambda: schedule_of(app.row(rows[0]["uuid"])) == wanted, "custom wall time saved")
     # Preset on the second card: the named profile's next Saturday 09:00 in Paris.
@@ -967,10 +963,6 @@ class InodeWatch:
         return len(self.inodes) - 1
 
 
-def describe_cards(app, palette):
-    return previews(app, palette, "Describe")
-
-
 @story
 def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     app = ctx.launch("gallery", size=(1100, 1000))  # the first card's Save draft on screen
@@ -978,13 +970,13 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     navigate(app, "Describe")
     expected = phase_names(app, ("SCHEDULED",))
     target = next(row for row in app.rows() if row["files"][0]["basename"] == expected[0])
-    img, region, blocks = describe_cards(app, palette)
+    img, region, blocks = previews(app, palette, "Describe")
     assert_order(blocks, expected, "Describe")
 
     def fields():
         """The first card and its title and description inputs, located afresh: a header
         status line appearing after a save shifts the whole list down."""
-        img, region, _ = describe_cards(app, palette)
+        img, region, _ = previews(app, palette, "Describe")
         card = card_of(img, region, expected[0], palette)
         return (card, *inputs(img, area(card))[:2])
 
@@ -1008,7 +1000,7 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     wait_until(lambda: app.row(target["uuid"])["title"] == "Explicit save", "explicit save", 5)
     # Failure keeps the dirty field; Retry save lands it once the store is writable again.
     stored = app.digest()
-    status = header_status(app.look(lambda img: img, "header"))
+    status = header_status(app.shot())
     app.fixture.chmod(0o555)
     try:
         type_into(app, title, "Kept through failure ✓")
@@ -1030,7 +1022,7 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     app = ctx.launch("gallery")
     check(app.row(target["uuid"])["description"] == "\n".join(lines), "restart lost the description")
     navigate(app, "Describe")
-    describe_cards(app, palette)
+    previews(app, palette, "Describe")
     close_and_wait(app)
 
 
@@ -1057,14 +1049,14 @@ def describe_model_install_consent(ctx):
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     navigate(app, "Describe")
     marked = next(row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"])
-    img, region, _ = describe_cards(app, palette)
+    img, region, _ = previews(app, palette, "Describe")
     openrouter, local, small, large, _ = describe_controls(img, region)
     for choice in (local, small):
         app.click(center(choice))
         app.look(lambda img: pressed(img, choice), "provider/model choice")
 
     def generate():
-        img, region, _ = describe_cards(app, palette)
+        img, region, _ = previews(app, palette, "Describe")
         card = card_of(img, region, marked["files"][0]["basename"], palette)
         app.click(center(wide_buttons(img, card)[0]))  # Generate one
         return app.look(notice, "install consent")
@@ -1219,6 +1211,12 @@ def press_publish(app):
     return button
 
 
+def close_choices(app):
+    """The Wait / Cancel buttons a close request offers above the footer while publishing."""
+    return app.look(lambda img: buttons(img, (0, content(img)[3] - 60, img.w, content(img)[3]), 60),
+                    "Wait / Cancel close choices")
+
+
 @story
 def gated_publish_survives_every_close_route(ctx):
     settings = {"worker_gate": True, "worker_outcomes": ["scheduled", "scheduled"]}
@@ -1229,8 +1227,7 @@ def gated_publish_survives_every_close_route(ctx):
     wait_until(started.exists, "the gated worker to start")
     worker = int((app.fixture / "worker-1-pgid").read_text())
     app.close_window()
-    wait_buttons = app.look(lambda img: buttons(img, (0, content(img)[3] - 60, img.w, content(img)[3]), 60),
-                            "Wait / Cancel close choices")
+    wait_buttons = close_choices(app)
     check(len(wait_buttons) == 2, f"close choices {wait_buttons}")
     for index in (3, 0):  # Discard drafts and close, then Refresh
         press_footer(app, index)
@@ -1253,8 +1250,7 @@ def gated_publish_survives_every_close_route(ctx):
     press_publish(app)
     wait_until((app.fixture / "worker-1-started").exists, "the gated worker to start")
     app.close_window()
-    wait_buttons = app.look(lambda img: buttons(img, (0, content(img)[3] - 60, img.w, content(img)[3]), 60),
-                            "Wait / Cancel close choices")
+    wait_buttons = close_choices(app)
     app.click(center(wait_buttons[1]))
     stays(app.alive, "app while cancelling", 1)
     (app.fixture / "worker-1-release").touch()
@@ -1425,7 +1421,7 @@ def reopen_keeps_saved_edits(ctx):
     navigate(app, "Describe")
     target = phase_names(app, ("SCHEDULED",))[0]
     uuid_ = next(r["uuid"] for r in app.rows() if r["files"][0]["basename"] == target)
-    img, region, _ = describe_cards(app, palette)
+    img, region, _ = previews(app, palette, "Describe")
     title = inputs(img, area(card_of(img, region, target, palette)))[0]
     type_into(app, title, "Reopened ✓")
     wait_until(lambda: app.row(uuid_)["title"] == "Reopened ✓", "saved edit")

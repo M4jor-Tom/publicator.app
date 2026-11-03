@@ -4,34 +4,12 @@ use publicator::{
 };
 use std::{
     path::Path,
-    process::Command,
     sync::{Arc, Barrier},
-    time::{Duration, Instant},
 };
 
-/// Git confined to `dir`: explicit repository, work tree, index and config, so an inherited
-/// hook environment (`GIT_DIR`, `GIT_INDEX_FILE`, ...) can never redirect a test commit.
-fn git(dir: &Path, args: &[&str]) {
-    let git_dir = dir.join(".git");
-    let output = Command::new("git")
-        .current_dir(dir)
-        .env("GIT_DIR", &git_dir)
-        .env("GIT_WORK_TREE", dir)
-        .env("GIT_INDEX_FILE", git_dir.join("index"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "git {args:?}: {stderr}");
-}
+mod common;
+use common::git::git;
+
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q"]);
@@ -394,29 +372,16 @@ fn archive_git_ignores_inherited_repository_environment() {
     commit(tmp.path(), "scene.txt", "isolated prompt");
     let bogus = tmp.path().join("missing.git");
     // Child-only environment: never mutate this test process's env under parallel tests.
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--nocapture"])
-        .env(CHILD, tmp.path())
-        .env("GIT_DIR", &bogus)
-        .env("GIT_WORK_TREE", &bogus)
-        .env("GIT_INDEX_FILE", bogus.join("index"))
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() > deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("isolated archive child timed out");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    assert!(
-        status.success(),
-        "inherited GIT_* must not redirect the archive"
+    // A failed child means inherited GIT_* redirected the archive.
+    common::run_child_test(
+        NAME,
+        tmp.path(),
+        &[
+            (CHILD, tmp.path().as_os_str()),
+            ("GIT_DIR", bogus.as_os_str()),
+            ("GIT_WORK_TREE", bogus.as_os_str()),
+            ("GIT_INDEX_FILE", bogus.join("index").as_os_str()),
+        ],
     );
 }
 

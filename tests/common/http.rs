@@ -21,6 +21,16 @@ pub struct Reply {
     pub body: String,
 }
 
+impl Reply {
+    pub fn new(path: &str, status: u16, body: impl ToString) -> Self {
+        Self {
+            path: path.into(),
+            status,
+            body: body.to_string(),
+        }
+    }
+}
+
 pub struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,

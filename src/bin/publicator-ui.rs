@@ -49,8 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../tests/common/process.rs"]
+mod process_fixture;
+
+#[cfg(test)]
 mod tests {
-    use super::{Args, gui_metadata_endpoints};
+    use super::{Args, gui_metadata_endpoints, process_fixture::run_child_test};
     use clap::Parser;
     use publicator::metadata::VISION_MODELS;
 
@@ -91,18 +96,11 @@ mod tests {
 
     #[test]
     fn gui_ignores_inherited_cli_ollama_endpoint_override() {
-        // The override is set for the child only; `timeout` kills and reaps a hung child.
-        let child = std::process::Command::new("timeout")
-            .args(["-k", "5", "60"])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::gui_endpoint_child"])
-            .env("PUBLICATOR_OLLAMA_URL", OVERRIDE)
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&child.stdout);
-        assert!(
-            child.status.success() && stdout.contains("1 passed"),
-            "{stdout}"
+        // The override is set for the child only.
+        run_child_test(
+            "tests::gui_endpoint_child",
+            &std::env::current_dir().unwrap(),
+            &[("PUBLICATOR_OLLAMA_URL", std::ffi::OsStr::new(OVERRIDE))],
         );
     }
 }
