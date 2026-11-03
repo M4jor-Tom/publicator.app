@@ -256,10 +256,16 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
     if state.calendar_prepared || state.calendar_preparing {
         return Task::none();
     }
+    let generation = state.load_generation;
     let rows = state.publications.as_deref().unwrap_or_default().to_vec();
     let events = match calendar::timeline(&rows) {
         Ok(events) => events,
-        Err(error) => return Task::done(Message::CalendarPrepared(Err(error.to_string()))),
+        Err(error) => {
+            return Task::done(Message::CalendarPrepared(
+                generation,
+                Err(error.to_string()),
+            ));
+        }
     };
     let basenames = events
         .iter()
@@ -302,7 +308,7 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
             .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
             .map_err(|error| error.to_string())
         },
-        Message::CalendarPrepared,
+        move |result| Message::CalendarPrepared(generation, result),
     )
 }
 

@@ -131,6 +131,18 @@ impl Draft {
         self.field(field).last_sent.as_deref()
     }
 
+    /// Takes the stored text for every field without unsaved input.
+    pub fn rebase(&mut self, title: String, description: String) {
+        for (field, text) in [
+            (&mut self.title, title),
+            (&mut self.description, description),
+        ] {
+            if !field.dirty {
+                field.text = text;
+            }
+        }
+    }
+
     pub fn discard(&mut self, title: String, description: String) {
         *self = Self::new(title, description);
     }

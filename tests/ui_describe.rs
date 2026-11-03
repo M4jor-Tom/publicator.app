@@ -11,36 +11,6 @@ use publicator::{
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
-async fn run_tasks(task: iced::Task<Message>) -> Vec<Message> {
-    use iced::futures::StreamExt;
-    use iced_runtime::Action;
-    let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
-    let mut messages = Vec::new();
-    while let Some(action) = actions.next().await {
-        if let Action::Output(message) = action {
-            messages.push(message);
-        }
-    }
-    messages
-}
-
-/// Runs `task` and every task its messages chain, as the Iced runtime would.
-async fn settle(app: &mut App, task: iced::Task<Message>) {
-    use iced::futures::StreamExt;
-    use iced_runtime::Action;
-    let mut tasks = vec![task];
-    while let Some(task) = tasks.pop() {
-        let Some(mut actions) = iced_runtime::task::into_stream(task) else {
-            continue;
-        };
-        while let Some(action) = actions.next().await {
-            if let Action::Output(message) = action {
-                tasks.push(app.update(message));
-            }
-        }
-    }
-}
-
 /// A one-column list viewport, so each card is its own row.
 fn column_at(offset: f32, height: f32) -> Viewport {
     Viewport {
@@ -50,19 +20,15 @@ fn column_at(offset: f32, height: f32) -> Viewport {
     }
 }
 
-async fn run_task(task: iced::Task<Message>) -> Message {
-    use iced::futures::StreamExt;
-    use iced_runtime::Action;
-    let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
-    while let Some(action) = actions.next().await {
-        if let Action::Output(message) = action {
-            return message;
-        }
-    }
-    panic!("dispatched task produced no completion message");
+fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
+    fixture_app_with_model(f, endpoint, None)
 }
 
-fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
+fn fixture_app_with_model(
+    f: &Fixture,
+    endpoint: String,
+    openrouter_model: Option<publicator::metadata::ModelOption>,
+) -> (App, Arc<Application>) {
     let store = Arc::new(f.store.clone());
     let client = MetadataClient::new(
         reqwest::Client::new(),
@@ -77,16 +43,16 @@ fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
     let (mut app, _) = App::from_application(
         application.clone(),
         UiOptions {
-            openrouter_model: None,
+            openrouter_model,
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
     (app, application)
 }
 
 async fn select_local(app: &mut App) {
-    let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+    let selected = common::ui::first_output(app.update(Message::SelectSource(Source::Local))).await;
     let _ = app.update(selected);
 }
 
@@ -179,7 +145,7 @@ fn local_fixture_app(
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
     (app, application)
 }
 
@@ -249,10 +215,10 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
     let _ = app.update(Message::SelectSource(Source::Local));
     let task = app.update(Message::GenerateOne(id(1)));
-    let fit_result = run_task(task).await;
+    let fit_result = common::ui::first_output(task).await;
     assert!(matches!(fit_result, Message::LocalFitFinished { .. }));
     let _ = app.update(fit_result);
     let status = app.local_fit_status().unwrap();
@@ -285,11 +251,11 @@ async fn installed_good_local_model_generates_without_pull_or_install_modal() {
     let status = app.local_fit_status().unwrap();
     assert_eq!(status.fit.reason, "Fits in memory");
     assert!(status.available && status.installed);
-    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     assert!(matches!(checked, Message::LocalFitFinished { .. }));
     assert!(!app.local_install_consent_pending());
     let generation = app.update(checked);
-    let completed = run_task(generation).await;
+    let completed = common::ui::first_output(generation).await;
     let _ = app.update(completed);
     let calls = server.requests();
     assert_eq!(
@@ -328,7 +294,7 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
         server.url().into(),
     );
     select_local(&mut app).await;
-    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
@@ -339,7 +305,7 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
             .any(|call| call["path"] == "/api/pull")
     );
     let generation = app.update(Message::ConfirmLocalInstall);
-    let _ = app.update(run_task(generation).await);
+    let _ = app.update(common::ui::first_output(generation).await);
     let calls = server.requests();
     assert_eq!(
         calls
@@ -381,7 +347,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
     let _pending_status = app.update(Message::SelectSource(Source::Local));
     edit_manual_metadata(&mut app);
 
-    let fit_result = run_task(app.update(Message::GenerateMarked)).await;
+    let fit_result = common::ui::first_output(app.update(Message::GenerateMarked)).await;
     assert!(matches!(fit_result, Message::LocalFitFinished { .. }));
     let _ = app.update(fit_result);
     let status = app.local_fit_status().unwrap();
@@ -430,10 +396,10 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
     // The Good/installed fit result immediately continues without consent. Add
     // a draft while status is pending so the batch identity must survive save.
     let fit_task = app.update(Message::GenerateMarked);
-    let status = run_task(fit_task).await;
+    let status = common::ui::first_output(fit_task).await;
     edit_manual_metadata(&mut app);
     let flush = app.update(status);
-    let saved = run_task(flush).await;
+    let saved = common::ui::first_output(flush).await;
     let generation = app.update(saved);
 
     // The generation Task has not been polled/admitted yet. Its expected batch
@@ -441,7 +407,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
     // one marker during the required save.
     assert_eq!(f.read()[0]["title"], "Manual title");
     let after_flush = std::fs::read(&f.store.paths().json).unwrap();
-    let finished = run_task(generation).await;
+    let finished = common::ui::first_output(generation).await;
     assert!(
         matches!(
             finished,
@@ -467,7 +433,7 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
     f.write(json!([art_marker_row(&f, 1), marker_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
-    let status = run_task(app.update(Message::GenerateMarked)).await;
+    let status = common::ui::first_output(app.update(Message::GenerateMarked)).await;
     let generation = app.update(status);
     f.store
         .mutate(|rows| {
@@ -477,7 +443,7 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
         })
         .unwrap();
     let saved = std::fs::read(&f.store.paths().json).unwrap();
-    let finished = run_task(generation).await;
+    let finished = common::ui::first_output(generation).await;
     assert!(matches!(
         finished,
         Message::GenerationFinished {
@@ -515,7 +481,7 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     );
     let _pending_status = app.update(Message::SelectSource(Source::Local));
     edit_manual_metadata(&mut app);
-    let checked = run_task(app.update(Message::GenerateMarked)).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateMarked)).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
@@ -533,13 +499,13 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let saved = std::fs::read(&f.store.paths().json).unwrap();
     assert_ne!(saved, before);
     assert_eq!(f.read()[0]["title"], "Manual title");
-    let saved_message = run_task(confirm).await;
+    let saved_message = common::ui::first_output(confirm).await;
     assert!(matches!(
         saved_message,
         Message::SaveFinished { result: Ok(()), .. }
     ));
     let generation = app.update(saved_message);
-    let finished = run_task(generation).await;
+    let finished = common::ui::first_output(generation).await;
     assert!(matches!(
         finished,
         Message::GenerationFinished {
@@ -563,7 +529,7 @@ async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
-    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(app.local_install_consent_pending());
     let _ = app.update(Message::CancelLocalInstall);
@@ -591,14 +557,14 @@ async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
         server.url().into(),
     );
     select_local(&mut app).await;
-    let first = run_task(app.update(Message::GenerateOne(id(1)))).await;
-    let second = run_task(app.update(Message::GenerateOne(id(2)))).await;
+    let first = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
+    let second = common::ui::first_output(app.update(Message::GenerateOne(id(2)))).await;
     let _ = app.update(first);
     assert!(!app.local_install_consent_pending());
     let _ = app.update(second);
     assert!(app.local_install_consent_pending());
     let generation = app.update(Message::ConfirmLocalInstall);
-    let _ = app.update(run_task(generation).await);
+    let _ = app.update(common::ui::first_output(generation).await);
     assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
     assert_eq!(f.read()[1]["title"], "Only second");
     assert_eq!(f.read()[1]["state"], "DESCRIBED");
@@ -627,9 +593,10 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
             ),
             server.url().into(),
         );
-        let selected = run_task(app.update(Message::SelectSource(Source::Local))).await;
+        let selected =
+            common::ui::first_output(app.update(Message::SelectSource(Source::Local))).await;
         let _ = app.update(selected);
-        let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+        let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
         let _ = app.update(checked);
         assert_eq!(app.local_fit_status().unwrap().fit.reason, expected_reason);
         assert!(!app.local_install_consent_pending());
@@ -643,7 +610,7 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
     let server = common::http::Server::start(vec![]);
     let (mut app, _) = local_fixture_app(&f, failed_llmfit(&f), server.url().into());
     select_local(&mut app).await;
-    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     assert!(
         app.local_fit_status()
@@ -668,7 +635,7 @@ async fn good_fit_with_unavailable_ollama_never_prompts_or_mutates() {
         "http://127.0.0.1:1".into(),
     );
     select_local(&mut app).await;
-    let checked = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let checked = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(checked);
     let status = app.local_fit_status().unwrap();
     assert!(status.fit.fit);
@@ -684,7 +651,7 @@ async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
-    let consent_result = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let consent_result = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let stale_copy = consent_result.clone();
     let _ = app.update(consent_result);
     assert!(app.local_install_consent_pending());
@@ -706,8 +673,9 @@ async fn model_change_invalidates_in_flight_local_fit_before_consent() {
     f.write(json!([marker_row(1)]));
     let (mut app, _server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
-    let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
-    let current = run_task(app.update(Message::SelectModel(VISION_MODELS[1].clone()))).await;
+    let stale = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
+    let current =
+        common::ui::first_output(app.update(Message::SelectModel(VISION_MODELS[1].clone()))).await;
     let _ = app.update(stale);
     assert!(!app.local_install_consent_pending());
     let _ = app.update(current);
@@ -721,7 +689,7 @@ async fn source_change_invalidates_in_flight_local_fit_before_consent() {
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, _server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
-    let stale = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let stale = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     let _ = app.update(Message::SelectSource(Source::OpenRouter));
     let _ = app.update(stale);
     assert!(!app.local_install_consent_pending());
@@ -750,7 +718,9 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
         body: json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Saved after provider completion."}).to_string()}}]}).to_string(),
     });
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
-    let task = tokio::spawn(run_task(app.update(Message::GenerateOne(id(1)))));
+    let task = tokio::spawn(common::ui::first_output(
+        app.update(Message::GenerateOne(id(1))),
+    ));
     tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
         .await
         .unwrap();
@@ -764,7 +734,7 @@ async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted(
         field: publicator::ui::drafts::Field::Title,
         text: "unrelated".into(),
     });
-    let save_other = run_task(app.update(Message::SaveDraft(id(2)))).await;
+    let save_other = common::ui::first_output(app.update(Message::SaveDraft(id(2)))).await;
     assert!(matches!(
         save_other,
         Message::SaveFinished { result: Ok(()), .. }
@@ -809,7 +779,7 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
     let _ = app.update(Message::Viewport(Tab::Pick, column_at(0.0, 700.0)));
     let candidates =
         publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
@@ -818,17 +788,18 @@ async fn previews_are_requested_for_initial_visible_cards_then_later_scrolled_ca
         request_id: 0,
         result: Ok(candidates),
     });
-    settle(&mut app, task).await;
+    common::ui::settle(&mut app, task).await;
     let cache = f.path(".thumbs");
     let initial = std::fs::read_dir(&cache).unwrap().count();
     assert!(initial < 10);
     let task = app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0)));
-    settle(&mut app, task).await;
+    common::ui::settle(&mut app, task).await;
     let after_scroll = std::fs::read_dir(&cache).unwrap().count();
     assert!(after_scroll > initial);
     assert!(
-        run_tasks(app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0))))
+        common::ui::run(app.update(Message::Viewport(Tab::Pick, column_at(2800.0, 700.0))))
             .await
+            .messages
             .is_empty()
     );
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), after_scroll);
@@ -853,17 +824,18 @@ async fn describe_previews_share_lazy_scroll_boundary() {
     assert_eq!(f.store.read().unwrap().len(), 10);
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
     let task = app.update(Message::Viewport(Tab::Describe, column_at(0.0, 600.0)));
-    settle(&mut app, task).await;
+    common::ui::settle(&mut app, task).await;
     let cache = f.path(".thumbs");
     let initial = std::fs::read_dir(&cache).unwrap().count();
     assert!(initial < 10);
     let task = app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0)));
-    settle(&mut app, task).await;
+    common::ui::settle(&mut app, task).await;
     let after_scroll = std::fs::read_dir(&cache).unwrap().count();
     assert!(after_scroll > initial);
     assert!(
-        run_tasks(app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0))))
+        common::ui::run(app.update(Message::Viewport(Tab::Describe, column_at(2400.0, 600.0))))
             .await
+            .messages
             .is_empty()
     );
     assert_eq!(std::fs::read_dir(cache).unwrap().count(), after_scroll);
@@ -872,7 +844,6 @@ async fn describe_previews_share_lazy_scroll_boundary() {
 #[tokio::test]
 async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
     use fs2::FileExt;
-    use iced_runtime::{Action, futures::futures::StreamExt};
 
     async fn run_case(
         newer_field: publicator::ui::drafts::Field,
@@ -903,16 +874,7 @@ async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
             .unwrap();
         lock.lock_exclusive().unwrap();
         let task = app.update(Message::SaveDraft(id(1)));
-        let mut actions = iced_runtime::task::into_stream(task).expect("save task stream");
-        let first_save = tokio::spawn(async move {
-            loop {
-                match actions.next().await {
-                    Some(Action::Output(message)) => break message,
-                    Some(_) => {}
-                    None => panic!("first save task ended without completion"),
-                }
-            }
-        });
+        let first_save = tokio::spawn(common::ui::first_output(task));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!first_save.is_finished());
         let _ = app.update(Message::Edited {
@@ -931,7 +893,7 @@ async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
         assert_eq!(intermediate[0]["title"], "First edit");
         assert_eq!(intermediate[0]["description"], "Stored description");
         let second_task = app.update(first);
-        let second = run_task(second_task).await;
+        let second = common::ui::first_output(second_task).await;
         assert!(matches!(
             second,
             Message::SaveFinished { result: Ok(()), .. }
@@ -959,6 +921,46 @@ async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
 }
 
 #[tokio::test]
+async fn repeated_explicit_save_lands_the_newest_revision_last() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let edit = |app: &mut App, n, text: &str| {
+        let _ = app.update(Message::Edited {
+            uuid: id(n),
+            field: publicator::ui::drafts::Field::Title,
+            text: text.into(),
+        });
+    };
+    edit(&mut app, 1, "Revision A");
+    let held_a = app.update(Message::SaveDraft(id(1)));
+    edit(&mut app, 1, "Revision B");
+    edit(&mut app, 2, "Unrelated");
+    let unrelated = common::ui::send(&mut app, Message::SaveDraft(id(2))).await;
+    assert!(
+        unrelated
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::SaveFinished { result: Ok(()), .. })),
+        "an unrelated record stays saveable while A is in flight: {unrelated:?}"
+    );
+    assert_eq!(f.read()[1]["title"], "Unrelated");
+
+    // A second explicit save of the same draft would land before the held A.
+    common::ui::send(&mut app, Message::SaveDraft(id(1))).await;
+    common::ui::settle(&mut app, held_a).await;
+    assert_eq!(f.read()[0]["title"], "Revision B");
+    let refresh = common::ui::send(&mut app, Message::Refresh).await;
+    assert!(
+        refresh
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::LoadFinished(_, Ok(_)))),
+        "the newest revision is clean, so Refresh is admitted: {refresh:?}"
+    );
+}
+
+#[tokio::test]
 async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
     f.write(json!([art_marker_row(&f, 1)]));
@@ -972,14 +974,14 @@ async fn dirty_draft_is_saved_before_single_generation_starts() {
         field: publicator::ui::drafts::Field::Title,
         text: "Manual draft".into(),
     });
-    let saved = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let saved = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     assert!(matches!(
         saved,
         Message::SaveFinished { result: Ok(()), .. }
     ));
     assert_eq!(f.read()[0]["title"], "Manual draft");
     let generation = app.update(saved);
-    let completed = run_task(generation).await;
+    let completed = common::ui::first_output(generation).await;
     let _ = app.update(completed);
     server.finish();
     assert_eq!(f.read()[0]["title"], "Generated");
@@ -1010,7 +1012,7 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     ]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
 
-    let failed = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let failed = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     assert!(matches!(
         failed,
         Message::GenerationFinished { result: Err(_), .. }
@@ -1020,7 +1022,7 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
     assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
 
-    let retried = run_task(app.update(Message::GenerateOne(id(1)))).await;
+    let retried = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     assert!(matches!(
         retried,
         Message::GenerationFinished { result: Ok(_), .. }
@@ -1054,7 +1056,7 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
     }).collect();
     let server = Server::start(replies);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
-    let completion = run_task(app.update(Message::GenerateMarked)).await;
+    let completion = common::ui::first_output(app.update(Message::GenerateMarked)).await;
     assert!(matches!(
         &completion,
         Message::GenerationFinished { result: Ok(_), .. }
@@ -1072,6 +1074,26 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
         assert_eq!(f.read()[n - 1]["title"], format!("title-{n}"));
         assert_eq!(f.read()[n - 1]["state"], "DESCRIBED");
     }
+}
+
+#[tokio::test]
+async fn startup_model_option_selects_the_model_sent_to_the_provider() {
+    let f = Fixture::new();
+    f.write(json!([art_marker_row(&f, 1)]));
+    let server = common::http::Server::start(vec![ollama_reply(
+        "/chat/completions",
+        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
+    )]);
+    let (mut app, _) =
+        fixture_app_with_model(&f, server.url().to_owned(), Some(VISION_MODELS[1].clone()));
+    let completion = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
+    assert!(matches!(
+        completion,
+        Message::GenerationFinished { result: Ok(_), .. }
+    ));
+    let requests = server.requests();
+    server.finish();
+    assert_eq!(requests[0]["body"]["model"], "google/gemma-4-31b-it:free");
 }
 
 #[test]
@@ -1096,7 +1118,7 @@ async fn native_multiline_description_editor_keeps_unicode_and_literal_markup() 
             std::sync::Arc::new("first line\n雪 <script>alert('literal')</script>".into()),
         )),
     });
-    let saved = run_task(app.update(Message::SaveDraft(uuid))).await;
+    let saved = common::ui::first_output(app.update(Message::SaveDraft(uuid))).await;
     assert!(matches!(
         saved,
         Message::SaveFinished { result: Ok(()), .. }

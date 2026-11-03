@@ -29,7 +29,6 @@ The original audit changed no application code. Publishing these documents fixes
 |---|---|
 | [Metadata](metadata.md) | Newer edits, provider tests, deadlines, admission and persistence |
 | [Prompts](prompts.md) | Archive refresh, Git paths, Nearest contract and bounded search |
-| [UI](ui.md) | Drafts, close actions, model selection and completion ordering |
 | [Native UI](native-ui.md) | Reproducible interactions and actual viewport geometry |
 | [Test infrastructure](test-infrastructure.md) | CI, packaging, development launch, fixtures and coverage |
 | [Fixtures](fixtures.md) | Offline synthetic-data requirements beyond fake image filenames |

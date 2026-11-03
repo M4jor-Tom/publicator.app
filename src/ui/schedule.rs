@@ -24,7 +24,10 @@ pub fn edit_date(application: &Application, uuid: &str, edit: DateEdit, now: i64
     })
 }
 
+/// The single path for preset, custom and suggested date saves: any of them supersedes the
+/// row's unsaved custom input.
 pub(super) fn date_task(app: &mut App, uuid: String, edit: DateEdit) -> Task<Message> {
+    app.custom_dates.remove(&uuid);
     let application = app.application.clone();
     app.busy = true;
     Task::perform(
@@ -53,6 +56,11 @@ pub(super) fn custom_task(app: &mut App, uuid: String) -> Task<Message> {
 }
 
 pub(super) fn approve_task(app: &mut App, uuid: String) -> Task<Message> {
+    // The card shows the unsaved input, so approving would approve a different, hidden date.
+    if app.custom_dates.contains_key(&uuid) {
+        app.result = Some("Save Custom or choose a date before approving".into());
+        return Task::none();
+    }
     let application = app.application.clone();
     app.busy = true;
     Task::perform(

@@ -31,7 +31,7 @@ fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> publicator
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(vec![row])));
+    let _ = app.update(Message::LoadFinished(0, Ok(vec![row])));
     app
 }
 
@@ -47,7 +47,6 @@ fn selection_is_partial_when_only_one_pending_cell_is_checked() {
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_checkbox_persists_registered_target_through_ui_task() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::ui::Message;
     use std::sync::Arc;
 
@@ -63,19 +62,7 @@ async fn publish_checkbox_persists_registered_target_through_ui_task() {
         key: "00000000-0000-4000-8000-000000000001:deviantart".into(),
         selected: true,
     });
-    let mut actions = iced_runtime::task::into_stream(task).expect("workflow task dispatched");
-    let completion = loop {
-        match actions.next().await {
-            Some(Action::Output(message)) => break message,
-            Some(_) => continue,
-            None => panic!("workflow task produced no completion"),
-        }
-    };
-    assert!(matches!(
-        &completion,
-        Message::WorkflowFinished { result: Ok(()), .. }
-    ));
-    let _ = app.update(completion);
+    common::ui::finish_workflow(&mut app, task).await;
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(
@@ -89,7 +76,6 @@ async fn publish_checkbox_persists_registered_target_through_ui_task() {
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::{
         config::{Config, Paths},
         publishing::Publisher,
@@ -124,7 +110,7 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(vec![row.clone()])));
+    let _ = app.update(Message::LoadFinished(0, Ok(vec![row.clone()])));
     let _ = app.update(Message::PublishLocksFinished(Ok(
         std::collections::HashSet::new(),
     )));
@@ -136,17 +122,9 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
         })
         .unwrap();
 
-    let task = app.update(Message::PublishSelected);
-    let mut actions = iced_runtime::task::into_stream(task).expect("publish task dispatched");
-    let completion = loop {
-        match actions.next().await {
-            Some(Action::Output(message)) => break message,
-            Some(_) => continue,
-            None => panic!("publish task produced no completion"),
-        }
-    };
+    let completion = common::ui::first_output(app.update(Message::PublishSelected)).await;
     match &completion {
-        Message::PublishFinished(completion) => {
+        Message::PublishFinished(_, completion) => {
             assert!(
                 completion
                     .result
@@ -178,66 +156,6 @@ fn calendar_timeline_keeps_each_apparition_and_its_actual_url() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].url.as_deref(), Some("https://example.test/item"));
     assert!(events.iter().all(|event| event.title == "<literal>"));
-}
-
-#[cfg(feature = "desktop")]
-async fn run_ui_task(task: iced::Task<publicator::ui::Message>) -> Vec<publicator::ui::Message> {
-    use iced_runtime::{Action, futures::futures::StreamExt};
-    let Some(mut actions) = iced_runtime::task::into_stream(task) else {
-        return Vec::new();
-    };
-    let mut messages = Vec::new();
-    while let Some(action) = actions.next().await {
-        if let Action::Output(message) = action {
-            messages.push(message);
-        }
-    }
-    messages
-}
-
-#[cfg(feature = "desktop")]
-async fn dispatch_options_message(
-    app: &mut publicator::ui::App,
-    message: publicator::ui::Message,
-) -> Vec<publicator::ui::Message> {
-    let mut pending = run_ui_task(app.update(message)).await;
-    let mut completed = Vec::new();
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        for message in pending {
-            next.extend(run_ui_task(app.update(message.clone())).await);
-            completed.push(message);
-        }
-        pending = next;
-    }
-    completed
-}
-
-#[cfg(feature = "desktop")]
-async fn dispatch_ui_task(
-    app: &mut publicator::ui::App,
-    task: iced::Task<publicator::ui::Message>,
-) -> Vec<publicator::ui::Message> {
-    let mut pending = run_ui_task(task).await;
-    let mut completed = Vec::new();
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        for message in pending {
-            next.extend(run_ui_task(app.update(message.clone())).await);
-            completed.push(message);
-        }
-        pending = next;
-    }
-    completed
-}
-
-#[cfg(feature = "desktop")]
-async fn dispatch_ui_message(
-    app: &mut publicator::ui::App,
-    message: publicator::ui::Message,
-) -> Vec<publicator::ui::Message> {
-    let task = app.update(message);
-    dispatch_ui_task(app, task).await
 }
 
 #[cfg(feature = "desktop")]
@@ -362,7 +280,7 @@ fn scheduled_jump_app() -> (
             Ok(())
         })
         .unwrap();
-    let _ = app.update(Message::LoadFinished(Ok(store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
     (app, store, root)
 }
 
@@ -417,144 +335,172 @@ where
     }
 }
 
+/// A publish whose first delivery is held inside the fake worker until `release_publish`.
 #[cfg(feature = "desktop")]
-#[tokio::test]
-async fn close_cancel_stops_after_current_receipt_without_dropping_publisher_task() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
-    use publicator::ui::Message;
-    use std::time::Duration;
+struct HeldPublish {
+    fixture: common::Fixture,
+    app: publicator::ui::App,
+    store: std::sync::Arc<publicator::store::Store>,
+    actions: iced_runtime::futures::BoxStream<iced_runtime::Action<publicator::ui::Message>>,
+    calls: std::path::PathBuf,
+    release: std::path::PathBuf,
+}
 
+/// Publishes the pending publications `numbers`, beside the `extra` rows, and holds delivery.
+#[cfg(feature = "desktop")]
+async fn held_publish(numbers: &[u64], extra: &[serde_json::Value]) -> HeldPublish {
     let f = publishing_fixture();
-    f.write(serde_json::json!([
-        pending_publication(&f, 32),
-        pending_publication(&f, 33)
-    ]));
-    let started = f.path("cancel-worker-started");
-    let release = f.path("cancel-worker-release");
-    let calls = f.path("cancel-worker-calls");
+    let mut rows: Vec<_> = numbers
+        .iter()
+        .map(|&n| pending_publication(&f, n))
+        .collect();
+    rows.extend_from_slice(extra);
+    f.write(serde_json::json!(rows));
+    let (calls, started, release) = (
+        f.path("worker-calls"),
+        f.path("worker-started"),
+        f.path("worker-release"),
+    );
     let worker = held_publisher_worker(&f, &calls, &started, &release);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let task = app.update(Message::PublishSelected);
+    common::ui::settle(&mut app, init).await;
+    let task = app.update(publicator::ui::Message::PublishSelected);
     let mut actions = iced_runtime::task::into_stream(task).expect("publish task started");
     tokio::time::timeout(
-        Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
         wait_for_worker_gate(&mut actions, &started),
     )
     .await
     .expect("first delivery reached the controlled worker gate");
+    HeldPublish {
+        fixture: f,
+        app,
+        store,
+        actions,
+        calls,
+        release,
+    }
+}
 
-    let _ = app.update(Message::CloseRequested);
-    let _ = app.update(Message::CloseCancelPublish);
-    std::fs::write(&release, "continue").unwrap();
-    let completion = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(Action::Output(message)) = actions.next().await {
-                break message;
-            }
-        }
-    })
+/// Releases the held delivery; the publisher answers only after its durable receipt and cleanup.
+#[cfg(feature = "desktop")]
+async fn release_publish(held: &mut HeldPublish) -> publicator::ui::Message {
+    std::fs::write(&held.release, "continue").unwrap();
+    let completion = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        common::ui::next_output(&mut held.actions),
+    )
     .await
-    .expect("cancel waits until the first receipt and worker cleanup");
-    assert!(matches!(completion, Message::PublishFinished(_)));
-    let task = app.update(completion);
-    let followup = dispatch_ui_task(&mut app, task).await;
-    assert!(
-        followup
-            .iter()
-            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
-    );
-    let calls = std::fs::read_to_string(calls).unwrap();
-    assert_eq!(calls.lines().collect::<Vec<_>>(), [common::id(32)]);
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
-    assert_eq!(
-        saved[0]["apparitions"][0]["state"],
-        "published_or_scheduled"
-    );
-    assert_eq!(saved[1]["apparitions"][0]["state"], "unpublished");
+    .expect("publisher returns its durable result after worker cleanup");
+    assert!(matches!(
+        completion,
+        publicator::ui::Message::PublishFinished(..)
+    ));
+    completion
+}
+
+#[cfg(feature = "desktop")]
+fn sent_uuids(held: &HeldPublish) -> Vec<String> {
+    std::fs::read_to_string(&held.calls)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(feature = "desktop")]
+fn deviantart_state(held: &HeldPublish, index: usize) -> serde_json::Value {
+    held.store.read().unwrap()[index]["apparitions"][0]["state"].clone()
+}
+
+#[cfg(feature = "desktop")]
+fn held_outcome(held: &HeldPublish, n: u64) -> publicator::publishing::PublishCellState {
+    held.app.publish_cell_outcome(&common::id(n)).unwrap().state
+}
+
+#[cfg(feature = "desktop")]
+fn receipt_count(held: &HeldPublish) -> usize {
+    std::fs::read_dir(held.fixture.path(".publicator/publish"))
+        .unwrap()
+        .count()
 }
 
 #[cfg(feature = "desktop")]
 #[tokio::test]
-async fn duplicate_publish_during_a_held_delivery_never_starts_a_second_worker() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
+async fn close_cancel_stops_after_current_receipt_without_dropping_publisher_task() {
     use publicator::ui::Message;
-    use std::time::Duration;
 
-    let f = publishing_fixture();
-    f.write(serde_json::json!([
-        pending_publication(&f, 32),
-        pending_publication(&f, 33)
-    ]));
-    let started = f.path("duplicate-worker-started");
-    let release = f.path("duplicate-worker-release");
-    let calls = f.path("duplicate-worker-calls");
-    let worker = held_publisher_worker(&f, &calls, &started, &release);
-    let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let first = app.update(Message::PublishSelected);
-    let mut first_actions = iced_runtime::task::into_stream(first).expect("first publish task");
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        wait_for_worker_gate(&mut first_actions, &started),
-    )
-    .await
-    .expect("first worker reached gate");
+    let mut held = held_publish(&[32, 33], &[]).await;
+    let close = common::ui::run(held.app.update(Message::CloseRequested)).await;
+    assert_eq!(close.exits, 0, "close must wait for the active delivery");
+    let _ = held.app.update(Message::CloseCancelPublish);
+    let completion = release_publish(&mut held).await;
+    let followup = common::ui::send(&mut held.app, completion).await;
+    assert!(
+        followup
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
+    );
+    assert_eq!(followup.exits, 1, "close completes after cleanup");
+    assert_eq!(sent_uuids(&held), [common::id(32)]);
+    assert_eq!(deviantart_state(&held, 0), "published_or_scheduled");
+    assert_eq!(deviantart_state(&held, 1), "unpublished");
+}
 
-    let duplicate = app.update(Message::PublishSelected);
-    let mut duplicate_actions =
-        iced_runtime::task::into_stream(duplicate).expect("duplicate publish task");
-    let duplicate = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(Action::Output(message)) = duplicate_actions.next().await {
-                break message;
-            }
-        }
-    })
-    .await
-    .expect("duplicate publish was rejected without waiting for first delivery");
-    assert!(matches!(
-        duplicate,
-        Message::PublishFinished(ref completion)
-            if completion.result.as_ref().is_err_and(|error| error.contains("already active"))
-    ));
-    assert_eq!(
-        std::fs::read_to_string(&calls)
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        [common::id(32)]
-    );
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn duplicate_publish_request_and_completion_change_nothing_through_the_reducer() {
+    use publicator::ui::Message;
 
-    std::fs::write(&release, "continue").unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(Action::Output(message)) = first_actions.next().await {
-                break message;
-            }
-        }
-    })
-    .await
-    .expect("first publish completes after release");
-    assert!(matches!(first, Message::PublishFinished(_)));
-    let _ = app.update(first);
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
+    let mut held = held_publish(&[32, 33], &[]).await;
+    let refused = common::ui::run(held.app.update(Message::PublishSelected)).await;
     assert_eq!(
-        saved[0]["apparitions"][0]["state"],
-        "published_or_scheduled"
+        (refused.messages.len(), refused.exits),
+        (0, 0),
+        "a second Publish during the held delivery starts nothing: {refused:?}"
+    );
+    let completion = release_publish(&mut held).await;
+    common::ui::send(&mut held.app, completion.clone()).await;
+    assert_eq!(sent_uuids(&held), [common::id(32), common::id(33)]);
+    let (disk, receipts, before) = (
+        std::fs::read(&held.store.paths().json).unwrap(),
+        receipt_count(&held),
+        [32, 33].map(|n| held_outcome(&held, n)),
+    );
+    let again = common::ui::run(held.app.update(completion.clone())).await;
+    assert_eq!((again.messages.len(), again.exits), (0, 0), "{again:?}");
+    assert_eq!(std::fs::read(&held.store.paths().json).unwrap(), disk);
+    let after = [32, 33].map(|n| held_outcome(&held, n));
+    assert_eq!((receipt_count(&held), after), (receipts, before));
+
+    // A newer run holds its own lease: the old completion can neither end it nor allow a close.
+    let newer = pending_publication(&held.fixture, 34);
+    held.store
+        .mutate(|rows| {
+            rows.push(newer);
+            Ok(())
+        })
+        .unwrap();
+    common::ui::send(&mut held.app, Message::Refresh).await;
+    let newer_run = held.app.update(Message::PublishSelected);
+    for message in [completion, Message::CloseRequested] {
+        let effects = common::ui::send(&mut held.app, message).await;
+        assert_eq!(
+            (effects.messages.len(), effects.exits),
+            (0, 0),
+            "{effects:?}"
+        );
+    }
+    let newer_completion = common::ui::first_output(newer_run).await;
+    let closed = common::ui::send(&mut held.app, newer_completion).await;
+    assert_eq!(
+        closed.exits, 1,
+        "close follows the newer run's own completion"
     );
     assert_eq!(
-        saved[1]["apparitions"][0]["state"],
-        "published_or_scheduled"
-    );
-    assert_eq!(
-        std::fs::read_to_string(calls)
-            .unwrap()
-            .lines()
-            .collect::<Vec<_>>(),
-        [common::id(32), common::id(33)]
+        sent_uuids(&held),
+        [common::id(32), common::id(33), common::id(34)]
     );
 }
 
@@ -572,8 +518,8 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
     let _ = app.update(Message::PublishLocksFinished(Ok(
         std::collections::HashSet::from([uuid.clone()]),
     )));
-    let refused = dispatch_options_message(&mut app, Message::CloseRequested).await;
-    assert!(refused.iter().any(|message| matches!(
+    let refused = common::ui::send(&mut app, Message::CloseRequested).await;
+    assert!(refused.messages.iter().any(|message| matches!(
         message,
         Message::OptionsSaved { result: Err(error), .. } if error.contains("Unresolved publish attempt")
     )));
@@ -586,8 +532,8 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
         uuid: uuid.clone(),
         value: "NaN".into(),
     });
-    let failed = dispatch_options_message(&mut app, Message::CloseRequested).await;
-    assert!(failed.iter().any(|message| matches!(
+    let failed = common::ui::send(&mut app, Message::CloseRequested).await;
+    assert!(failed.messages.iter().any(|message| matches!(
         message,
         Message::OptionsSaved { result: Err(error), .. } if error.contains("finite nonnegative")
     )));
@@ -597,9 +543,10 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
         uuid,
         value: "0".into(),
     });
-    let saved = dispatch_options_message(&mut app, Message::CloseRequested).await;
+    let saved = common::ui::send(&mut app, Message::CloseRequested).await;
     assert!(
         saved
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. }))
     );
@@ -611,74 +558,111 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn close_during_delayed_publish_waits_for_durable_receipt_and_cleanup() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::ui::Message;
-    use std::time::Duration;
 
-    let f = publishing_fixture();
-    f.write(serde_json::json!([pending_publication(&f, 31)]));
-    let started = f.path("worker-started");
-    let release = f.path("worker-release");
-    let body = format!(
-        r#"while IFS= read -r line; do
-kind=$(printf '%s' "$line" | jq -r .type)
-case "$kind" in
-open) echo '{{"protocol":1,"type":"ready"}}' ;;
-submit)
-  uuid=$(printf '%s' "$line" | jq -r .uuid)
-  attempt=$(printf '%s' "$line" | jq -r .attempt_id)
-  touch '{}'
-  while [ ! -e '{}' ]; do sleep 0.01; done
-  printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/%s"}}\n' "$attempt" "$uuid" "$uuid" ;;
-close) exit 0 ;;
-esac
-done"#,
-        started.display(),
-        release.display()
-    );
-    let worker = fake_publisher_worker(&f, &body);
-    let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let task = app.update(Message::PublishSelected);
-    let mut actions = iced_runtime::task::into_stream(task).expect("publish task started");
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        wait_for_worker_gate(&mut actions, &started),
-    )
-    .await
-    .expect("fake worker reached the controlled in-flight delivery");
-
-    assert!(
-        run_ui_task(app.update(Message::CloseRequested))
-            .await
-            .is_empty()
-    );
-    std::fs::write(&release, "continue").unwrap();
-
-    let completion = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(Action::Output(message)) = actions.next().await {
-                break message;
-            }
-        }
-    })
-    .await
-    .expect("publisher returns its durable result after worker cleanup");
-    assert!(matches!(completion, Message::PublishFinished(_)));
-    let task = app.update(completion);
-    let followup = dispatch_ui_task(&mut app, task).await;
+    let mut held = held_publish(&[31], &[]).await;
+    let close = common::ui::run(held.app.update(Message::CloseRequested)).await;
+    assert_eq!((close.messages.len(), close.exits), (0, 0));
+    let completion = release_publish(&mut held).await;
+    let followup = common::ui::send(&mut held.app, completion).await;
     assert!(
         followup
+            .messages
             .iter()
             .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_)))),
         "publisher status refresh failed after cleanup: {followup:?}"
     );
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(
-        saved[0]["apparitions"][0]["state"],
-        "published_or_scheduled"
+        followup.exits, 1,
+        "the requested close happens after cleanup"
     );
+    assert_eq!(deviantart_state(&held, 0), "published_or_scheduled");
+}
+
+/// Discard-and-close, or close then Refresh, during a held delivery: no exit and no
+/// reload (the publisher lock is held) until the durable outcome; then exactly one exit.
+#[cfg(feature = "desktop")]
+async fn close_route_waits_for_publisher(close: publicator::ui::Message, dirty: bool) {
+    use publicator::ui::{Message, drafts::Field};
+
+    let scheduled = common::id(5);
+    let mut held = held_publish(&[31], &[common::row(5, "SCHEDULED")]).await;
+    if dirty {
+        let _ = held.app.update(Message::Edited {
+            uuid: scheduled.clone(),
+            field: Field::Title,
+            text: "Edited during publish".into(),
+        });
+    }
+    let flushes = dirty && matches!(close, Message::CloseRequested);
+    for message in [close, Message::Refresh] {
+        let effects = common::ui::send(&mut held.app, message).await;
+        assert_eq!(effects.exits, 0, "exited during publish: {effects:?}");
+        assert!(
+            !effects.messages.iter().any(|message| matches!(
+                message,
+                Message::LoadFinished(..) | Message::PublishStatusesFinished(..)
+            )),
+            "reloaded while the publisher lock is held: {effects:?}"
+        );
+    }
+    let completion = release_publish(&mut held).await;
+    let followup = common::ui::send(&mut held.app, completion).await;
+    assert_eq!(
+        followup.exits, 1,
+        "close after the durable outcome: {followup:?}"
+    );
+    assert_eq!(deviantart_state(&held, 0), "published_or_scheduled");
+    let title = &held.store.read().unwrap()[1]["title"];
+    assert_eq!(
+        title,
+        if flushes {
+            "Edited during publish"
+        } else {
+            "Title"
+        }
+    );
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn discard_or_refresh_during_publish_never_exits_before_the_durable_outcome() {
+    use publicator::ui::Message;
+    for dirty in [false, true] {
+        close_route_waits_for_publisher(Message::ConfirmDiscard, dirty).await;
+        close_route_waits_for_publisher(Message::CloseRequested, dirty).await;
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn close_exits_once_only_after_the_final_draft_flush_succeeds() {
+    use publicator::ui::{Message, drafts::Field};
+
+    assert_eq!(
+        common::ui::run(iced::exit()).await.exits,
+        1,
+        "an immediate exit is observed, never mistaken for waiting"
+    );
+    let (mut app, store, _root) = scheduled_jump_app();
+    let before = std::fs::read(&store.paths().json).unwrap();
+    for (title, saves) in [("x".repeat(51), false), ("Saved before close".into(), true)] {
+        let _ = app.update(Message::Edited {
+            uuid: common::id(9),
+            field: Field::Title,
+            text: title,
+        });
+        let save = common::ui::run(app.update(Message::CloseRequested)).await;
+        assert_eq!(save.exits, 0, "no exit while the final save is pending");
+        let [finished @ Message::SaveFinished { result, .. }] = &save.messages[..] else {
+            panic!("close starts exactly one save: {save:?}");
+        };
+        assert_eq!(result.is_ok(), saves);
+        let after = common::ui::run(app.update(finished.clone())).await;
+        assert_eq!(after.exits, usize::from(saves), "{after:?}");
+    }
+    assert_ne!(std::fs::read(&store.paths().json).unwrap(), before);
+    assert_eq!(store.read().unwrap()[0]["title"], "Saved before close");
 }
 
 #[cfg(feature = "desktop")]
@@ -701,20 +685,22 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
         value: "Featured".into(),
         selected: true,
     });
-    let first_save_messages =
-        dispatch_options_message(&mut app, Message::SaveOptions(uuid.clone())).await;
+    let first_save_messages = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
     assert!(
         first_save_messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. }))
     );
     assert!(
         first_save_messages
+            .messages
             .iter()
-            .any(|message| matches!(message, Message::LoadFinished(Ok(_))))
+            .any(|message| matches!(message, Message::LoadFinished(_, Ok(_))))
     );
     assert!(
         first_save_messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
     );
@@ -734,9 +720,10 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
         uuid: uuid.clone(),
         value: String::new(),
     });
-    let clear_messages = dispatch_options_message(&mut app, Message::SaveOptions(uuid)).await;
+    let clear_messages = common::ui::send(&mut app, Message::SaveOptions(uuid)).await;
     assert!(
         clear_messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. })),
         "cleared option edit was not admitted; task messages: {clear_messages:?}"
@@ -748,7 +735,6 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
         "clear task messages: {clear_messages:?}; persisted bytes: {}",
         String::from_utf8_lossy(&cleared_bytes)
     );
-    let _ = app.update(Message::LoadFinished(Ok(store.read().unwrap())));
     let _: iced::Element<'_, Message> = publicator::ui::publish::view(&app);
 }
 
@@ -762,11 +748,11 @@ async fn publish_flushes_valid_option_edits_before_admission() {
         uuid,
         value: "6.25".into(),
     });
-    let messages = dispatch_options_message(&mut app, Message::PublishSelected).await;
+    let messages = common::ui::send(&mut app, Message::PublishSelected).await;
     assert!(
         messages
-            .iter()
-            .any(|message| matches!(message, Message::PublishFinished(completion) if completion.result.is_err()))
+            .messages.iter()
+            .any(|message| matches!(message, Message::PublishFinished(_, completion) if completion.result.is_err()))
     );
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
@@ -778,16 +764,18 @@ async fn publish_flushes_valid_option_edits_before_admission() {
         value: "NaN".into(),
     });
     let before = std::fs::read(&store.paths().json).unwrap();
-    let messages = dispatch_options_message(&mut app, Message::PublishSelected).await;
+    let messages = common::ui::send(&mut app, Message::PublishSelected).await;
     assert!(
         messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
     assert!(
         !messages
+            .messages
             .iter()
-            .any(|message| matches!(message, Message::PublishFinished(_)))
+            .any(|message| matches!(message, Message::PublishFinished(..)))
     );
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
 }
@@ -803,7 +791,7 @@ async fn option_edits_flush_before_navigation() {
         value: "Silver".into(),
         selected: true,
     });
-    dispatch_options_message(&mut app, Message::Navigate(Tab::Calendar)).await;
+    common::ui::send(&mut app, Message::Navigate(Tab::Calendar)).await;
     assert_eq!(app.current_tab(), Tab::Calendar);
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
@@ -839,9 +827,10 @@ async fn successful_cell_options_are_locked_and_unconfigured_values_do_not_write
         uuid: uuid.clone(),
         value: "0".into(),
     });
-    let messages = dispatch_options_message(&mut app, Message::SaveOptions(uuid)).await;
+    let messages = common::ui::send(&mut app, Message::SaveOptions(uuid)).await;
     assert!(
         messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
@@ -862,9 +851,10 @@ async fn unresolved_or_busy_publish_options_cannot_be_saved() {
     let _ = app.update(Message::PublishLocksFinished(Ok(
         std::collections::HashSet::from([uuid.clone()]),
     )));
-    let blocked = dispatch_options_message(&mut app, Message::SaveOptions(uuid.clone())).await;
+    let blocked = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
     assert!(
         blocked
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
@@ -876,7 +866,7 @@ async fn unresolved_or_busy_publish_options_cannot_be_saved() {
         value: "4".into(),
     });
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
-    for message in run_ui_task(publish_task).await {
+    for message in common::ui::run(publish_task).await.messages {
         let _ = app.update(message);
     }
 }
@@ -894,14 +884,15 @@ async fn active_publish_locks_option_edits() {
         value: "8".into(),
     });
     let options = app.update(Message::SaveOptions(uuid));
-    let rejected = run_ui_task(options).await;
+    let rejected = common::ui::run(options).await;
     assert!(
         rejected
+            .messages
             .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
-    for message in run_ui_task(publish).await {
+    for message in common::ui::run(publish).await.messages {
         let _ = app.update(message);
     }
 }
@@ -918,9 +909,10 @@ async fn invalid_publish_option_input_keeps_saved_bytes_unchanged() {
             uuid: uuid.clone(),
             value: value.into(),
         });
-        let messages = dispatch_options_message(&mut app, Message::SaveOptions(uuid.clone())).await;
+        let messages = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
         assert!(
             messages
+                .messages
                 .iter()
                 .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
         );
@@ -968,12 +960,13 @@ done"#,
         ),
     );
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let first_messages = dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    common::ui::settle(&mut app, init).await;
+    let first_messages = common::ui::send(&mut app, Message::PublishSelected).await;
     let first_report = first_messages
+        .messages
         .iter()
         .find_map(|message| match message {
-            Message::PublishFinished(completion) => completion.result.as_ref().ok(),
+            Message::PublishFinished(_, completion) => completion.result.as_ref().ok(),
             _ => None,
         })
         .expect("Publisher outcome returned through App::update");
@@ -1001,7 +994,7 @@ done"#,
     );
 
     let (mut restarted, _store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut restarted, init).await;
+    common::ui::settle(&mut restarted, init).await;
     assert_eq!(
         restarted
             .publish_cell_outcome(&common::id(1))
@@ -1029,11 +1022,12 @@ done"#,
             .unwrap()
             .retryable()
     );
-    let retry = dispatch_ui_message(&mut restarted, Message::PublishSelected).await;
+    let retry = common::ui::send(&mut restarted, Message::PublishSelected).await;
     let retry_report = retry
+        .messages
         .iter()
         .find_map(|message| match message {
-            Message::PublishFinished(completion) => completion.result.as_ref().ok(),
+            Message::PublishFinished(_, completion) => completion.result.as_ref().ok(),
             _ => None,
         })
         .expect("retry result returned through App::update");
@@ -1103,10 +1097,10 @@ done"#,
         ),
     );
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let messages = dispatch_ui_message(&mut app, Message::PublishSelected).await;
-    assert!(messages.iter().any(|message| matches!(message,
-        Message::PublishFinished(completion)
+    common::ui::settle(&mut app, init).await;
+    let messages = common::ui::send(&mut app, Message::PublishSelected).await;
+    assert!(messages.messages.iter().any(|message| matches!(message,
+        Message::PublishFinished(_, completion)
             if completion.result.as_ref().is_ok_and(|report|
                 report.outcomes[0].state == PublishCellState::Unknown
                     && report.outcomes[1].state == PublishCellState::Unattempted))));
@@ -1126,16 +1120,17 @@ done"#,
             .retryable()
     );
     let before_resend = std::fs::read_to_string(&calls).unwrap();
-    let blocked = dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    let blocked = common::ui::send(&mut app, Message::PublishSelected).await;
     assert!(
         !blocked
+            .messages
             .iter()
-            .any(|message| matches!(message, Message::PublishFinished(_)))
+            .any(|message| matches!(message, Message::PublishFinished(..)))
     );
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), before_resend);
 
     let before_invalid = std::fs::read(store.paths().json.as_path()).unwrap();
-    let deselected = dispatch_ui_message(
+    let deselected = common::ui::send(
         &mut app,
         Message::SelectCell {
             key: format!("{}:deviantart", attempt.uuid),
@@ -1145,12 +1140,14 @@ done"#,
     .await;
     assert!(
         !deselected
+            .messages
             .iter()
             .any(|message| matches!(message, Message::WorkflowFinished { .. }))
     );
-    let deselect_all = dispatch_ui_message(&mut app, Message::SelectAll(false)).await;
+    let deselect_all = common::ui::send(&mut app, Message::SelectAll(false)).await;
     assert!(
         !deselect_all
+            .messages
             .iter()
             .any(|message| matches!(message, Message::WorkflowFinished { .. }))
     );
@@ -1163,7 +1160,7 @@ done"#,
         attempt.attempt_id
     ));
     let receipt_before = std::fs::read(&receipt).unwrap();
-    let invalid = dispatch_ui_message(
+    let invalid = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: attempt.attempt_id.clone(),
@@ -1175,6 +1172,7 @@ done"#,
     .await;
     assert!(
         !invalid
+            .messages
             .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
@@ -1184,7 +1182,7 @@ done"#,
         before_invalid
     );
 
-    let reconciled = dispatch_ui_message(
+    let reconciled = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: attempt.attempt_id,
@@ -1194,6 +1192,7 @@ done"#,
     .await;
     assert!(
         reconciled
+            .messages
             .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
@@ -1206,9 +1205,9 @@ done"#,
             .unwrap()
             .retryable()
     );
-    let retried = dispatch_ui_message(&mut app, Message::PublishSelected).await;
-    assert!(retried.iter().any(|message| matches!(message,
-        Message::PublishFinished(completion)
+    let retried = common::ui::send(&mut app, Message::PublishSelected).await;
+    assert!(retried.messages.iter().any(|message| matches!(message,
+        Message::PublishFinished(_, completion)
             if completion.result.as_ref().is_ok_and(|report| report.published == 2))));
     assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
     assert_eq!(
@@ -1246,8 +1245,8 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
     f.write(serde_json::json!([pending_publication(&f, 1)]));
     let worker = unknown_publisher_worker(&f);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    let published = dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    common::ui::settle(&mut app, init).await;
+    let published = common::ui::send(&mut app, Message::PublishSelected).await;
     assert!(
         !app.publish_attempts().is_empty(),
         "unknown worker must leave an attempt for reconciliation: {published:?}"
@@ -1259,7 +1258,7 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
             Ok(())
         })
         .unwrap();
-    dispatch_ui_message(&mut app, Message::Refresh).await;
+    common::ui::send(&mut app, Message::Refresh).await;
     let current = app
         .publish_attempts()
         .iter()
@@ -1272,7 +1271,7 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
     ));
     let receipt_before = std::fs::read(&receipt).unwrap();
     let newer_bytes = std::fs::read(store.paths().json.as_path()).unwrap();
-    let messages = dispatch_ui_message(
+    let messages = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: attempt.attempt_id.clone(),
@@ -1282,7 +1281,7 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
         },
     )
     .await;
-    assert!(messages.iter().any(|message| matches!(message,
+    assert!(messages.messages.iter().any(|message| matches!(message,
         Message::ReconcileFinished { result: Err(error), .. } if error.contains("approved content/options changed"))));
     assert_eq!(std::fs::read(&receipt).unwrap(), receipt_before);
     assert_eq!(
@@ -1313,15 +1312,15 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     ]));
     let worker = unknown_publisher_worker(&f);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
-    dispatch_ui_task(&mut app, init).await;
-    dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    common::ui::settle(&mut app, init).await;
+    common::ui::send(&mut app, Message::PublishSelected).await;
     let attempt = app.publish_attempts()[0].clone();
     let receipt = f.path(&format!(
         ".publicator/publish/{}/receipt.json",
         attempt.attempt_id
     ));
     let before = std::fs::read(&receipt).unwrap();
-    let invalid = dispatch_ui_message(
+    let invalid = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: attempt.attempt_id.clone(),
@@ -1331,10 +1330,10 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
         },
     )
     .await;
-    assert!(invalid.iter().any(|message| matches!(message,
+    assert!(invalid.messages.iter().any(|message| matches!(message,
         Message::ReconcileFinished { result: Err(error), .. } if error.contains("valid HTTP(S) URL"))));
     assert_eq!(std::fs::read(&receipt).unwrap(), before);
-    let valid = dispatch_ui_message(
+    let valid = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: attempt.attempt_id,
@@ -1346,6 +1345,7 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     .await;
     assert!(
         valid
+            .messages
             .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
@@ -1362,14 +1362,14 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
         PublishCellState::Success
     );
 
-    dispatch_ui_message(&mut app, Message::PublishSelected).await;
+    common::ui::send(&mut app, Message::PublishSelected).await;
     let second = app
         .publish_attempts()
         .iter()
         .find(|status| status.uuid == common::id(2))
         .unwrap()
         .clone();
-    let without_url = dispatch_ui_message(
+    let without_url = common::ui::send(
         &mut app,
         Message::ReconcileAttempt {
             attempt_id: second.attempt_id,
@@ -1379,6 +1379,7 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     .await;
     assert!(
         without_url
+            .messages
             .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
@@ -1513,19 +1514,20 @@ async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_u
         },
         capture_url_without_opening,
     );
-    dispatch_ui_task(&mut app, init).await;
-    let valid = run_ui_task(app.update(Message::OpenActualUrl(
+    common::ui::settle(&mut app, init).await;
+    let valid = common::ui::run(app.update(Message::OpenActualUrl(
         "https://example.test/actual?x=1".into(),
     )))
     .await;
-    assert!(valid.iter().any(|message| matches!(message,
+    assert!(valid.messages.iter().any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error == "captured without browser: https://example.test/actual?x=1")));
     let unrecorded =
-        run_ui_task(app.update(Message::OpenActualUrl("https://unrecorded.test/".into()))).await;
-    assert!(unrecorded.iter().any(|message| matches!(message,
+        common::ui::run(app.update(Message::OpenActualUrl("https://unrecorded.test/".into())))
+            .await;
+    assert!(unrecorded.messages.iter().any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error == "URL is not stored on an apparition")));
-    let invalid = run_ui_task(app.update(Message::OpenActualUrl("https://".into()))).await;
-    assert!(invalid.iter().any(|message| matches!(message,
+    let invalid = common::ui::run(app.update(Message::OpenActualUrl("https://".into()))).await;
+    assert!(invalid.messages.iter().any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error.contains("valid HTTP(S) URL"))));
 }
 
@@ -1606,7 +1608,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
             ai_timeout: Duration::from_secs(1),
         },
     );
-    dispatch_ui_task(&mut app, init).await;
+    common::ui::settle(&mut app, init).await;
     let candidates = [&exact_path, &nearest_path, &unknown_path]
         .into_iter()
         .map(|path| publicator::images::Candidate {
@@ -1614,7 +1616,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
             sha512: publicator::images::file_sha512(path).unwrap(),
         })
         .collect();
-    dispatch_ui_message(
+    common::ui::send(
         &mut app,
         Message::SearchFinished {
             request_id: 0,
@@ -1634,9 +1636,9 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     ));
     let _: iced::Element<'_, Message> = publicator::ui::pick::view(&app);
 
-    let calendar_messages = dispatch_ui_message(&mut app, Message::Navigate(Tab::Calendar)).await;
-    assert!(calendar_messages.iter().any(|message| matches!(message,
-        Message::CalendarPrepared(Ok(prepared))
+    let calendar_messages = common::ui::send(&mut app, Message::Navigate(Tab::Calendar)).await;
+    assert!(calendar_messages.messages.iter().any(|message| matches!(message,
+        Message::CalendarPrepared(_, Ok(prepared))
             if prepared.artwork.get("missing.png").is_some_and(Option::is_none)
                 && prepared.prompts.iter().any(|(path, prompt)| path == &exact_path
                     && matches!(prompt, PromptMatch::Exact(version) if version.text == "exact <prompt>\nline two"))
@@ -1656,7 +1658,6 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_action() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::ui::{Message, Tab};
 
     let (mut app, store, _root) = scheduled_jump_app();
@@ -1673,27 +1674,13 @@ async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_act
         before,
         "navigation waits for the dirty draft save"
     );
-    let mut actions = iced_runtime::task::into_stream(task).expect("save task is returned");
-    let completion = loop {
-        match actions.next().await {
-            Some(Action::Output(message @ Message::SaveFinished { result: Ok(()), .. })) => {
-                break message;
-            }
-            Some(Action::Output(message @ Message::SaveFinished { result: Err(_), .. })) => {
-                panic!("jump save failed: {message:?}")
-            }
-            Some(_) => {}
-            None => panic!("draft save did not complete"),
-        }
-    };
-    let followup = app.update(completion);
-    let actions =
-        iced_runtime::task::into_stream(followup).expect("target scroll operation is returned");
+    let completion = common::ui::first_output(task).await;
     assert!(
-        actions
-            .any(|action| async move { matches!(action, Action::Widget(_)) })
-            .await
+        matches!(completion, Message::SaveFinished { result: Ok(()), .. }),
+        "jump save failed: {completion:?}"
     );
+    let followup = common::ui::run(app.update(completion)).await;
+    assert!(followup.widgets > 0, "target scroll operation is returned");
     assert_eq!(app.current_tab(), Tab::Describe);
     assert_eq!(app.revealed_publication(), Some(uuid.as_str()));
     let saved: serde_json::Value =
@@ -1705,7 +1692,6 @@ async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_act
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publication_jump_maps_all_phases_to_the_next_action() {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     use publicator::ui::{Message, Tab};
     let (mut app, store, _root) = options_app();
     for (phase, expected) in [
@@ -1724,14 +1710,12 @@ async fn publication_jump_maps_all_phases_to_the_next_action() {
                 Ok(())
             })
             .unwrap();
-        let _ = app.update(Message::LoadFinished(Ok(store.read().unwrap())));
+        let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
         let task = app.update(Message::JumpToPublication(common::id(9)));
         assert_eq!(app.current_tab(), expected);
-        let actions = iced_runtime::task::into_stream(task).expect("scroll action is returned");
         assert!(
-            actions
-                .any(|action| async move { matches!(action, Action::Widget(_)) })
-                .await
+            common::ui::run(task).await.widgets > 0,
+            "scroll action is returned"
         );
     }
 }
@@ -1748,19 +1732,22 @@ async fn failed_jump_flush_keeps_phase_and_draft_without_revealing_or_exiting() 
         field: publicator::ui::drafts::Field::Title,
         text: "x".repeat(51),
     });
-    let messages = dispatch_ui_message(&mut app, Message::JumpToPublication(uuid)).await;
+    let messages = common::ui::send(&mut app, Message::JumpToPublication(uuid)).await;
     assert!(
         messages
+            .messages
             .iter()
             .any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. })),
         "messages: {messages:?}"
     );
+    assert_eq!((messages.exits, messages.widgets), (0, 0));
     assert_eq!(app.current_tab(), Tab::Pick);
     assert_eq!(app.revealed_publication(), None);
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
-    let retry = dispatch_ui_message(&mut app, Message::RetrySave).await;
+    let retry = common::ui::send(&mut app, Message::RetrySave).await;
     assert!(
         retry
+            .messages
             .iter()
             .any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. }))
     );

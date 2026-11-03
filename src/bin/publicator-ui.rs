@@ -2,7 +2,7 @@ use clap::Parser;
 use publicator::{
     application::Application,
     config::{Config, Paths},
-    metadata::{Endpoints, MetadataClient},
+    metadata::{Endpoints, MetadataClient, ModelOption},
     publishing::Publisher,
     store::Store,
     ui::UiOptions,
@@ -16,8 +16,9 @@ struct Args {
     data_dir: Option<PathBuf>,
     #[arg(long)]
     json: Option<PathBuf>,
-    #[arg(long)]
-    openrouter_model: Option<String>,
+    /// Initial OpenRouter vision model; unsupported names fail before any provider work.
+    #[arg(long, value_parser = publicator::ui::openrouter_model)]
+    openrouter_model: Option<ModelOption>,
     #[arg(long, default_value_t = 300)]
     ai_timeout: u64,
 }
@@ -49,7 +50,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::gui_metadata_endpoints;
+    use super::{Args, gui_metadata_endpoints};
+    use clap::Parser;
+    use publicator::metadata::VISION_MODELS;
+
+    #[test]
+    fn openrouter_model_selects_a_supported_model_and_refuses_others_at_startup() {
+        for name in [
+            "google/gemma-4-31b-it:free",
+            "openrouter/google/gemma-4-31b-it:free",
+        ] {
+            let args = Args::try_parse_from(["publicator-ui", "--openrouter-model", name]).unwrap();
+            assert_eq!(args.openrouter_model.as_ref(), Some(&VISION_MODELS[1]));
+        }
+        assert!(
+            Args::try_parse_from(["publicator-ui"])
+                .unwrap()
+                .openrouter_model
+                .is_none()
+        );
+        let refused = Args::try_parse_from(["publicator-ui", "--openrouter-model", "other/model"])
+            .err()
+            .expect("unsupported model is refused");
+        assert!(
+            refused.to_string().contains("unsupported OpenRouter model"),
+            "{refused}"
+        );
+    }
 
     #[test]
     fn gui_ignores_inherited_cli_ollama_endpoint_override() {

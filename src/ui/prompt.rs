@@ -42,13 +42,19 @@ pub fn plain_text(match_: &PromptMatch) -> Vec<String> {
 fn nearest_text(candidates: &[Lineage]) -> Vec<String> {
     let mut lines =
         vec!["Prompt NOT archived — candidate prompts only; these are not authoritative".into()];
+    // Each line carries the label: the header scrolls away on long lineages.
     for lineage in candidates {
         for version in &lineage.versions {
-            lines.push(format!("{} — {}", lineage.path, version.text));
+            lines.push(format!(
+                "{NOT_AUTHORITATIVE} {} — {}",
+                lineage.path, version.text
+            ));
         }
     }
     lines
 }
+
+const NOT_AUTHORITATIVE: &str = "Candidate only, not authoritative:";
 
 #[cfg(test)]
 mod tests {
@@ -69,12 +75,14 @@ mod tests {
             },
             Lineage {
                 path: "two/lineage.txt".into(),
-                versions: vec![PromptVersion {
-                    digest: "b".into(),
-                    text: "second".into(),
-                    paths: vec![],
-                    committed: 0,
-                }],
+                versions: ["second", "third"]
+                    .map(|text| PromptVersion {
+                        digest: text.into(),
+                        text: text.into(),
+                        paths: vec![],
+                        committed: 0,
+                    })
+                    .into(),
             },
         ]);
         let lines = plain_text(&match_);
@@ -82,5 +90,12 @@ mod tests {
         assert!(lines[0].contains("not authoritative"));
         assert!(lines.iter().any(|line| line.contains("one/lineage.txt")));
         assert!(lines.iter().any(|line| line.contains("two/lineage.txt")));
+        assert_eq!(lines.len(), 4);
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with("Candidate only, not authoritative:"),
+                "unlabelled candidate line: {line}"
+            );
+        }
     }
 }

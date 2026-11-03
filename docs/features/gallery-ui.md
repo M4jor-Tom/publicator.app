@@ -4,7 +4,7 @@
 - **Run:** `nix run .#ui -- --data-dir DIR`; for a disposable dummy data dir, `nix develop -c scripts/dummy-data.sh [DIR]` prints one to pass as `DIR`.
 - **Code:** `src/ui/`, `src/application.rs`, `src/workflow.rs`, `src/store.rs`, `src/calendar.rs`.
 - **Tests:** `tests/ui*.rs`, `tests/calendar.rs`, `tests/application*.rs`, `tests/docs.rs`.
-- **Config:** Search uses a runtime subset of configured `publicable` roots; schedule and prompt options come from the data-dir config.
+- **Config:** Search uses a runtime subset of configured `publicable` roots; schedule and prompt options come from the data-dir config. `--openrouter-model NAME` (with or without the `openrouter/` prefix) selects the initial supported vision model; an unsupported name fails at startup.
 - **Data:** `publications.json` is authoritative on refresh/reopen; `.thumbs/` is persistent preview cache. Deletion applies only to unpicked candidate files.
 - **Decisions:** Native Iced controls replace the retired HTTP/HTML UI and keep its look (`src/ui/style.rs`: dark page, #111 header with tab counts, card grid, browser-grey buttons, bordered Publish table, month grids). App operations own state changes; no RAM-only queue or browser clock.
 - **Verify:** `nix develop -c cargo test --features desktop --test ui_workflow --test ui_publish_calendar --test calendar`
@@ -20,7 +20,10 @@ Publish selection is separate from submission. Only registered platform cells ar
 ## Invariants
 
 - UI and CLI share Rust application operations and Store; the Python worker is not an application service.
-- Draft edits are revision-safe and flush at phase changes; failed saves remain visible and retryable.
+- Draft edits are revision-safe and flush at phase changes; failed saves remain visible and retryable. A draft has at most one save in flight; its completion saves any newer revision, so the newest lands last. Reloads show stored text for every field without unsaved or in-flight input.
+- Closing never interrupts publishing. Every close path (window close, Discard drafts and close, a save or status refresh completing a pending close) shows Wait/Cancel and exits only after the durable outcome and worker cleanup. Refresh is refused while publishing, because receipt loading needs the publisher lock.
+- Replies apply only to the request that is still current. Reload and calendar-preparation replies carry the reload generation that requested them; older ones are dropped. Publish is refused while a run is active, and a publish completion from another or an already finished run changes nothing.
+- Refresh invalidates the prompt archive inside its reload task (off the UI thread), resolves prompt labels again and discards unsaved custom date input. Any date save discards that row's custom input, and Approve date is refused while the row shows unsaved custom input.
 - Dates and approvals require explicit user action. Only valid complete metadata advances to DESCRIBED.
 - Publish results are durably recorded per target. Unknown remote outcomes require reconciliation; never infer failure and resend.
 - Native selection controls remain keyboard-operable and visibly indicate focus/context.

@@ -86,8 +86,22 @@ fn publish_keyboard_event(
 
 #[derive(Clone, Debug)]
 pub struct UiOptions {
-    pub openrouter_model: Option<String>,
+    /// Initial model selection; `None` selects the first supported vision model.
+    pub openrouter_model: Option<ModelOption>,
     pub ai_timeout: Duration,
+}
+
+/// The supported vision model an OpenRouter name selects, with or without its `openrouter/`
+/// prefix; any other name is refused before provider work.
+pub fn openrouter_model(name: &str) -> Result<ModelOption, String> {
+    VISION_MODELS
+        .iter()
+        .find(|model| {
+            model.openrouter_name == name
+                || model.openrouter_name.strip_prefix("openrouter/") == Some(name)
+        })
+        .cloned()
+        .ok_or_else(|| format!("unsupported OpenRouter model {name:?}"))
 }
 
 pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Result {
@@ -106,7 +120,8 @@ pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Resul
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    LoadFinished(Result<Vec<Value>, String>),
+    /// A store snapshot, stamped with the reload generation that requested it.
+    LoadFinished(u64, Result<Vec<Value>, String>),
     Navigate(Tab),
     Edited {
         uuid: String,
@@ -244,9 +259,11 @@ pub enum Message {
     },
     OpenActualUrl(String),
     JumpToPublication(String),
-    PublishFinished(PublishCompletion),
+    /// A publisher run's completion, stamped with the run that started it.
+    PublishFinished(u64, PublishCompletion),
     PromptMatchesFinished(Vec<(PathBuf, PromptMatch)>),
-    CalendarPrepared(Result<calendar::Preparation, String>),
+    /// Calendar artwork and prompts, stamped with the reload generation of their rows.
+    CalendarPrepared(u64, Result<calendar::Preparation, String>),
     CalendarPreviewFinished {
         basename: String,
         result: Result<PathBuf, String>,
@@ -291,6 +308,7 @@ pub struct App {
     pending_jump: Option<String>,
     revealed_publication: Option<String>,
     started: Instant,
+    load_generation: u64,
     search_request_id: u64,
     search_limit: usize,
     search_paths: Vec<String>,
@@ -320,6 +338,7 @@ pub struct App {
     publish_diagnostic: Option<String>,
     publish_cancel: Arc<std::sync::atomic::AtomicBool>,
     publish_active: bool,
+    publish_run: u64,
     pending_publish: bool,
     publish_options: HashMap<String, PublishOptionsDraft>,
     publish_keyboard_mode: bool,
@@ -364,6 +383,10 @@ impl App {
                 }
                 None => (None, None),
             };
+        let model = options
+            .openrouter_model
+            .clone()
+            .unwrap_or_else(|| VISION_MODELS[0].clone());
         let app = Self {
             application: application.clone(),
             _options: options,
@@ -379,6 +402,7 @@ impl App {
             pending_jump: None,
             revealed_publication: None,
             started: Instant::now(),
+            load_generation: 0,
             search_request_id: 0,
             search_limit: 25,
             search_paths: application.store().config().publicable.clone(),
@@ -393,7 +417,7 @@ impl App {
             pending_delete: None,
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
-            model: VISION_MODELS[0].clone(),
+            model,
             busy_uuids: HashSet::new(),
             pending_generation: None,
             pending_generation_install: false,
@@ -407,6 +431,7 @@ impl App {
             publish_diagnostic: None,
             publish_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             publish_active: false,
+            publish_run: 0,
             pending_publish: false,
             publish_options: HashMap::new(),
             publish_keyboard_mode: false,
@@ -428,7 +453,7 @@ impl App {
             calendar_expanded: HashSet::new(),
             url_opener,
         };
-        (app, Self::load_task(application))
+        (app, Self::load_task(application, 0, None))
     }
 
     pub fn from_application(
@@ -559,12 +584,23 @@ impl App {
         }
     }
 
-    fn load_task(application: Arc<CoreApplication>) -> Task<Message> {
+    /// Loads the store; on Refresh, `invalidate` first makes the prompt archive rebuild its index
+    /// on the next resolve (this waits for any in-flight rebuild, so it stays off the UI thread).
+    fn load_task(
+        application: Arc<CoreApplication>,
+        generation: u64,
+        invalidate: Option<Arc<PromptArchive>>,
+    ) -> Task<Message> {
         let lock_application = application.clone();
         Task::batch([
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
+                        if let Some(archive) = invalidate {
+                            // A poisoned archive lock fails every later resolve too, and the
+                            // cards report it there.
+                            let _ = archive.invalidate();
+                        }
                         application
                             .mutate(None, |store| store.read())
                             .map_err(|error| error.to_string())
@@ -572,7 +608,7 @@ impl App {
                     .await
                     .unwrap_or_else(|error| Err(format!("Could not load publications: {error}")))
                 },
-                Message::LoadFinished,
+                move |result| Message::LoadFinished(generation, result),
             ),
             Self::publish_locks_task(lock_application),
         ])
@@ -584,8 +620,33 @@ impl App {
     }
 
     fn reload_task(&mut self) -> Task<Message> {
+        self.reload_invalidating(None)
+    }
+
+    fn reload_invalidating(&mut self, archive: Option<Arc<PromptArchive>>) -> Task<Message> {
         self.next_search_request();
-        Self::load_task(self.application.clone())
+        self.load_generation = self.load_generation.wrapping_add(1);
+        Self::load_task(self.application.clone(), self.load_generation, archive)
+    }
+
+    /// The one guard for reload and calendar replies: a completion stamped before the latest
+    /// `reload_task` describes an older snapshot and must not replace newer rows or artwork.
+    // ponytail: a preparation started between a reload request and its LoadFinished reads the
+    // previous rows under the new stamp; that load re-prepares, but the two may finish out of
+    // order. Stamp the rows' own generation if that window matters.
+    fn stale_load(&mut self, message: &Message) -> bool {
+        let (Message::LoadFinished(generation, _) | Message::CalendarPrepared(generation, _)) =
+            message
+        else {
+            return false;
+        };
+        if *generation == self.load_generation {
+            return false;
+        }
+        if matches!(message, Message::CalendarPrepared(..)) {
+            self.calendar_preparing = false;
+        }
+        true
     }
 
     fn publish_locks_task(application: Arc<CoreApplication>) -> Task<Message> {
@@ -606,6 +667,9 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self.stale_load(&message) {
+            return Task::none();
+        }
         match message {
             Message::LoadFinished(..)
             | Message::PublishLocksFinished(..)
@@ -727,8 +791,8 @@ impl App {
 
     fn update_load(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::LoadFinished(Ok(rows)) => return self.on_load_finished_loaded(rows),
-            Message::LoadFinished(Err(error)) => {
+            Message::LoadFinished(_, Ok(rows)) => return self.on_load_finished_loaded(rows),
+            Message::LoadFinished(_, Err(error)) => {
                 self.next_search_request();
                 self.publications = None;
                 self.load_error = Some(error);
@@ -756,12 +820,38 @@ impl App {
     }
 
     fn refresh(&mut self) -> Task<Message> {
-        if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
+        if self.publish_active {
+            // Receipt loading needs the publisher lock that the active delivery holds.
+            self.result = Some("Publishing is active; refresh after it finishes.".into());
+        } else if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
             self.result = Some("Save or explicitly discard drafts before refresh.".into());
         } else {
-            return self.reload_task();
+            self.forget_refreshable_state();
+            return self.reload_invalidating(self.prompt_archive.clone());
         }
         Task::none()
+    }
+
+    /// Refresh re-derives what ordinary reloads keep: prompt labels (resolved again from the
+    /// invalidated archive once the reload lands) and unsaved custom date inputs.
+    fn forget_refreshable_state(&mut self) {
+        self.prompt_matches.clear();
+        self.custom_dates.clear();
+    }
+
+    /// Every close continuation exits here: an active publisher keeps the window open, with its
+    /// wait/cancel row, until the durable outcome and process cleanup are handled.
+    fn close_now(&mut self) -> Task<Message> {
+        if self.publish_active {
+            self.pending_close = true;
+            self.result = Some(
+                "Publishing is active. Wait or cancel after the current delivery before closing."
+                    .into(),
+            );
+            return Task::none();
+        }
+        self.pending_close = false;
+        iced::exit()
     }
 
     fn update_navigation(&mut self, message: Message) -> Task<Message> {
@@ -781,8 +871,7 @@ impl App {
                 self.pending_publish = false;
                 self.pending_navigation = None;
                 self.pending_jump = None;
-                self.pending_close = false;
-                return iced::exit();
+                return self.close_now();
             }
             Message::KeepEditing => self.pending_close = false,
             Message::Refresh => return self.refresh(),
@@ -905,7 +994,9 @@ impl App {
                 .publish_cancel
                 .store(true, std::sync::atomic::Ordering::SeqCst),
             Message::CloseWait => {}
-            Message::PublishFinished(completion) => return self.on_publish_finished(completion),
+            Message::PublishFinished(run, completion) => {
+                return self.on_publish_finished(run, completion);
+            }
             _ => unreachable!("message routed to selection handler"),
         }
         Task::none()
@@ -1061,7 +1152,7 @@ impl App {
 
     fn update_previews(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::CalendarPrepared(Ok(prepared)) => {
+            Message::CalendarPrepared(_, Ok(prepared)) => {
                 self.calendar_preparing = false;
                 self.calendar_prepared = true;
                 self.calendar_error = None;
@@ -1069,7 +1160,7 @@ impl App {
                 self.prompt_matches.extend(prepared.prompts);
                 return calendar::preview_tasks(self);
             }
-            Message::CalendarPrepared(Err(error)) => {
+            Message::CalendarPrepared(_, Err(error)) => {
                 self.calendar_preparing = false;
                 self.calendar_prepared = true;
                 self.calendar_error = Some(error);
@@ -1182,7 +1273,23 @@ impl App {
         Task::none()
     }
 
+    /// Clean draft fields take the authoritative stored text, and drafts with nothing unsaved or
+    /// in flight are dropped, so a reload never keeps showing an older presentation copy.
+    fn rebase_drafts(&mut self, rows: &[Value]) {
+        self.drafts.retain(|uuid, draft| {
+            if let Some(row) = rows
+                .iter()
+                .find(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid.as_str()))
+            {
+                let (title, description) = row_metadata(row);
+                draft.rebase(title, description);
+            }
+            draft.is_dirty() || draft.is_saving()
+        });
+    }
+
     fn on_load_finished_loaded(&mut self, rows: Vec<Value>) -> Task<Message> {
+        self.rebase_drafts(&rows);
         self.description_editors.retain(|uuid, _| {
             rows.iter()
                 .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
@@ -1213,16 +1320,15 @@ impl App {
         self.calendar_error = None;
         self.calendar_artwork.clear();
         self.calendar_previews.clear();
-        if matches!(
-            self.active_tab,
-            Tab::Schedule | Tab::Describe | Tab::Publish
-        ) {
-            return describe::preview_tasks(self, self.active_tab);
-        }
-        if self.active_tab == Tab::Calendar {
-            return calendar::prepare_task(self);
-        }
-        Task::none()
+        let shown = match self.active_tab {
+            Tab::Schedule | Tab::Describe | Tab::Publish => {
+                describe::preview_tasks(self, self.active_tab)
+            }
+            Tab::Calendar => calendar::prepare_task(self),
+            Tab::Pick => Task::none(),
+        };
+        // Candidates without a label (cleared by Refresh) resolve again, after its invalidation.
+        Task::batch([shown, prompt_tasks(self)])
     }
 
     fn close_after_status_refresh(&mut self) -> Task<Message> {
@@ -1233,8 +1339,7 @@ impl App {
             if self.publish_options.values().any(|options| options.dirty) {
                 return self.save_next_options();
             }
-            self.pending_close = false;
-            return iced::exit();
+            return self.close_now();
         }
         Task::none()
     }
@@ -1487,7 +1592,7 @@ impl App {
             return self.publish_selected_task();
         }
         if self.pending_close && !self.any_dirty() {
-            return iced::exit();
+            return self.close_now();
         }
         if self.any_dirty() {
             return self.save_next_dirty();
@@ -1578,6 +1683,10 @@ impl App {
     }
 
     fn on_publish_selected(&mut self) -> Task<Message> {
+        if self.publish_active {
+            self.publish_result = Some("Publishing is already active".into());
+            return Task::none();
+        }
         if self.publish_locks.is_none() || self.publish_lock_error.is_some() {
             self.publish_result = Some(
                 self.publish_lock_error
@@ -1605,7 +1714,11 @@ impl App {
         self.publish_selected_task()
     }
 
-    fn on_publish_finished(&mut self, completion: PublishCompletion) -> Task<Message> {
+    fn on_publish_finished(&mut self, run: u64, completion: PublishCompletion) -> Task<Message> {
+        // Only the active run's first completion ends its lease; a duplicate changes nothing.
+        if !self.publish_active || run != self.publish_run {
+            return Task::none();
+        }
         self.publish_active = false;
         self.publish_diagnostic = completion.diagnostics;
         match completion.result {
@@ -1725,8 +1838,7 @@ impl App {
             return self.activate_tab(tab, reveal);
         }
         if self.pending_close {
-            self.pending_close = false;
-            return iced::exit();
+            return self.close_now();
         }
         self.reload_task()
     }
@@ -1797,12 +1909,7 @@ impl App {
 
     fn on_close_requested(&mut self) -> Task<Message> {
         if self.publish_active {
-            self.pending_close = true;
-            self.result = Some(
-                "Publishing is active. Wait or cancel after the current delivery before closing."
-                    .into(),
-            );
-            return Task::none();
+            return self.close_now();
         }
         if self.any_dirty() {
             self.pending_close = true;
@@ -1813,7 +1920,7 @@ impl App {
             self.pending_close = true;
             return self.save_next_options();
         }
-        iced::exit()
+        self.close_now()
     }
 
     fn on_search(&mut self) -> Task<Message> {
@@ -2218,6 +2325,8 @@ impl App {
         self.publish_cancel
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.publish_active = true;
+        self.publish_run = self.publish_run.wrapping_add(1);
+        let run = self.publish_run;
         self.last_publish_cells = cells.iter().cloned().collect();
         self.publish_outcomes.clear();
         self.publish_diagnostic = None;
@@ -2229,7 +2338,7 @@ impl App {
                     .publish_selected_with_diagnostics(cells, cancel)
                     .await
             },
-            Message::PublishFinished,
+            move |completion| Message::PublishFinished(run, completion),
         )
     }
 
@@ -2294,7 +2403,8 @@ impl App {
         let Some(draft) = self.drafts.get_mut(uuid) else {
             return Task::none();
         };
-        if !draft.is_dirty() {
+        // One flush per draft: its completion saves any newer revision, so the newest lands last.
+        if !draft.is_dirty() || draft.is_saving() {
             return Task::none();
         }
         let sent = draft.begin_save();
@@ -2783,8 +2893,10 @@ mod tests {
         };
         let mut messages = Vec::new();
         while let Some(action) = actions.next().await {
-            if let Action::Output(message) = action {
-                messages.push(message);
+            match action {
+                Action::Output(message) => messages.push(message),
+                Action::Exit => panic!("unexpected exit"),
+                _ => {}
             }
         }
         messages
@@ -3028,9 +3140,10 @@ mod tests {
         assert!(app.prompt_search.is_none());
         assert_eq!(app.result, current_result);
 
-        let _ = app.update(Message::LoadFinished(Err(
-            "search authorization revoked".into()
-        )));
+        let _ = app.update(Message::LoadFinished(
+            0,
+            Err("search authorization revoked".into()),
+        ));
         let _ = app.update(Message::SearchFinished {
             request_id: current_request,
             result: Ok(vec![stale]),
@@ -3107,47 +3220,10 @@ mod tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let archive_dir = root.path().join("archive");
+        prompt_archive(root.path(), "An archived moonlit garden");
         let images_dir = root.path().join("picked");
-        std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::create_dir_all(&images_dir).unwrap();
-        for args in [
-            vec!["init", "-q"],
-            vec!["config", "user.name", "Test"],
-            vec!["config", "user.email", "test@example.invalid"],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&archive_dir)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        std::fs::create_dir_all(archive_dir.join("lineage")).unwrap();
-        std::fs::write(
-            archive_dir.join("lineage/prompt.txt"),
-            "An archived moonlit garden",
-        )
-        .unwrap();
-        for args in [vec!["add", "."], vec!["commit", "-qm", "fixture"]] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&archive_dir)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        let prompt_config = PromptConfig {
-            repo: "archive".into(),
-            filename: r"(?P<lineage>[^_]+)_(?P<version>[a-f0-9]{40})\.png".into(),
-            version_hash: "sha1".into(),
-        };
+        let prompt_config = archive_config();
         let digest = PromptGrammar::compile(&prompt_config)
             .unwrap()
             .digest(b"An archived moonlit garden")
@@ -3180,7 +3256,7 @@ mod tests {
                 ai_timeout: Duration::from_secs(300),
             },
         );
-        let _ = app.update(Message::LoadFinished(Ok(Vec::new())));
+        let _ = app.update(Message::LoadFinished(0, Ok(Vec::new())));
         let _ = app.update(Message::PromptQueryChanged("MOONLIT".into()));
         let result = completion(app.update(Message::Search)).await;
         let Message::PromptSearchFinished {
@@ -3326,7 +3402,7 @@ mod tests {
     #[test]
     fn malformed_publications_show_error_instead_of_empty_queue() {
         let (mut app, _root) = app();
-        let _task = app.update(Message::LoadFinished(Err("malformed JSON".into())));
+        let _task = app.update(Message::LoadFinished(0, Err("malformed JSON".into())));
         assert!(app.publications.is_none());
         assert_eq!(app.load_error.as_deref(), Some("malformed JSON"));
         assert!(!app.search_authorized);
@@ -3425,7 +3501,7 @@ done
         let completion = messages
             .iter()
             .find_map(|message| match message {
-                Message::PublishFinished(completion) => Some(completion),
+                Message::PublishFinished(_, completion) => Some(completion),
                 _ => None,
             })
             .expect("Publisher result reaches native App consumer");
@@ -3478,6 +3554,346 @@ done
         assert_eq!(
             app.publish_diagnostic.as_deref(),
             Some("simulated worker stderr")
+        );
+    }
+
+    fn uuid(n: u64) -> String {
+        format!("00000000-0000-4000-8000-{n:012}")
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// `root/archive`, a Git prompt archive whose HEAD holds `lineage/prompt.txt` = `prompt`.
+    fn prompt_archive(root: &Path, prompt: &str) -> PathBuf {
+        let dir = root.join("archive");
+        std::fs::create_dir_all(dir.join("lineage")).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.name", "Test"]);
+        git(&dir, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(dir.join("lineage/prompt.txt"), prompt).unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "fixture"]);
+        dir
+    }
+
+    fn archive_config() -> PromptConfig {
+        PromptConfig {
+            repo: "archive".into(),
+            filename: r"(?P<lineage>[^_]+)_(?P<version>[a-f0-9]{40})\.png".into(),
+            version_hash: "sha1".into(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_invalidates_the_prompt_archive_and_resolves_shown_candidates_again() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_dir = prompt_archive(root.path(), "archived at HEAD");
+        let digest = PromptGrammar::compile(&archive_config())
+            .unwrap()
+            .digest(b"loose prompt")
+            .unwrap();
+        let candidate = Candidate {
+            path: root.path().join(format!("prompt.txt_{digest}.png")),
+            sha512: "0".repeat(128),
+        };
+        let config = Config {
+            prompts: Some(archive_config()),
+            ..Config::default()
+        };
+        let store =
+            Arc::new(Store::new(Paths::resolve(Some(root.path()), None).unwrap(), config).unwrap());
+        let metadata = MetadataClient::new(
+            reqwest::Client::new(),
+            Endpoints::default(),
+            "llmfit".into(),
+        );
+        let (mut app, init) = App::new(
+            Arc::new(CoreApplication::new(store, metadata)),
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(1),
+            },
+        );
+        dispatch(&mut app, init).await;
+        let request_id = app.search_request_id;
+        let search = Message::SearchFinished {
+            request_id,
+            result: Ok(vec![candidate.clone()]),
+        };
+        send(&mut app, search).await;
+        let exact = |app: &App| {
+            matches!(
+                app.prompt_matches.get(&candidate.path),
+                Some(PromptMatch::Exact(_))
+            )
+        };
+        assert!(app.prompt_matches.contains_key(&candidate.path) && !exact(&app));
+
+        // HEAD is unchanged, so only an explicit Refresh sees a blob that no ref reaches.
+        std::fs::write(archive_dir.join("loose.txt"), "loose prompt").unwrap();
+        git(&archive_dir, &["hash-object", "-w", "loose.txt"]);
+        send(&mut app, Message::Refresh).await;
+        assert!(exact(&app), "{:?}", app.prompt_matches.get(&candidate.path));
+    }
+
+    /// A SCHEDULED row whose `{n}.png` exists in `root` with its real hash, as generation needs.
+    fn art_row(root: &Path, n: u64) -> Value {
+        let image = root.join(format!("{n}.png"));
+        assert!(
+            std::process::Command::new("magick")
+                .args(["-size", "4x3", "xc:white"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        serde_json::json!({
+            "uuid": uuid(n), "state": "SCHEDULED", "title": "Title", "description": "Description",
+            "submissionTimestamp": 1_700_002_800,
+            "files": [{"basename": format!("{n}.png"), "sha512sum": crate::images::file_sha512(&image).unwrap()}],
+            "apparitions": []
+        })
+    }
+
+    /// An App over `rows` in `root` with its unpolled startup task; providers sit on a closed port.
+    fn offline_app(root: &Path, rows: &[Value]) -> (App, Task<Message>) {
+        let paths = Paths::resolve(Some(root), None).unwrap();
+        let store = Arc::new(Store::new(paths, Config::default()).unwrap());
+        std::fs::write(&store.paths().json, serde_json::to_vec(rows).unwrap()).unwrap();
+        let closed = || "http://127.0.0.1:1".to_owned();
+        let metadata = MetadataClient::new(
+            reqwest::Client::new(),
+            Endpoints {
+                openrouter: closed(),
+                ollama: closed(),
+            },
+            "llmfit".into(),
+        )
+        .with_openrouter_key("fixture");
+        App::new(
+            Arc::new(CoreApplication::new(store, metadata)),
+            UiOptions {
+                openrouter_model: None,
+                ai_timeout: Duration::from_secs(5),
+            },
+        )
+    }
+
+    async fn loaded_offline_app(root: &Path, rows: &[Value]) -> App {
+        let (mut app, init) = offline_app(root, rows);
+        dispatch(&mut app, init).await;
+        app
+    }
+
+    fn edit(app: &mut App, uuid: &str, field: Field, text: &str) {
+        let _ = app.update(Message::Edited {
+            uuid: uuid.into(),
+            field,
+            text: text.into(),
+        });
+    }
+
+    async fn send(app: &mut App, message: Message) -> Vec<Message> {
+        let task = app.update(message);
+        dispatch(app, task).await
+    }
+
+    /// What a Describe card shows: the draft when one exists, else the loaded row.
+    fn shown(app: &App, uuid: &str) -> (String, String) {
+        app.drafts
+            .get(uuid)
+            .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
+            .unwrap_or_else(|| row_metadata(app.publication(uuid).unwrap()))
+    }
+
+    fn stored(app: &App, uuid: &str) -> (String, String) {
+        let rows = app.application.store().read().unwrap();
+        row_metadata(rows.iter().find(|row| row["uuid"] == uuid).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_shows_stored_metadata_for_clean_drafts_and_keeps_unsaved_input() {
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let rows = [1, 2, 3].map(|n| art_row(root.path(), n));
+        let mut app = loaded_offline_app(root.path(), &rows).await;
+        let [one, two, three] = [1, 2, 3].map(uuid);
+        for id in [&one, &two, &three] {
+            edit(&mut app, id, Field::Title, "Saved manually");
+            send(&mut app, Message::SaveDraft(id.clone())).await;
+            assert_eq!(stored(&app, id).0, "Saved manually");
+        }
+        app.application
+            .store()
+            .mutate(|rows| {
+                rows[0]["title"] = json!("Another writer");
+                Ok(())
+            })
+            .unwrap();
+        send(&mut app, Message::Refresh).await;
+        assert!(
+            app.drafts.is_empty(),
+            "clean drafts are not presentation copies"
+        );
+        assert_eq!(shown(&app, &one), stored(&app, &one));
+
+        // A failed generation writes markers and reloads while other drafts hold input.
+        edit(&mut app, &one, Field::Title, "In flight");
+        let held = app.update(Message::SaveDraft(one.clone()));
+        edit(&mut app, &two, Field::Description, "Unsaved");
+        app.application
+            .store()
+            .mutate(|rows| {
+                rows[1]["title"] = json!("Newer stored title");
+                Ok(())
+            })
+            .unwrap();
+        let generated = send(&mut app, Message::GenerateOne(three.clone())).await;
+        assert!(
+            generated.iter().any(|message| matches!(
+                message,
+                Message::GenerationFinished { result: Err(_), .. }
+            ))
+        );
+        let marker = crate::model::GENERATE_MARKER.to_owned();
+        assert_eq!(stored(&app, &three), (marker.clone(), marker));
+        assert_eq!(shown(&app, &three), stored(&app, &three));
+        assert_eq!(
+            shown(&app, &two),
+            ("Newer stored title".into(), "Unsaved".into())
+        );
+        assert!(app.drafts[&two].is_field_dirty(Field::Description));
+        assert_eq!(shown(&app, &one).0, "In flight");
+        assert!(app.drafts[&one].is_saving());
+
+        dispatch(&mut app, held).await;
+        assert_eq!(stored(&app, &one).0, "In flight");
+        assert_eq!(
+            stored(&app, &two),
+            ("Newer stored title".into(), "Unsaved".into())
+        );
+        send(&mut app, Message::Refresh).await;
+        assert!(app.drafts.is_empty());
+        for id in [&one, &two, &three] {
+            assert_eq!(shown(&app, id), stored(&app, id));
+        }
+    }
+
+    fn calendar_row(basename: &str) -> Value {
+        serde_json::json!({
+            "uuid": uuid(1), "state": "DESCRIBED", "title": "Title", "description": "Description",
+            "submissionTimestamp": 1_700_002_800,
+            "files": [{"basename": basename, "sha512sum": "0".repeat(128)}],
+            "apparitions": [{"platformName": "deviantart", "state": "unpublished"}]
+        })
+    }
+
+    fn replace_rows(app: &App, rows: Vec<Value>) {
+        app.application
+            .store()
+            .mutate(|saved| {
+                *saved = rows;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replies_from_before_the_latest_reload_cannot_replace_newer_rows_or_calendar() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, init) = offline_app(root.path(), &[calendar_row("old.png")]);
+        let startup = run_task(init).await;
+        for message in startup.clone() {
+            let _ = app.update(message);
+        }
+        assert!(app.publications.is_some(), "the startup load is accepted");
+        let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
+        assert!(app.calendar_preparing);
+
+        replace_rows(&app, vec![calendar_row("new.png")]);
+        send(&mut app, Message::Refresh).await;
+        assert!(app.calendar_artwork.contains_key("new.png"));
+        for message in startup.into_iter().chain(old_prepared).filter(|message| {
+            matches!(
+                message,
+                Message::LoadFinished(..) | Message::CalendarPrepared(..)
+            )
+        }) {
+            assert!(iced_runtime::task::into_stream(app.update(message)).is_none());
+        }
+        assert_eq!(
+            app.publications.as_ref().unwrap()[0]["files"][0]["basename"],
+            "new.png"
+        );
+        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), ["new.png"]);
+        let data_dir = &app.application.store().paths().data_dir;
+        assert!(!app.prompt_matches.contains_key(&data_dir.join("old.png")));
+        assert!(app.prompt_matches.contains_key(&data_dir.join("new.png")));
+        assert!(app.calendar_prepared && !app.calendar_preparing);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_calendar_preparation_ends_preparing_without_extending_prompts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = loaded_offline_app(root.path(), &[calendar_row("old.png")]).await;
+        let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
+        std::fs::write(&app.application.store().paths().json, "{").unwrap();
+        let reload = send(&mut app, Message::Refresh).await;
+        assert!(
+            reload
+                .iter()
+                .any(|message| matches!(message, Message::LoadFinished(1, Err(_))))
+        );
+        assert!(
+            app.calendar_preparing,
+            "the generation-0 preparation is still out"
+        );
+        for message in old_prepared {
+            let _ = app.update(message);
+        }
+        assert!(!app.calendar_preparing);
+        assert!(app.prompt_matches.is_empty() && app.calendar_artwork.is_empty());
+    }
+
+    #[test]
+    fn custom_date_input_ends_at_a_date_save_or_refresh_and_blocks_its_approval() {
+        let (mut app, root) = app();
+        let [first, second] = [1, 2].map(uuid);
+        for id in [&first, &second] {
+            let _ = app.update(Message::CustomDate {
+                uuid: id.clone(),
+                value: "2027-01-01".into(),
+            });
+        }
+        let refused = app.update(Message::ApproveDate(second.clone()));
+        assert!(iced_runtime::task::into_stream(refused).is_none());
+        assert!(app.result.as_deref().unwrap().contains("Save Custom"));
+
+        let _preset = app.update(Message::PresetDate {
+            uuid: first.clone(),
+            profile: "default".into(),
+        });
+        assert!(!app.custom_dates.contains_key(&first));
+        assert!(app.custom_dates.contains_key(&second));
+
+        app.prompt_matches.insert(
+            root.path().join("art.png"),
+            PromptMatch::Unknown("resolved before refresh".into()),
+        );
+        let _refresh = app.update(Message::Refresh);
+        assert!(app.custom_dates.is_empty());
+        assert!(
+            app.prompt_matches.is_empty(),
+            "Refresh resolves prompts again"
         );
     }
 }

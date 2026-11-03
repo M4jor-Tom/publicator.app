@@ -284,3 +284,95 @@ pub fn run_child_test(test: &str, cwd: &std::path::Path, envs: &[(&str, &std::ff
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Drives Iced tasks the way the runtime would, keeping lifecycle effects observable:
+/// a test that waits for a close must see zero exits, not merely zero messages.
+#[cfg(feature = "desktop")]
+pub mod ui {
+    use iced_runtime::{Action, futures::futures::StreamExt};
+    use publicator::ui::{App, Message};
+
+    /// What tasks asked the runtime to do.
+    #[derive(Debug, Default)]
+    pub struct Effects {
+        pub messages: Vec<Message>,
+        pub exits: usize,
+        pub widgets: usize,
+    }
+
+    impl Effects {
+        fn record(&mut self, action: Action<Message>) {
+            match action {
+                Action::Output(message) => self.messages.push(message),
+                Action::Exit => self.exits += 1,
+                Action::Widget(_) => self.widgets += 1,
+                other => panic!("unclassified runtime action: {other:?}"),
+            }
+        }
+    }
+
+    /// Runs one task to completion without dispatching its messages.
+    pub async fn run(task: iced::Task<Message>) -> Effects {
+        let mut effects = Effects::default();
+        if let Some(mut actions) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = actions.next().await {
+                effects.record(action);
+            }
+        }
+        effects
+    }
+
+    /// Runs `task` and every task its messages chain through `App::update`.
+    pub async fn settle(app: &mut App, task: iced::Task<Message>) -> Effects {
+        let mut effects = run(task).await;
+        let mut next = 0;
+        while let Some(message) = effects.messages.get(next).cloned() {
+            next += 1;
+            let chained = run(app.update(message)).await;
+            effects.messages.extend(chained.messages);
+            effects.exits += chained.exits;
+            effects.widgets += chained.widgets;
+        }
+        effects
+    }
+
+    /// Delivers `message` and settles everything it chains.
+    pub async fn send(app: &mut App, message: Message) -> Effects {
+        let task = app.update(message);
+        settle(app, task).await
+    }
+
+    /// The next message of a held task stream; an exit or the end of the stream fails the test.
+    pub async fn next_output<S>(actions: &mut S) -> Message
+    where
+        S: iced::futures::Stream<Item = Action<Message>> + Unpin,
+    {
+        loop {
+            match actions.next().await {
+                Some(Action::Output(message)) => return message,
+                Some(Action::Exit) => panic!("task exited before producing a message"),
+                Some(_) => {}
+                None => panic!("task ended without producing a message"),
+            }
+        }
+    }
+
+    /// The first message `task` produces.
+    pub async fn first_output(task: iced::Task<Message>) -> Message {
+        let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
+        next_output(&mut actions).await
+    }
+
+    /// Runs a workflow operation's task, requires its success and applies the completion.
+    pub async fn finish_workflow(app: &mut App, task: iced::Task<Message>) {
+        let completion = first_output(task).await;
+        assert!(
+            matches!(
+                &completion,
+                Message::WorkflowFinished { result: Ok(()), .. }
+            ),
+            "{completion:?}"
+        );
+        let _ = app.update(completion);
+    }
+}

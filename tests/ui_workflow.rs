@@ -13,18 +13,6 @@ use publicator::{
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
-async fn run_task(task: iced::Task<Message>) -> Message {
-    use iced_runtime::{Action, futures::futures::StreamExt};
-
-    let mut actions = iced_runtime::task::into_stream(task).expect("dispatched task stream");
-    while let Some(action) = actions.next().await {
-        if let Action::Output(message) = action {
-            return message;
-        }
-    }
-    panic!("dispatched task produced no completion message");
-}
-
 fn app_with_rows(
     rows: serde_json::Value,
 ) -> (
@@ -54,9 +42,10 @@ fn app_with_rows(
             ai_timeout: Duration::from_secs(300),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(
-        serde_json::from_value(rows).unwrap()
-    )));
+    let _ = app.update(Message::LoadFinished(
+        0,
+        Ok(serde_json::from_value(rows).unwrap()),
+    ));
     (app, application, store, root)
 }
 
@@ -132,12 +121,7 @@ async fn custom_date_ui_operation_persists_exact_wall_input_without_profile() {
         value: "19:30".into(),
     });
     let task = app.update(Message::SaveCustomDate(uuid.clone()));
-    let completion = run_task(task).await;
-    assert!(matches!(
-        &completion,
-        Message::WorkflowFinished { result: Ok(()), .. }
-    ));
-    let _ = app.update(completion);
+    common::ui::finish_workflow(&mut app, task).await;
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(saved[0]["scheduleIsManual"], true);
@@ -186,13 +170,9 @@ per_slot = 1"#,
             ai_timeout: Duration::from_secs(300),
         },
     );
-    let _ = app.update(Message::LoadFinished(Ok(store.read().unwrap())));
-    let completion = run_task(app.update(Message::SuggestedDate(common::id(1)))).await;
-    assert!(matches!(
-        completion,
-        Message::WorkflowFinished { result: Ok(()), .. }
-    ));
-    let _ = app.update(completion);
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
+    let task = app.update(Message::SuggestedDate(common::id(1)));
+    common::ui::finish_workflow(&mut app, task).await;
     let saved = store.read().unwrap();
     assert_eq!(saved[0]["scheduleProfile"], "default");
     assert_eq!(saved[0]["scheduleIsManual"], false);
@@ -219,7 +199,7 @@ async fn pick_dispatch_persists_candidate_before_refreshing_phase() {
         result: Ok(candidates.clone()),
     });
     let task = app.update(Message::Pick(candidates[0].clone()));
-    let completion = run_task(task).await;
+    let completion = common::ui::first_output(task).await;
     assert!(matches!(&completion, Message::PickFinished(Ok(()))));
     let _ = app.update(completion);
     let rows = store.read().unwrap();
