@@ -21,3 +21,8 @@ Rule: source that script in the test command's shell before running the full sui
 ## 2026-10-05 — stage new modules before testing a Git-backed Nix app
 The flake's `src = ./.` omits untracked files, so a new app module can be missing from the built runtime even when `nix run` builds successfully. I only verified this app while its module was temporarily staged, then unstaged it.
 Rule: stage or commit newly added source files before validating a Git-backed `nix run`, and disclose any temporary staging used for verification.
+
+## 2026-11-02 — stop parallel agents by recording, not by killing
+While nine review-fix lanes ran in parallel, the user asked to "stop agents early, by recording their findings/solutions" so the session could be closed and reopened, and later to "make each subagent safely recover, ensuring the quality of the result" after a usage-limit cutoff.
+Rule: a lane is paused by committing its WIP on its own branch (clean tree) and writing a per-lane recovery note (branch, worktree, per-item status, root causes, next steps); it is resumed by re-attaching to the same branch, never by redoing work. After an involuntary cutoff, inspect every worktree (`git status`, `git log master..HEAD`) before resuming.
+Also learned: resolve "both sides appended" merge conflicts by hand and run `cargo fmt --all --check` before committing a merge (a regex concatenation dropped a closing brace once); keep one shared dependency cache and copy it per lane because disk, not CPU, was the binding resource.
