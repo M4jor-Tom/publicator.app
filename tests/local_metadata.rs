@@ -1,38 +1,49 @@
 use publicator::{
+    application::Application,
+    error::Error,
     images::PreparedImage,
     metadata::{
         Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS,
-        consent_required, title_description_schema,
+        consent_required, metadata_prompt, title_description_schema,
     },
+    model::GENERATE_MARKER,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    process::Command,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 mod common;
 use common::http::{Reply, Server};
+use common::{Fixture, id};
 
 fn model_option() -> ModelOption {
     VISION_MODELS[0].clone()
 }
-fn local_client_for_test(server: &Server) -> (MetadataClient, tempfile::TempDir) {
+fn local_client(ollama: &str, llmfit_script: &str) -> (MetadataClient, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("llmfit");
-    let report =
-        json!({"models":[{"name":"google/gemma-4-26B-A4B-it","fit_level":"Good","notes":[]}]});
-    common::executable::write_executable(
-        &executable,
-        &format!("#!/bin/sh\nprintf '%s' '{}'\n", report),
-    );
+    common::executable::write_executable(&executable, llmfit_script);
     (
         MetadataClient::new(
             reqwest::Client::new(),
             Endpoints {
                 openrouter: "http://127.0.0.1:1".into(),
-                ollama: server.url().into(),
+                ollama: ollama.into(),
             },
             executable,
         ),
         dir,
+    )
+}
+fn local_client_for_test(server: &Server) -> (MetadataClient, tempfile::TempDir) {
+    let report =
+        json!({"models":[{"name":"google/gemma-4-26B-A4B-it","fit_level":"Good","notes":[]}]});
+    local_client(
+        server.url(),
+        &format!("#!/bin/sh\nprintf '%s' '{report}'\n"),
     )
 }
 fn reply(path: &str, status: u16, body: Value) -> Reply {
@@ -41,6 +52,39 @@ fn reply(path: &str, status: u16, body: Value) -> Reply {
         status,
         body: body.to_string(),
     }
+}
+fn chat(content: &str) -> Reply {
+    reply("/api/chat", 200, json!({"message":{"content":content}}))
+}
+fn local_request(install_missing: bool, timeout: Duration) -> GenerationRequest {
+    GenerationRequest {
+        source: Source::Local,
+        model: model_option(),
+        timeout,
+        install_missing,
+    }
+}
+/// Bytes whose base64 (`+/8=`) uses both non-alphanumeric symbols.
+fn prepared_image() -> (tempfile::TempDir, PreparedImage) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("art.png");
+    std::fs::write(&path, [0xfb, 0xff]).unwrap();
+    let mime = "image/png".into();
+    (dir, PreparedImage { path, mime })
+}
+fn paths(requests: &[Value]) -> Vec<&str> {
+    requests
+        .iter()
+        .map(|request| request["path"].as_str().unwrap())
+        .collect()
+}
+fn assert_chat_request(request: &Value) {
+    assert_eq!(request["path"], "/api/chat");
+    assert_eq!(
+        request["body"],
+        json!({"model":"gemma4:26b-a4b","stream":false,"format":title_description_schema(),
+            "messages":[{"role":"user","content":metadata_prompt(),"images":["+/8="]}]})
+    );
 }
 
 #[tokio::test]
@@ -59,28 +103,34 @@ async fn model_is_not_pulled_without_consent() {
 }
 
 #[tokio::test]
-async fn failed_pull_does_not_proceed_to_generation() {
-    let server = Server::start(vec![
-        reply("/api/tags", 200, json!({"models":[]})),
-        reply("/api/pull", 500, json!({"error":"no space"})),
-    ]);
-    let (client, _llmfit) = local_client_for_test(&server);
-    let result = client
-        .prepare_local(
-            &model_option(),
-            true,
-            tokio::time::Instant::now() + Duration::from_secs(2),
-        )
-        .await;
-    assert!(result.is_err());
-    assert_eq!(
-        server
-            .requests()
-            .iter()
-            .map(|r| r["path"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["/api/tags", "/api/pull"]
-    );
+async fn consented_pull_failure_never_advances_to_chat() {
+    for (pull, expected) in [
+        (
+            reply("/api/pull", 500, json!({"error":"no space"})),
+            "provider error: Ollama HTTP 500",
+        ),
+        (
+            reply("/api/pull", 200, json!({"status":"failed"})),
+            "provider error: Ollama failed to pull gemma4:26b-a4b",
+        ),
+    ] {
+        // No chat reply is scripted: a chat attempt would end on the closed endpoint instead.
+        let server = Server::start(vec![reply("/api/tags", 200, json!({"models":[]})), pull]);
+        let (client, _llmfit) = local_client_for_test(&server);
+        let (_dir, image) = prepared_image();
+        let error = client
+            .generate(&image, &local_request(true, Duration::from_secs(2)))
+            .await
+            .unwrap_err();
+        let requests = server.requests();
+        server.finish();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(paths(&requests), ["/api/tags", "/api/pull"]);
+        assert_eq!(
+            requests[1]["body"],
+            json!({"model":"gemma4:26b-a4b","stream":false})
+        );
+    }
 }
 
 #[tokio::test]
@@ -88,77 +138,199 @@ async fn local_chat_sends_schema_and_image_and_parses_pair() {
     let server = Server::start(vec![
         reply("/api/tags", 200, json!({"models":[]})),
         reply("/api/pull", 200, json!({"status":"success"})),
-        reply(
-            "/api/chat",
-            200,
-            json!({"message":{"content":"{\"title\":\"A title\",\"description\":\"A scene unfolds.\"}"}}),
-        ),
+        chat("{\"title\":\"A title\",\"description\":\"A scene unfolds.\"}"),
     ]);
     let (client, _llmfit) = local_client_for_test(&server);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("art.png");
-    std::fs::write(&path, [0xfb, 0xff]).unwrap();
+    let (_dir, image) = prepared_image();
     let generated = client
-        .generate(
-            &PreparedImage {
-                path,
-                mime: "image/png".into(),
-            },
-            &GenerationRequest {
-                source: Source::Local,
-                model: model_option(),
-                timeout: Duration::from_secs(3),
-                install_missing: true,
-            },
-        )
+        .generate(&image, &local_request(true, Duration::from_secs(3)))
         .await
         .unwrap();
-    assert_eq!(generated.metadata.title, "A title");
     let req = server.requests();
+    server.finish();
+    assert_eq!(generated.metadata.title, "A title");
+    assert_eq!(generated.model_used, "gemma4:26b-a4b");
     assert_eq!(
         req[1]["body"],
         json!({"model":"gemma4:26b-a4b","stream":false})
     );
-    let body = &req[2]["body"];
-    assert_eq!(body["model"], "gemma4:26b-a4b");
-    assert_eq!(body["stream"], false);
-    assert_eq!(body["format"], title_description_schema());
-    assert_eq!(body["messages"][0]["images"], json!(["+/8="]));
+    assert_chat_request(&req[2]);
 }
 
 #[tokio::test]
 async fn local_chat_rejects_malformed_or_empty_metadata() {
-    for content in ["not json", "{\"title\":\"\",\"description\":\"text\"}"] {
-        let server = Server::start(vec![
-            reply(
-                "/api/tags",
-                200,
-                json!({"models":[{"name":"gemma4:26b-a4b"}]}),
-            ),
-            reply("/api/chat", 200, json!({"message":{"content":content}})),
-        ]);
+    for (content, expected) in [
+        ("not json", "provider error: no JSON object"),
+        (
+            "{\"title\": oops}",
+            "JSON error: expected value at line 1 column 11",
+        ),
+        (
+            "{\"title\":\"\",\"description\":\"text\"}",
+            "validation error: complete unmarked metadata required",
+        ),
+    ] {
+        let server = Server::start(vec![chat(content)]);
         let (client, _llmfit) = local_client_for_test(&server);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("x.png");
-        std::fs::write(&path, b"x").unwrap();
-        assert!(
-            client
-                .local_generate(
-                    &PreparedImage {
-                        path,
-                        mime: "image/png".into()
-                    },
-                    &GenerationRequest {
-                        source: Source::Local,
-                        model: model_option(),
-                        timeout: Duration::from_secs(2),
-                        install_missing: false
-                    }
-                )
-                .await
-                .is_err()
-        );
+        let (_dir, image) = prepared_image();
+        let error = client
+            .local_generate(&image, &local_request(false, Duration::from_secs(2)))
+            .await
+            .unwrap_err();
+        let requests = server.requests();
+        server.finish();
+        // The parse/validation verdict proves the scripted reply was delivered and read.
+        assert_eq!(error.to_string(), expected, "content {content:?}");
+        assert_eq!(requests.len(), 1);
+        assert_chat_request(&requests[0]);
     }
+}
+
+/// The pre-fix oracle: tags scripted, chat sent, and only `is_err()` checked. The fixture's
+/// wrong-path panic must still fail the test when the server is merely dropped.
+#[tokio::test]
+#[ignore = "child process of unexpected_local_request_fails_the_test_visibly"]
+async fn unexpected_request_scenario() {
+    let server = Server::start(vec![reply("/api/tags", 200, json!({"models":[]}))]);
+    let (client, _llmfit) = local_client_for_test(&server);
+    let (_dir, image) = prepared_image();
+    let result = client
+        .local_generate(&image, &local_request(false, Duration::from_secs(2)))
+        .await;
+    assert!(result.is_err());
+}
+
+#[test]
+fn unexpected_local_request_fails_the_test_visibly() {
+    let output = common::bounded_output(
+        Command::new(std::env::current_exe().unwrap()).args([
+            "--exact",
+            "unexpected_request_scenario",
+            "--ignored",
+            "--nocapture",
+        ]),
+        Duration::from_secs(60),
+    );
+    let text = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{text}");
+    for witness in [
+        "unexpected test HTTP path",
+        r#"left: "/api/chat""#,
+        r#"right: "/api/tags""#,
+        "unexpected_request_scenario ... FAILED",
+    ] {
+        assert!(text.contains(witness), "missing {witness:?} in {text}");
+    }
+}
+
+#[tokio::test]
+async fn withheld_chat_body_ends_at_the_shared_local_deadline() {
+    let installed = json!({"models":[{"name":"gemma4:26b-a4b"}]});
+    let valid = "{\"title\":\"Late\",\"description\":\"Arrives after the deadline.\"}";
+    let (server, captured, release) =
+        Server::start_paused_at(vec![reply("/api/tags", 200, installed), chat(valid)], 1);
+    let (client, _llmfit) = local_client_for_test(&server);
+    let (_dir, image) = prepared_image();
+    let timeout = Duration::from_secs(1);
+    let begun = Instant::now();
+    let error = client
+        .generate(&image, &local_request(false, timeout))
+        .await
+        .unwrap_err();
+    let elapsed = begun.elapsed();
+    captured
+        .try_recv()
+        .expect("chat was captured and its headers sent before the deadline");
+    release.send(()).unwrap();
+    let requests = server.requests();
+    server.finish();
+    assert_eq!(
+        error.to_string(),
+        "provider error: local metadata deadline exceeded"
+    );
+    assert!(elapsed < timeout * 3, "ended after {elapsed:?}");
+    assert_eq!(paths(&requests), ["/api/tags", "/api/chat"]);
+    assert_chat_request(&requests[1]);
+}
+
+#[tokio::test]
+async fn tags_without_models_is_a_protocol_error_that_leaves_publications_intact() {
+    let f = Fixture::new();
+    let mut publication = f.art_row(1, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    f.write(json!([publication]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    for batch in [false, true] {
+        let server = Server::start(vec![reply("/api/tags", 200, json!({"status":"ok"}))]);
+        let (client, _llmfit) = local_client_for_test(&server);
+        let app = Application::new(Arc::new(f.store.clone()), client);
+        let request = local_request(false, Duration::from_secs(2));
+        let error = if batch {
+            app.generate_marked(&request).await.unwrap_err()
+        } else {
+            app.generate_one(&id(1), request).await.unwrap_err()
+        };
+        server.finish();
+        assert!(
+            matches!(error, Error::Protocol(_)),
+            "batch {batch}: {error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "protocol error: Ollama tags missing models"
+        );
+        assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    }
+}
+
+/// Polls the runtime (whose reaper collects killed children) until `pid` no longer exists.
+async fn gone_within(pid: libc::pid_t, limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        if Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+#[tokio::test]
+async fn blocked_llmfit_is_killed_and_reaped_at_the_shared_deadline() {
+    let entered = tempfile::tempdir().unwrap();
+    let pid_file = entered.path().join("llmfit.pid");
+    let (client, _llmfit) = local_client(
+        "http://127.0.0.1:1",
+        &format!(
+            "#!/bin/sh\necho $$ > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    );
+    let (_dir, image) = prepared_image();
+    let timeout = Duration::from_secs(2);
+    let begun = Instant::now();
+    let error = client
+        .generate(&image, &local_request(false, timeout))
+        .await
+        .unwrap_err();
+    let elapsed = begun.elapsed();
+    let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+        .expect("llmfit signalled entry before the deadline")
+        .trim()
+        .parse()
+        .unwrap();
+    let gone = gone_within(pid, Duration::from_secs(5)).await;
+    if !gone {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(gone, "llmfit {pid} outlived the generation deadline");
+    assert_eq!(
+        error.to_string(),
+        "provider error: local metadata deadline exceeded"
+    );
+    // llmfit's own 10 s bound would end later: the shared generation deadline ended it.
+    assert!(elapsed < timeout * 2, "ended after {elapsed:?}");
 }
 
 #[tokio::test]

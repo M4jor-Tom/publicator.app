@@ -1,11 +1,25 @@
 use publicator::{
-    images::PreparedImage,
-    metadata::{CatalogModel, Endpoints, GenerationRequest, MetadataClient, ModelOption, Source},
+    application::Application,
+    images::{PreparedImage, file_sha512},
+    metadata::{
+        CatalogModel, Endpoints, GenerationRequest, MetadataClient, ModelOption, Source,
+        VISION_MODELS,
+    },
+    model::GENERATE_MARKER,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 mod common;
+use common::{
+    Fixture,
+    http::{Reply, Server},
+};
 
 fn client(base: &str) -> MetadataClient {
     MetadataClient::new(
@@ -280,64 +294,229 @@ async fn malformed_rescue_catalogue_preserves_original_model_error() {
     assert!(err.to_string().contains("429"), "{err}");
 }
 
+const SELECTED: &str = "google/gemma-4-26b-a4b-it:free";
+
+fn reply(path: &str, status: u16, body: &str) -> Reply {
+    Reply {
+        path: path.into(),
+        status,
+        body: body.into(),
+    }
+}
+fn vision_request(timeout: Duration) -> GenerationRequest {
+    GenerationRequest {
+        source: Source::OpenRouter,
+        model: VISION_MODELS[0].clone(),
+        timeout,
+        install_missing: false,
+    }
+}
+fn vision(id: &str, pricing: Value) -> Value {
+    json!({"id": id, "architecture": {"input_modalities": ["text", "image"]}, "pricing": pricing})
+}
+/// Paid, text-only, duplicate and selected rows around the eligible candidates, whose order is
+/// other vendors as listed (`other/fails`, `third/answers`), then the selected vendor's sibling.
+fn mixed_catalogue() -> String {
+    let free = json!({"prompt": "0", "completion": "0"});
+    json!({"data": [
+        vision(SELECTED, free.clone()),
+        vision("paid/vision", json!({"prompt": "0.000001", "completion": "0"})),
+        vision("paid/images:free", json!({"prompt": "0", "completion": "0", "image": "0.01"})),
+        {"id": "free/text-only:free", "architecture": {"input_modalities": ["text"]}, "pricing": free},
+        vision("other/fails:free", free.clone()),
+        vision("other/fails:free", free.clone()),
+        vision("google/sibling:free", free.clone()),
+        vision("third/answers:free", free),
+    ]})
+    .to_string()
+}
+/// The selected model fails, the rescue catalogue arrives, its first candidate fails.
+fn failing_rescue() -> Vec<Reply> {
+    vec![
+        reply("/chat/completions", 429, "busy"),
+        reply("/models", 200, &mixed_catalogue()),
+        reply(
+            "/chat/completions",
+            500,
+            r#"{"error":{"message":"upstream failed"}}"#,
+        ),
+    ]
+}
+/// A valid pair answered under an alias, never to become the recorded model.
+fn answered() -> Reply {
+    reply("/chat/completions", 200, &completion("third/answers"))
+}
+/// Each request's chat model, or its path when it carries none.
+fn attempts(requests: &[Value]) -> Vec<&str> {
+    requests
+        .iter()
+        .map(|request| {
+            let model = request["body"]["model"].as_str();
+            model.or(request["path"].as_str()).unwrap()
+        })
+        .collect()
+}
+/// Our own request, queued behind any request the client left in flight: such a request would
+/// reach the server first and fail its path check.
+fn probe(server: &Server) {
+    use std::io::{Read, Write};
+    let address = server.url().trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(stream, "GET /probe HTTP/1.1\r\nHost: probe\r\n\r\n").unwrap();
+    let _ = stream.read_to_end(&mut Vec::new());
+}
+
 #[tokio::test]
-async fn body_reads_are_inside_total_deadline() {
-    // A server that delays the response body proves the deadline covers body consumption.
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        thread,
-        time::Instant,
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let addr = listener.local_addr().unwrap();
-    let accepted = Arc::new(AtomicBool::new(false));
-    let server_accepted = Arc::clone(&accepted);
-    let worker = thread::spawn(move || {
-        let until = Instant::now() + Duration::from_secs(3);
-        let (mut s, _) = loop {
-            match listener.accept() {
-                Ok(connection) => break connection,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until =>
-                {
-                    thread::sleep(Duration::from_millis(10))
-                }
-                Err(_) => return,
-            }
-        };
-        server_accepted.store(true, Ordering::SeqCst);
-        s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-        let mut b = [0; 2048];
-        let _ = s.read(&mut b);
-        let body = b"{\"choices\":[{\"message\":{\"content\":\"x\"}}]}";
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = s.write_all(head.as_bytes());
-        thread::sleep(Duration::from_millis(300));
-        let _ = s.write_all(body);
-    });
-    let (_dir, img) = image();
-    let c = client(&format!("http://{addr}"));
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-    let error = c
-        .openrouter_attempt(&img, "vendor/model", false, deadline)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("deadline exceeded"), "{error}");
-    assert!(
-        accepted.load(Ordering::SeqCst),
-        "server accepted no request"
+async fn rescue_shares_one_budget_and_sends_nothing_after_it_expires() {
+    let expired_selected = (vec![answered()], 0, vec![SELECTED]);
+    let mut rescue = failing_rescue();
+    rescue.push(answered());
+    let expired_rescue = (
+        rescue,
+        3,
+        vec![
+            SELECTED,
+            "/models",
+            "other/fails:free",
+            "third/answers:free",
+        ],
     );
-    worker.join().unwrap();
+    for (mut replies, index, mut expected) in [expired_selected, expired_rescue] {
+        replies.push(reply("/probe", 200, "{}"));
+        expected.push("/probe");
+        let (_dir, img) = image();
+        let (server, captured, release) = Server::start_paused_at(replies, index);
+        let timeout = Duration::from_millis(1500);
+        let begun = Instant::now();
+        let error = client(server.url())
+            .openrouter_generate(&img, &vision_request(timeout), None)
+            .await
+            .unwrap_err();
+        let elapsed = begun.elapsed();
+        captured
+            .try_recv()
+            .expect("the held request was captured before the deadline");
+        release.send(()).unwrap();
+        probe(&server);
+        let requests = server.requests();
+        server.finish();
+        assert_eq!(
+            error.to_string(),
+            "provider error: OpenRouter deadline exceeded"
+        );
+        assert!(elapsed < timeout * 3 / 2, "ended after {elapsed:?}");
+        assert_eq!(attempts(&requests), expected);
+    }
+}
+
+/// A marked SCHEDULED row whose `{n}.{extension}` artwork is 16x8: `left` half, `right` half.
+fn two_tone_row(f: &Fixture, n: u64, extension: &str, [left, right]: [&str; 2]) -> Value {
+    let name = format!("{n}.{extension}");
+    let path = f.path(&name);
+    let status = Command::new("magick")
+        .args(["-size", "8x8", &format!("xc:{left}")])
+        .args(["-size", "8x8", &format!("xc:{right}"), "+append"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut publication = common::row(n, "SCHEDULED");
+    publication["title"] = json!(GENERATE_MARKER);
+    publication["description"] = json!(GENERATE_MARKER);
+    publication["files"][0] = json!({"basename": name, "sha512sum": file_sha512(&path).unwrap()});
+    publication
+}
+/// Decodes the image a completion request carried: "MIME FORMAT WIDTH HEIGHT" and RGB bytes.
+fn sent_image(request: &Value) -> (String, Vec<u8>) {
+    let url = request["body"]["messages"][0]["content"][1]["image_url"]["url"]
+        .as_str()
+        .unwrap();
+    let (mime, data) = url
+        .strip_prefix("data:")
+        .and_then(|url| url.split_once(";base64,"))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sent");
+    std::fs::write(&path, openssl::base64::decode_block(data).unwrap()).unwrap();
+    let magick = |args: &[&str]| {
+        let output = Command::new("magick")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        output.stdout
+    };
+    let geometry = String::from_utf8(magick(&["-format", "%m %w %h", "info:"])).unwrap();
+    (
+        format!("{mime} {geometry}"),
+        magick(&["-depth", "8", "RGB:-"]),
+    )
+}
+fn assert_artwork(request: &Value, expected: &str, halves: [[u8; 3]; 2]) {
+    let (description, rgb) = sent_image(request);
+    assert_eq!(description, expected);
+    // Representative pixels away from the seam, which lossy WebP may blur.
+    for (x, colour) in [(2, halves[0]), (13, halves[1])] {
+        let at = (4 * 16 + x) * 3;
+        let pixel = &rgb[at..at + 3];
+        let close = pixel
+            .iter()
+            .zip(colour)
+            .all(|(&got, want)| got.abs_diff(want) < 48);
+        assert!(
+            close,
+            "{expected}: pixel ({x}, 4) {pixel:?}, expected {colour:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn batch_sends_the_recorded_artwork_and_keeps_the_attempted_candidate() {
+    const RED: [u8; 3] = [255, 0, 0];
+    const BLUE: [u8; 3] = [0, 0, 255];
+    let f = Fixture::new();
+    f.write(json!([
+        two_tone_row(&f, 1, "png", ["red", "blue"]),
+        // AI input accepts WebP; only DeviantArt uploads must not be WebP.
+        two_tone_row(&f, 2, "webp", ["blue", "red"]),
+    ]));
+    let mut replies = failing_rescue();
+    // The next record must start from the attempted ID, not the answer's alias.
+    replies.extend([answered(), answered()]);
+    let server = Server::start(replies);
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url()));
+    let report = app
+        .generate_marked(&vision_request(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    let requests = server.requests();
+    server.finish();
+    assert_eq!((report.succeeded, report.failed), (2, 0));
+    // OpenRouter batches run newest first: row 2 is rescued, row 1 starts on the kept candidate.
+    assert_eq!(
+        attempts(&requests),
+        [
+            SELECTED,
+            "/models",
+            "other/fails:free",
+            "third/answers:free",
+            "third/answers:free"
+        ]
+    );
+    for at in [0, 2, 3] {
+        assert_artwork(&requests[at], "image/webp WEBP 16 8", [BLUE, RED]);
+    }
+    assert_artwork(&requests[4], "image/png PNG 16 8", [RED, BLUE]);
+    for saved in f.read().as_array().unwrap() {
+        assert_eq!(
+            (&saved["title"], &saved["state"]),
+            (&json!("T"), &json!("DESCRIBED"))
+        );
+    }
 }
 
 #[allow(dead_code)]

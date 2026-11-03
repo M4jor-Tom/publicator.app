@@ -23,9 +23,10 @@ OpenRouter requests use Rust HTTP clients and loopback fixtures in ordinary test
 - The request timeout bounds the whole operation, not provider work alone: single generation's local preflight, AI image preparation and every provider request share one deadline; a batch gives each record its own deadline for preparation and provider work, and its one local preflight its own. Preparation runs off the async runtime from the bytes matching the resolved SHA-512, and its `identify`/`magick` children are killed with their process group and reaped at the deadline.
 - AI input is the publication's recorded artwork: `files[0]` resolves to the visible file whose bytes match the stored SHA-512, whatever directory holds a same-named file. Changed bytes require reconciliation; no provider call or metadata is made from them.
 - The `PUBLICATOR_OLLAMA_URL` override is CLI-only and selects a dependency endpoint; it is not a hidden test/fake switch.
-- Tests use deterministic local/loopback fixtures and never require live provider credentials.
+- Tests use deterministic local/loopback fixtures and never require live provider credentials. Provider oracles (`tests/local_metadata.rs`, `tests/openrouter.rs`) hold a reply with the fixture gate instead of sleeping, assert the exact requests sent, and finish the fixture so an unconsumed reply or wrong path fails the test.
 
 ## Gotchas
 
 - A complete source snapshot must validate before a batch starts; invalid rows are not reported as ordinary per-record provider failures.
 - Local service/model installation has external effects and is outside routine validation.
+- AI input may be WebP (sent as `image/webp`); DeviantArt's no-WebP rule applies only to uploads.

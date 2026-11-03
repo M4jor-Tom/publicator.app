@@ -37,10 +37,19 @@ impl Server {
     }
 
     pub fn start_paused(reply: Reply) -> (Self, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        Self::start_paused_at(vec![reply], 0)
+    }
+
+    /// Serves `replies` in order, holding the `index`-th (0-based) after its status line and
+    /// headers: `started` fires once that request is captured, its body follows `release`.
+    pub fn start_paused_at(
+        replies: Vec<Reply>,
+        index: usize,
+    ) -> (Self, mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         (
-            Self::start_gated(vec![reply], Some((started_tx, release_rx))),
+            Self::start_gated(replies, Some((index, started_tx, release_rx))),
             started_rx,
             release_tx,
         )
@@ -48,7 +57,7 @@ impl Server {
 
     fn start_gated(
         replies: Vec<Reply>,
-        mut gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+        mut gate: Option<(usize, mpsc::Sender<()>, mpsc::Receiver<()>)>,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(false).unwrap();
@@ -78,26 +87,30 @@ impl Server {
                     .unwrap();
                 let (path, body) = read_request(&mut stream);
                 assert_eq!(path, reply.path, "unexpected test HTTP path");
-                captured
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::json!({"path": path, "body": body}));
-                if let Some((started, release)) = gate.take() {
+                let served = {
+                    let mut captured = captured.lock().unwrap();
+                    captured.push(serde_json::json!({"path": path, "body": body}));
+                    captured.len()
+                };
+                let reason = if reply.status == 200 { "OK" } else { "Error" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.status,
+                    reason,
+                    reply.body.len(),
+                )
+                .unwrap();
+                if let Some((_, started, release)) = gate.take_if(|(at, ..)| *at + 1 == served) {
                     let _ = started.send(());
                     release.recv_timeout(WAIT).unwrap_or_else(|_| {
                         panic!("paused HTTP reply for {path} was never released")
                     });
+                    // The client may have abandoned the held body at its deadline; tests assert that.
+                    let _ = stream.write_all(reply.body.as_bytes());
+                } else {
+                    stream.write_all(reply.body.as_bytes()).unwrap();
                 }
-                let reason = if reply.status == 200 { "OK" } else { "Error" };
-                write!(
-                    stream,
-                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    reply.status,
-                    reason,
-                    reply.body.len(),
-                    reply.body
-                )
-                .unwrap();
             }
             Vec::new()
         });
