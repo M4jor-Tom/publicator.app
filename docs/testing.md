@@ -41,4 +41,3 @@ compilation and a green gate say nothing about unlisted paths (see [Unmeasured](
 - Real provider services (OpenRouter, Ollama model installs): tests use loopback fixtures only.
 - The packaged desktop UI beyond `publicator-ui --help` and the URL-opener smoke; the `gpu`
   feature.
-- Every item still open in [the fab0d03 review](reviews/fab0d03/README.md).
