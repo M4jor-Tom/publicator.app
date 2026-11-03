@@ -166,24 +166,48 @@ pub fn approve_metadata(store: &Store, uuid: &str) -> Result<()> {
     })
 }
 
-pub fn save_generated_pair(store: &Store, uuid: &str, pair: &Metadata) -> Result<()> {
+/// Writes `next` into each field still holding its `admitted` value, so an edit saved by another
+/// writer during generation survives. Returns whether both fields were replaced.
+fn replace_admitted(row: &mut Value, admitted: &Metadata, next: [&str; 2]) -> bool {
+    let mut replaced = true;
+    for (key, before, value) in [
+        ("title", &admitted.title, next[0]),
+        ("description", &admitted.description, next[1]),
+    ] {
+        if row.get(key).and_then(Value::as_str) == Some(before.as_str()) {
+            row[key] = json!(value);
+        } else {
+            replaced = false;
+        }
+    }
+    replaced
+}
+
+/// Saves a single generation's pair over the fields still equal to `admitted`; it approves only
+/// when neither field changed since admission, so a newer edit is never implicitly approved.
+pub fn save_generated_pair(
+    store: &Store,
+    uuid: &str,
+    admitted: &Metadata,
+    pair: &Metadata,
+) -> Result<()> {
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;
         require_scheduled_metadata(row)?;
         validate_metadata(&pair.title, &pair.description)?;
-        row["title"] = json!(pair.title);
-        row["description"] = json!(pair.description);
-        row["state"] = json!("DESCRIBED");
+        if replace_admitted(row, admitted, [&pair.title, &pair.description]) {
+            row["state"] = json!("DESCRIBED");
+        }
         Ok(())
     })
 }
 
-pub fn fail_generation(store: &Store, uuid: &str) -> Result<()> {
+/// Marks the fields still equal to `admitted` for regeneration; newer edits are kept.
+pub fn fail_generation(store: &Store, uuid: &str, admitted: &Metadata) -> Result<()> {
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;
         require_scheduled_metadata(row)?;
-        row["title"] = json!(GENERATE_MARKER);
-        row["description"] = json!(GENERATE_MARKER);
+        replace_admitted(row, admitted, [GENERATE_MARKER, GENERATE_MARKER]);
         Ok(())
     })
 }

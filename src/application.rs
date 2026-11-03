@@ -1,6 +1,7 @@
 use crate::{
+    artwork::Artwork,
     error::{Error, Result},
-    images::prepare_ai_image,
+    images::{PreparedImage, prepare_ai_image_until},
     metadata::{Generated, GenerationRequest, MetadataClient, Source, VISION_MODELS},
     model::{GENERATE_MARKER, Phase, phase},
     store::Store,
@@ -9,9 +10,9 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+use tokio::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordResult {
@@ -79,7 +80,7 @@ impl Application {
     }
     pub async fn generate_one(&self, uuid: &str, request: GenerationRequest) -> Result<Generated> {
         validate_request(&request)?;
-        self.preflight_local(&request).await?;
+        let deadline = Instant::now() + request.timeout;
         let _op = self.operation.lock().unwrap();
         let rows = self.store.read()?;
         if *self.publishing.lock().unwrap() {
@@ -92,13 +93,17 @@ impl Application {
             ));
         }
         let image = artwork(&self.store, row)?;
+        let admitted = admitted_pair(row);
         self.reserve(vec![uuid.to_owned()])?;
         drop(_op);
         let _lease = Lease {
             busy: &self.busy,
             ids: vec![uuid.to_owned()],
         };
-        self.generate_accepted(uuid, image, &request).await
+        // Like a batch, the row is validated and reserved first: invalid source data runs no preflight.
+        self.preflight_local(&request, deadline).await?;
+        self.generate_accepted(uuid, &image, &admitted, &request, deadline)
+            .await
     }
     pub async fn generate_marked(&self, request: &GenerationRequest) -> Result<BatchReport> {
         self.generate_marked_inner(request, None).await
@@ -127,7 +132,8 @@ impl Application {
             busy: &self.busy,
             ids: ids.clone(),
         };
-        self.preflight_local(request).await?;
+        self.preflight_local(request, Instant::now() + request.timeout)
+            .await?;
         let mut report = BatchReport::default();
         let mut preferred: Option<String> = None;
         for uuid in ids {
@@ -182,11 +188,12 @@ impl Application {
         request: &GenerationRequest,
         preferred: &mut Option<String>,
     ) -> Result<()> {
+        let deadline = Instant::now() + request.timeout;
         let rows = self.store.read()?;
         let row = lookup(&rows, uuid)?;
         let image = artwork(&self.store, row)?;
         let generated = self
-            .generate_provider(&image, request, preferred.as_deref())
+            .generate_provider(&image, request, preferred.as_deref(), deadline)
             .await?;
         if preferred.is_none() {
             *preferred = Some(generated.model_used.clone());
@@ -213,29 +220,30 @@ impl Application {
     async fn generate_accepted(
         &self,
         uuid: &str,
-        image: PathBuf,
+        image: &Artwork,
+        admitted: &WorkflowMetadata,
         request: &GenerationRequest,
+        deadline: Instant,
     ) -> Result<Generated> {
-        match self.generate_provider(&image, request, None).await {
+        match self.generate_provider(image, request, None, deadline).await {
             Ok(g) => {
                 let pair = WorkflowMetadata {
                     title: g.metadata.title.clone(),
                     description: g.metadata.description.clone(),
                 };
-                workflow::save_generated_pair(&self.store, uuid, &pair)?;
+                workflow::save_generated_pair(&self.store, uuid, admitted, &pair)?;
                 Ok(g)
             }
             Err(error) => {
-                workflow::fail_generation(&self.store, uuid)?;
+                workflow::fail_generation(&self.store, uuid, admitted)?;
                 Err(error)
             }
         }
     }
-    async fn preflight_local(&self, request: &GenerationRequest) -> Result<()> {
+    async fn preflight_local(&self, request: &GenerationRequest, deadline: Instant) -> Result<()> {
         if request.source != Source::Local {
             return Ok(());
         }
-        let deadline = tokio::time::Instant::now() + request.timeout;
         let status = self.metadata.local_status(&request.model, deadline).await?;
         if !status.fit.fit {
             return Err(Error::Provider(format!(
@@ -254,21 +262,26 @@ impl Application {
         }
         Ok(())
     }
+    /// Image preparation and every provider request share `deadline`.
     async fn generate_provider(
         &self,
-        image: &Path,
+        image: &Artwork,
         request: &GenerationRequest,
         preferred: Option<&str>,
+        deadline: Instant,
     ) -> Result<Generated> {
-        let prepared = prepare_ai_image(image, &self.store.paths().data_dir.join(".thumbs"), None)?;
+        let prepared = self.prepare_image(image, deadline).await?;
         match request.source {
             Source::OpenRouter => {
+                let remaining = GenerationRequest {
+                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    ..request.clone()
+                };
                 self.metadata
-                    .openrouter_generate(&prepared, request, preferred)
+                    .openrouter_generate(&prepared, &remaining, preferred)
                     .await
             }
             Source::Local => {
-                let deadline = tokio::time::Instant::now() + request.timeout;
                 self.metadata
                     .prepare_local(&request.model, request.install_missing, deadline)
                     .await?;
@@ -276,6 +289,23 @@ impl Application {
                     .local_generate_until(&prepared, request, deadline)
                     .await
             }
+        }
+    }
+    /// Prepares the recorded bytes off the async runtime; image tools die at `deadline`.
+    async fn prepare_image(&self, image: &Artwork, deadline: Instant) -> Result<PreparedImage> {
+        let (path, sha512) = (image.path.clone(), image.sha512.clone());
+        let cache = self.store.paths().data_dir.join(".thumbs");
+        let limit = deadline.into_std();
+        let task = tokio::task::spawn_blocking(move || {
+            prepare_ai_image_until(&path, &cache, &sha512, limit)
+        });
+        match tokio::time::timeout_at(deadline, task).await {
+            Ok(joined) => joined
+                .map_err(|error| Error::InvalidState(format!("AI image preparation: {error}")))?,
+            Err(_) => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "AI image preparation exceeded the generation deadline",
+            ))),
         }
     }
 }
@@ -306,8 +336,21 @@ fn lookup<'a>(rows: &'a [Value], uuid: &str) -> Result<&'a Value> {
         .ok_or_else(|| Error::NotFound(uuid.into()))
 }
 // AI input is the recorded artwork identity, never a same-named or changed file.
-fn artwork(store: &Store, row: &Value) -> Result<PathBuf> {
-    crate::artwork::resolve(&store.paths().data_dir, row).map(|artwork| artwork.path)
+fn artwork(store: &Store, row: &Value) -> Result<Artwork> {
+    crate::artwork::resolve(&store.paths().data_dir, row)
+}
+/// The draft generation started from; completion overwrites only fields still holding it.
+fn admitted_pair(row: &Value) -> WorkflowMetadata {
+    let field = |key| {
+        row.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    WorkflowMetadata {
+        title: field("title"),
+        description: field("description"),
+    }
 }
 fn validate_request(request: &GenerationRequest) -> Result<()> {
     let allowed = VISION_MODELS.iter().any(|model| match request.source {
@@ -399,5 +442,195 @@ mod ordering_tests {
             vec!["3", "2", "1"]
         );
         assert_eq!(batch_ids(ids, Source::Local), vec!["1", "2", "3"]);
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/common/http.rs"]
+mod test_http;
+
+/// Real Store commits fail through the Store's thread-local hook. The hook is one-shot and armed
+/// before the call; admission never commits, and each test proves which commit it hit by the
+/// provider requests made, the error surfaced and the bytes left behind.
+#[cfg(test)]
+mod persistence_tests {
+    use super::{
+        Application, GENERATE_MARKER, GenerationRequest, Source, Store, VISION_MODELS, Value,
+        test_http::{Reply, Server},
+    };
+    use crate::{
+        config::{Config, Paths},
+        error::Error,
+        metadata::{Endpoints, MetadataClient},
+        store::{CommitFailureForTest, fail_next_commit_for_test},
+    };
+    use serde_json::json;
+    use std::{fs, sync::Arc, time::Duration};
+
+    fn id(n: u64) -> String {
+        format!("00000000-0000-4000-8000-{n:012}")
+    }
+
+    /// SCHEDULED rows 1 and 2 over distinct real PNGs and hashes; `marked` rows await generation.
+    fn fixture(marked: bool) -> (tempfile::TempDir, Store) {
+        let root = tempfile::tempdir().unwrap();
+        let text = |plain: &str| if marked { GENERATE_MARKER } else { plain }.to_owned();
+        let rows: Vec<Value> = [1u64, 2]
+            .iter()
+            .map(|n| {
+                let image = root.path().join(format!("{n}.png"));
+                let status = std::process::Command::new("magick")
+                    .args(["-size", "2x2", &format!("xc:rgb({n},0,0)")])
+                    .arg(&image)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                json!({"uuid": id(*n), "state": "SCHEDULED", "title": text("Title"),
+                    "description": text("Description"), "submissionTimestamp": 1_700_000_000,
+                    "files": [{"basename": format!("{n}.png"),
+                        "sha512sum": crate::images::file_sha512(&image).unwrap()}],
+                    "apparitions": []})
+            })
+            .collect();
+        let paths = Paths::resolve(Some(root.path()), None).unwrap();
+        fs::write(&paths.json, serde_json::to_vec(&rows).unwrap()).unwrap();
+        (root, Store::new(paths, Config::default()).unwrap())
+    }
+
+    fn completion(title: &str) -> Reply {
+        let content = json!({"title": title, "description": "A generated description."});
+        Reply {
+            path: "/chat/completions".into(),
+            status: 200,
+            body: json!({"choices":[{"message":{"content": content.to_string()}}]}).to_string(),
+        }
+    }
+
+    fn app(store: &Store, server: &Server) -> Application {
+        let endpoints = Endpoints {
+            openrouter: server.url().to_owned(),
+            ollama: server.url().to_owned(),
+        };
+        let metadata = MetadataClient::new(reqwest::Client::new(), endpoints, "llmfit".into());
+        Application::new(
+            Arc::new(store.clone()),
+            metadata.with_openrouter_key("fixture"),
+        )
+    }
+
+    fn request() -> GenerationRequest {
+        GenerationRequest {
+            source: Source::OpenRouter,
+            model: VISION_MODELS[0].clone(),
+            timeout: Duration::from_secs(5),
+            install_missing: false,
+        }
+    }
+
+    fn rows(store: &Store) -> Vec<Value> {
+        serde_json::from_slice(&fs::read(&store.paths().json).unwrap()).unwrap()
+    }
+
+    /// No UUID stays reserved: both rows are editable and publishing can start.
+    fn assert_released(app: &Application) {
+        for n in [1, 2] {
+            app.mutate(Some(&id(n)), |_| Ok(())).unwrap();
+        }
+        drop(app.begin_publishing().unwrap());
+    }
+
+    #[tokio::test]
+    async fn single_success_with_failed_save_keeps_original_bytes_and_surfaces_the_error() {
+        let (_root, store) = fixture(false);
+        let server = Server::start(vec![completion("Generated")]);
+        let app = app(&store, &server);
+        let before = fs::read(&store.paths().json).unwrap();
+        fail_next_commit_for_test(CommitFailureForTest::BeforeRename);
+        let error = app.generate_one(&id(1), request()).await.unwrap_err();
+        assert_eq!(server.requests().len(), 1);
+        assert!(matches!(&error, Error::Io(e) if e.to_string() == "injected pre-rename failure"));
+        assert_eq!(fs::read(&store.paths().json).unwrap(), before);
+        assert_released(&app);
+    }
+
+    #[tokio::test]
+    async fn provider_failure_with_failed_marker_save_surfaces_the_persistence_failure() {
+        let (_root, store) = fixture(false);
+        let server = Server::start(vec![
+            Reply {
+                path: "/chat/completions".into(),
+                status: 500,
+                body: json!({"error":{"message":"fixture failure"}}).to_string(),
+            },
+            Reply {
+                path: "/models".into(),
+                status: 200,
+                body: json!({"data": []}).to_string(),
+            },
+        ]);
+        let app = app(&store, &server);
+        let before = fs::read(&store.paths().json).unwrap();
+        fail_next_commit_for_test(CommitFailureForTest::BeforeRename);
+        let error = app.generate_one(&id(1), request()).await.unwrap_err();
+        assert_eq!(server.requests().len(), 2);
+        // The markers were not saved, so the error is the save failure, not the provider failure.
+        assert!(matches!(&error, Error::Io(e) if e.to_string() == "injected pre-rename failure"));
+        assert_eq!(fs::read(&store.paths().json).unwrap(), before);
+        assert_released(&app);
+    }
+
+    #[tokio::test]
+    async fn batch_uncertain_commit_keeps_new_bytes_and_stops_before_the_next_request() {
+        let (_root, store) = fixture(true);
+        let server = Server::start(vec![completion("Second"), completion("First")]);
+        let app = app(&store, &server);
+        fail_next_commit_for_test(CommitFailureForTest::AfterRename);
+        let error = app.generate_marked(&request()).await.unwrap_err();
+        assert!(matches!(error, Error::DurabilityUncertain { .. }));
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "no request after an uncertain commit"
+        );
+        let saved = rows(&store);
+        assert_eq!(
+            saved[1]["title"], "Second",
+            "OpenRouter batches start from the last row"
+        );
+        assert_eq!(saved[1]["state"], "DESCRIBED");
+        assert_eq!(saved[0]["title"], GENERATE_MARKER);
+        assert_released(&app);
+    }
+
+    #[tokio::test]
+    async fn batch_failed_save_is_an_ordinary_failure_and_the_batch_continues() {
+        let (_root, store) = fixture(true);
+        let original = rows(&store);
+        let server = Server::start(vec![completion("Second"), completion("First")]);
+        let app = app(&store, &server);
+        fail_next_commit_for_test(CommitFailureForTest::BeforeRename);
+        let report = app.generate_marked(&request()).await.unwrap();
+        assert_eq!((report.succeeded, report.failed), (1, 1));
+        let failed = &report.results[0];
+        assert_eq!(
+            (failed.uuid.as_str(), failed.saved),
+            (id(2).as_str(), false)
+        );
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("injected pre-rename failure")
+        );
+        assert_eq!(server.requests().len(), 2);
+        let saved = rows(&store);
+        assert_eq!(
+            saved[1], original[1],
+            "the failed save left its row unchanged"
+        );
+        assert_eq!(saved[0]["title"], "First");
+        assert_released(&app);
     }
 }

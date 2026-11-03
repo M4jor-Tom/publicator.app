@@ -333,13 +333,15 @@ fn write_thumb(
         .prefix(".thumb-")
         .suffix(&format!(".{extension}"))
         .tempfile_in(cache)?;
-    let status = Command::new("magick")
-        .arg(first_frame(source))
-        .args(["-resize", "300x300>"])
-        .arg(temp.path())
-        .status()?;
+    let status = run_tool(
+        Command::new("magick")
+            .arg(first_frame(source))
+            .args(["-resize", "300x300>"])
+            .arg(temp.path()),
+    )
+    .map(|output| output.status);
     // An unresized original is not a thumbnail: fail and cache nothing, so the next call retries.
-    if !status.success() {
+    if !matches!(status, Ok(status) if status.success()) {
         return Err(Error::InvalidState(format!(
             "thumbnail conversion failed for {}",
             path.display()
@@ -349,6 +351,60 @@ fn write_thumb(
     before_persist();
     temp.persist(target).map_err(|error| error.error)?;
     Ok(())
+}
+
+thread_local! {
+    // ponytail: AI preparation's deadline rides on its worker thread so the shared image-tool
+    // callers keep their signatures; pass it explicitly if other callers ever need a deadline.
+    static TOOL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `prepare_ai_image` of the recorded content `sha512` whose image-tool children are killed,
+/// with their process group, and reaped once `deadline` passes.
+pub(crate) fn prepare_ai_image_until(
+    path: &Path,
+    cache: &Path,
+    sha512: &str,
+    deadline: std::time::Instant,
+) -> Result<PreparedImage> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TOOL_DEADLINE.set(None);
+        }
+    }
+    TOOL_DEADLINE.set(Some(deadline));
+    let _reset = Reset;
+    prepare_ai_image(path, cache, Some(sha512))
+}
+
+/// Runs an image tool to completion, or only until the current preparation deadline.
+fn run_tool(command: &mut Command) -> std::io::Result<std::process::Output> {
+    use std::os::unix::process::CommandExt;
+    let Some(deadline) = TOOL_DEADLINE.get() else {
+        return command.output();
+    };
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()?;
+    // ponytail: polls every 10 ms and reads stdout only after exit (tools print a few bytes);
+    // drain it on a thread if a tool ever prints more than a pipe buffer.
+    while child.try_wait()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            // The group was created for this child, so only the tool and its descendants die.
+            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            child.wait()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "image tool exceeded the generation deadline",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.wait_with_output()
 }
 
 pub fn prepare_ai_image(
@@ -383,10 +439,11 @@ fn first_frame(path: &Path) -> OsString {
 
 /// Detects the format of the first frame, so a sequence is admitted by its container format.
 fn actual_mime(path: &Path) -> Result<String> {
-    let output = Command::new("identify")
-        .args(["-format", "%m"])
-        .arg(first_frame(path))
-        .output()?;
+    let output = run_tool(
+        Command::new("identify")
+            .args(["-format", "%m"])
+            .arg(first_frame(path)),
+    )?;
     if !output.status.success() {
         return Err(Error::InvalidState(format!(
             "unsupported or unreadable image {}",

@@ -201,22 +201,12 @@ async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
 async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_work() {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
-    let (server, started_rx, release_tx) = common::http::Server::start_paused(common::http::Reply {
+    let (server, app, task, release_tx) = paused_generation(&f, common::http::Reply {
         path: "/chat/completions".into(),
         status: 200,
         body: json!({"choices":[{"message":{"content":json!({"title":"Generated title","description":"A generated description."}).to_string()}}]}).to_string(),
-    });
-    let app = Arc::new(Application::new(
-        Arc::new(f.store.clone()),
-        client(server.url().to_owned()),
-    ));
-    let task = {
-        let app = Arc::clone(&app);
-        tokio::spawn(async move { app.generate_one(&id(1), request(Source::OpenRouter)).await })
-    };
-    tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
-        .await
-        .unwrap();
+    })
+    .await;
     assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
     assert!(
         app.generate_one(&id(1), request(Source::OpenRouter))
@@ -706,5 +696,296 @@ async fn duplicate_basenames_resolve_to_the_recorded_hash_in_any_directory_order
         assert!(thumb(&red, &red_hash).exists());
         assert!(!thumb(&blue, &blue_hash).exists());
         assert_eq!(server.requests().len(), 1);
+    }
+}
+
+type Generation =
+    tokio::task::JoinHandle<publicator::error::Result<publicator::metadata::Generated>>;
+
+/// Starts `generate_one(id(1))` and returns once the server, paused before `reply`, captured it.
+async fn paused_generation(
+    f: &Fixture,
+    reply: Reply,
+) -> (Server, Arc<Application>, Generation, mpsc::Sender<()>) {
+    let (server, started_rx, release_tx) = Server::start_paused(reply);
+    let app = Arc::new(Application::new(
+        Arc::new(f.store.clone()),
+        client(server.url().to_owned()),
+    ));
+    let task = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.generate_one(&id(1), request(Source::OpenRouter)).await })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
+        .await
+        .unwrap();
+    (server, app, task, release_tx)
+}
+
+/// Pauses a single generation at its captured provider request, saves a newer draft through
+/// another Store writer, then releases `reply`. Returns the saved row and the generation outcome.
+async fn complete_after_newer_edit(reply: Reply) -> (serde_json::Value, bool) {
+    let f = Fixture::new();
+    f.write(json!([f.art_row(1, "SCHEDULED")]));
+    let (server, app, task, release_tx) = paused_generation(&f, reply).await;
+    let newer = publicator::workflow::MetadataPatch {
+        title: Some("Newer title".into()),
+        description: Some("Newer description".into()),
+    };
+    publicator::workflow::save_metadata(&f.store, &id(1), &newer).unwrap();
+    release_tx.send(()).unwrap();
+    let outcome = task.await.unwrap();
+    server.finish();
+    app.mutate(Some(&id(1)), |_| Ok(()))
+        .expect("generation lease is released");
+    (f.read()[0].clone(), outcome.is_ok())
+}
+
+#[tokio::test]
+async fn single_generation_completion_keeps_fields_saved_by_another_writer() {
+    let malformed = reply(
+        "/chat/completions",
+        json!({"choices":[{"message":{"content":"not a metadata object"}}]}),
+    );
+    for (reply, succeeded) in [(generated_reply(), true), (malformed, false)] {
+        let (saved, outcome) = complete_after_newer_edit(reply).await;
+        assert_eq!(outcome, succeeded);
+        assert_eq!(saved["title"], "Newer title");
+        assert_eq!(saved["description"], "Newer description");
+        assert_eq!(
+            saved["state"], "SCHEDULED",
+            "a newer edit is never approved"
+        );
+    }
+}
+
+const STALLED_TOOL_DIR: &str = "PUBLICATOR_TEST_STALLED_TOOL_DIR";
+
+/// True once `condition` holds, polling until `limit` elapses.
+fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while !condition() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Whether `pid` is a live process, neither reaped nor a zombie.
+fn running(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let state = stat.rsplit(')').next().unwrap_or("").trim_start();
+        !state.starts_with(['Z', 'X'])
+    })
+}
+
+/// The parent is a watchdog: only its child test process gets a PATH whose `identify` records
+/// its PID and a descendant's, then blocks. Whatever outlives the child is killed and fails.
+#[tokio::test]
+async fn stalled_image_preparation_fails_within_the_generation_deadline() {
+    if let Some(dir) = std::env::var_os(STALLED_TOOL_DIR) {
+        return stalled_preparation_child(std::path::Path::new(&dir)).await;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let script = format!(
+        "#!/bin/sh\nsleep 1000 &\necho \"$$ $!\" > '{}'\nwait\n",
+        bin.path().join("pids").display()
+    );
+    common::executable::write_executable(&bin.path().join("identify"), &script);
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.path().to_owned()).chain(std::env::split_paths(&inherited)),
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "stalled_image_preparation_fails_within_the_generation_deadline",
+            "--nocapture",
+        ])
+        .env("PATH", path)
+        .env(STALLED_TOOL_DIR, bin.path())
+        .spawn()
+        .unwrap();
+    let exited = eventually(Duration::from_secs(60), || {
+        child.try_wait().unwrap().is_some()
+    });
+    if !exited {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    let pids = std::fs::read_to_string(bin.path().join("pids")).unwrap_or_default();
+    let lingering: Vec<&str> = pids.split_whitespace().filter(|pid| running(pid)).collect();
+    for pid in &lingering {
+        unsafe { libc::kill(pid.parse().unwrap(), libc::SIGKILL) };
+    }
+    assert!(
+        exited,
+        "generation outlived the watchdog: preparation is unbounded"
+    );
+    assert!(status.success(), "stalled-preparation child failed");
+    assert!(
+        lingering.is_empty(),
+        "image tools outlived generation: {lingering:?}"
+    );
+}
+
+async fn stalled_preparation_child(bin: &std::path::Path) {
+    let f = Fixture::new();
+    f.write(json!([f.art_row(1, "SCHEDULED")]));
+    let server = Server::start(vec![generated_reply()]);
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
+    let mut bounded = request(Source::OpenRouter);
+    bounded.timeout = Duration::from_millis(500);
+    let started = std::time::Instant::now();
+    let result = app.generate_one(&id(1), bounded).await;
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(server.requests().is_empty(), "no provider call");
+    app.mutate(Some(&id(1)), |_| Ok(()))
+        .expect("generation lease is released");
+    drop(app.begin_publishing().expect("no reservation remains"));
+    let pids = std::fs::read_to_string(bin.join("pids")).expect("identify was entered");
+    let (tool, descendant) = pids.trim().split_once(' ').unwrap();
+    // Only this process can reap its child, so a vanished /proc entry proves the app reaped it.
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            !std::path::Path::new(&format!("/proc/{tool}")).exists()
+        }),
+        "stalled image tool was not reaped"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || !running(descendant)),
+        "image tool descendant outlived the deadline"
+    );
+}
+
+/// `f.art_row(n)` with both fields carrying the exact generation marker.
+fn marked(f: &Fixture, n: u64) -> serde_json::Value {
+    let mut publication = f.art_row(n, "SCHEDULED");
+    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication
+}
+
+/// A local app whose llmfit touches `entered`, then reports a fit once `release` exists.
+/// Ollama is unreachable, so a released preflight fails as unavailable.
+fn gated_local_app(f: &Fixture) -> (Arc<Application>, std::path::PathBuf, std::path::PathBuf) {
+    let (entered, release, tool) = (f.path("entered"), f.path("release"), f.path("llmfit"));
+    let script = format!(
+        "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nprintf '%s' '{{\"models\":[{{\"name\":\"{}\",\"fit_level\":\"Good\"}}]}}'\n",
+        entered.display(),
+        release.display(),
+        VISION_MODELS[0].llmfit_name
+    );
+    common::executable::write_executable(&tool, &script);
+    let metadata = local_client("http://127.0.0.1:1".into(), &tool);
+    let app = Arc::new(Application::new(Arc::new(f.store.clone()), metadata));
+    (app, entered, release)
+}
+
+/// A local request whose deadline outlasts any gated pause in these tests.
+fn patient_local() -> GenerationRequest {
+    GenerationRequest {
+        timeout: Duration::from_secs(30),
+        ..request(Source::Local)
+    }
+}
+
+async fn wait_for(path: std::path::PathBuf) {
+    let entered =
+        tokio::task::spawn_blocking(move || eventually(Duration::from_secs(5), || path.exists()));
+    assert!(entered.await.unwrap(), "fake llmfit was not entered");
+}
+
+#[tokio::test]
+async fn reordered_expected_batch_is_rejected_before_any_local_work() {
+    let f = Fixture::new();
+    f.write(json!([marked(&f, 1), marked(&f, 2)]));
+    let (app, entered, release) = gated_local_app(&f);
+    std::fs::write(release, "").unwrap();
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let reordered = [id(2), id(1)];
+    let error = app
+        .generate_marked_expected(&patient_local(), &reordered)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, publicator::error::Error::InvalidState(_)));
+    assert!(!entered.exists(), "llmfit ran for a changed batch");
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    drop(
+        app.begin_publishing()
+            .expect("a rejected batch reserves nothing"),
+    );
+}
+
+#[tokio::test]
+async fn paused_batch_preflight_reserves_exactly_the_admitted_rows() {
+    let f = Fixture::new();
+    f.write(json!([
+        marked(&f, 1),
+        marked(&f, 2),
+        f.art_row(3, "SCHEDULED")
+    ]));
+    let (app, entered, release) = gated_local_app(&f);
+    let batch = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.generate_marked(&patient_local()).await })
+    };
+    wait_for(entered).await;
+    for reserved in [id(1), id(2)] {
+        assert!(app.mutate(Some(&reserved), |_| Ok(())).is_err());
+    }
+    app.mutate(Some(&id(3)), |_| Ok(()))
+        .expect("an unrelated row stays editable");
+    std::fs::write(release, "").unwrap();
+    assert!(batch.await.unwrap().is_err(), "Ollama is unreachable");
+    app.mutate(Some(&id(1)), |_| Ok(()))
+        .expect("the failed preflight released the batch");
+}
+
+#[tokio::test]
+async fn aborted_generation_releases_its_reservation() {
+    let f = Fixture::new();
+    f.write(json!([marked(&f, 1)]));
+    let (app, entered, release) = gated_local_app(&f);
+    let task = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.generate_one(&id(1), patient_local()).await })
+    };
+    wait_for(entered).await;
+    assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    std::fs::write(release, "").unwrap();
+    app.mutate(Some(&id(1)), |_| Ok(()))
+        .expect("the aborted task released its UUID");
+    drop(app.begin_publishing().expect("no reservation remains"));
+}
+
+#[tokio::test]
+async fn invalid_single_generation_source_runs_no_local_preflight() {
+    let f = Fixture::new();
+    let (app, entered, release) = gated_local_app(&f);
+    std::fs::write(release, "").unwrap();
+    let mut unscheduled = f.art_row(1, "PICKED");
+    unscheduled["title"] = json!("Kept");
+    let mut incomplete = marked(&f, 1);
+    incomplete
+        .as_object_mut()
+        .unwrap()
+        .remove("submissionTimestamp");
+    for source in [unscheduled, row(1, "SCHEDULED"), incomplete] {
+        f.write(json!([source]));
+        let before = std::fs::read(&f.store.paths().json).unwrap();
+        assert!(app.generate_one(&id(1), patient_local()).await.is_err());
+        assert!(!entered.exists(), "llmfit ran for invalid source data");
+        assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
     }
 }

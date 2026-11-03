@@ -41,7 +41,7 @@ fn generated_pair_advances_only_with_complete_valid_metadata() {
         title: "A title".into(),
         description: "A description".into(),
     };
-    save_generated_pair(&f.store, &id(1), &pair).unwrap();
+    save_generated_pair(&f.store, &id(1), &row_pair(), &pair).unwrap();
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "A title");
     assert_eq!(phase(&saved[0]).unwrap(), Phase::Described);
@@ -51,7 +51,7 @@ fn generated_pair_advances_only_with_complete_valid_metadata() {
 fn accepted_generation_failure_marks_both_fields_without_advancing() {
     let f = Fixture::new();
     f.write(json!([row(1, "SCHEDULED")]));
-    fail_generation(&f.store, &id(1)).unwrap();
+    fail_generation(&f.store, &id(1), &row_pair()).unwrap();
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], GENERATE_MARKER);
     assert_eq!(saved[0]["description"], GENERATE_MARKER);
@@ -477,4 +477,41 @@ fn metadata_patch_preserves_omitted_field_and_requires_scheduled_state() {
         )
         .is_err()
     );
+}
+
+/// The draft `row()` admits a single generation with.
+fn row_pair() -> Metadata {
+    Metadata {
+        title: "Title".into(),
+        description: "Description".into(),
+    }
+}
+
+#[test]
+fn single_completion_overwrites_only_fields_unchanged_since_admission() {
+    let generated = Metadata {
+        title: "AI title".into(),
+        description: "AI description".into(),
+    };
+    for (failed, description) in [(false, "AI description"), (true, GENERATE_MARKER)] {
+        let f = Fixture::new();
+        f.write(json!([row(1, "SCHEDULED")]));
+        let newer = MetadataPatch {
+            title: Some("Newer title".into()),
+            description: None,
+        };
+        save_metadata(&f.store, &id(1), &newer).unwrap();
+        if failed {
+            fail_generation(&f.store, &id(1), &row_pair()).unwrap();
+        } else {
+            save_generated_pair(&f.store, &id(1), &row_pair(), &generated).unwrap();
+        }
+        let saved = f.store.read().unwrap();
+        assert_eq!(saved[0]["title"], "Newer title");
+        assert_eq!(saved[0]["description"], description);
+        assert_eq!(
+            saved[0]["state"], "SCHEDULED",
+            "a newer edit is never approved"
+        );
+    }
 }
