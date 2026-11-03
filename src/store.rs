@@ -259,7 +259,24 @@ mod commit_tests {
 
     /// A fresh descriptor can take the exclusive lock only if the failed writer released it.
     fn assert_unlocked_and_clean(dir: &std::path::Path, store: &Store) {
-        FileExt::try_lock_exclusive(&store.lock_file().unwrap()).expect("Store lock released");
+        // ponytail: parallel lib tests fork children (magick, git) that inherit every open
+        // descriptor until exec drops it (CLOEXEC), so a lock we released can look held for a
+        // few milliseconds; retry briefly instead of serializing the suite.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match FileExt::try_lock_exclusive(&store.lock_file().unwrap()) {
+                Ok(()) => break,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock,
+                        "Store lock released"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("Store lock released: {error}"),
+            }
+        }
         assert_eq!(
             entries(dir),
             ["publications.json", "publications.json.lock"],
