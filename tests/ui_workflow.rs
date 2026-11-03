@@ -44,7 +44,9 @@ fn app_with_rows(
     );
     let _ = app.update(Message::LoadFinished(
         0,
-        Ok(serde_json::from_value(rows).unwrap()),
+        Ok(serde_json::from_value::<Vec<serde_json::Value>>(rows)
+            .unwrap()
+            .into()),
     ));
     (app, application, store, root)
 }
@@ -170,7 +172,7 @@ per_slot = 1"#,
             ai_timeout: Duration::from_secs(300),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap().into())));
     let task = app.update(Message::SuggestedDate(common::id(1)));
     common::ui::finish_workflow(&mut app, task).await;
     let saved = store.read().unwrap();

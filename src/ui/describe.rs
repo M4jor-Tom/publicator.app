@@ -1,4 +1,4 @@
-use super::{App, Message, Tab, style};
+use super::{App, Message, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
     model::{GENERATE_MARKER, Phase, phase},
@@ -11,18 +11,11 @@ use serde_json::Value;
 
 const SCROLL_ID: &str = "describe-publications";
 
-/// Publication thumbnails for the on-screen rows of the Schedule, Describe or Publish list;
-/// other tabs have no publication rows.
-pub(super) fn preview_tasks(state: &mut App, tab: Tab) -> Task<Message> {
+/// Publication thumbnails for the on-screen placeholders of the Schedule, Describe and Publish
+/// lists, which report row UUIDs (Pick's report candidate paths and match no row).
+pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
     let Some(rows) = state.publications.as_ref() else {
         return Task::none();
-    };
-    let target = state.revealed_publication();
-    let rows = match tab {
-        Tab::Schedule => super::schedule::ordered_rows(rows, target),
-        Tab::Publish => super::publish::ordered_rows(rows, target),
-        Tab::Describe => ordered_rows(rows, target),
-        Tab::Pick | Tab::Calendar => return Task::none(),
     };
     let capacity = 4usize.saturating_sub(
         state
@@ -32,14 +25,14 @@ pub(super) fn preview_tasks(state: &mut App, tab: Tab) -> Task<Message> {
             .count(),
     );
     let records: Vec<_> = rows
-        .into_iter()
+        .iter()
         .filter_map(|row| {
-            let uuid = row.get("uuid")?.as_str()?.to_owned();
-            if !state.shown_previews.contains(&uuid) || state.row_previews.contains_key(&uuid) {
+            let uuid = row.get("uuid")?.as_str()?;
+            if !state.shown_previews.contains(uuid) || state.row_previews.contains_key(uuid) {
                 return None;
             }
             let (basename, sha) = preview_identity(row)?;
-            Some((uuid, basename, sha))
+            Some((uuid.to_owned(), basename, sha))
         })
         .take(capacity)
         .collect();
@@ -185,7 +178,7 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
     let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
+        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);

@@ -177,7 +177,7 @@ fn scheduled_card<'a>(
     title: &str,
 ) -> Element<'a, Message> {
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
+        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
         text(format!("{title} — {}", date_label(state, row))),
     ]
     .spacing(8);
@@ -197,7 +197,7 @@ fn picked_card<'a>(
 ) -> Element<'a, Message> {
     let (date, time) = date_parts(state, row);
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0, uuid.clone()),
+        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
         text(format!("{title} — {}", date_label(state, row))),
     ]
     .spacing(8);

@@ -249,7 +249,7 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
     if state.calendar_prepared || state.calendar_preparing {
         return Task::none();
     }
-    let generation = state.load_generation;
+    let generation = state.rows_generation;
     let rows = state.publications.as_deref().unwrap_or_default().to_vec();
     let events = match calendar::timeline(&rows) {
         Ok(events) => events,

@@ -105,10 +105,28 @@ pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Resul
     .run()
 }
 
+/// What a reload read off the UI thread: the store rows, and which of the candidates listed when
+/// it started are gone from disk.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    pub rows: Vec<Value>,
+    pub missing: HashSet<PathBuf>,
+}
+
+/// Rows that no candidate check accompanies.
+impl From<Vec<Value>> for Loaded {
+    fn from(rows: Vec<Value>) -> Self {
+        Self {
+            rows,
+            missing: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A store snapshot, stamped with the reload generation that requested it.
-    LoadFinished(u64, Result<Vec<Value>, String>),
+    LoadFinished(u64, Result<Loaded, String>),
     Navigate(Tab),
     Edited {
         uuid: String,
@@ -300,6 +318,8 @@ pub struct App {
     revealed_publication: Option<String>,
     started: Instant,
     load_generation: u64,
+    /// The generation of the accepted `LoadFinished` that last set `publications`.
+    rows_generation: u64,
     search_request_id: u64,
     search_limit: usize,
     search_paths: Vec<String>,
@@ -339,7 +359,6 @@ pub struct App {
     publish_lock_error: Option<String>,
     publish_attempts: Vec<AttemptStatus>,
     publish_outcomes: HashMap<PublishCell, PublishCellOutcome>,
-    last_publish_cells: HashSet<PublishCell>,
     reconcile_urls: HashMap<String, String>,
     prompt_archive: Option<Arc<PromptArchive>>,
     prompt_archive_error: Option<String>,
@@ -395,6 +414,7 @@ impl App {
             revealed_publication: None,
             started: Instant::now(),
             load_generation: 0,
+            rows_generation: 0,
             search_request_id: 0,
             search_limit: 25,
             search_paths: application.store().config().publicable.clone(),
@@ -432,7 +452,6 @@ impl App {
             publish_lock_error: None,
             publish_attempts: Vec::new(),
             publish_outcomes: HashMap::new(),
-            last_publish_cells: HashSet::new(),
             reconcile_urls: HashMap::new(),
             prompt_archive,
             prompt_archive_error,
@@ -445,7 +464,7 @@ impl App {
             calendar_expanded: HashSet::new(),
             url_opener,
         };
-        (app, Self::load_task(application, 0, None))
+        (app, Self::load_task(application, 0, None, Vec::new()))
     }
 
     pub fn from_application(
@@ -492,13 +511,6 @@ impl App {
     }
     pub fn revealed_publication(&self) -> Option<&str> {
         self.revealed_publication.as_deref()
-    }
-    /// Thumbnails for the on-screen part of `tab`'s list (the calendar loads on expand).
-    fn preview_tasks(&mut self, tab: Tab) -> Task<Message> {
-        match tab {
-            Tab::Pick => pick::preview_tasks(self),
-            _ => describe::preview_tasks(self, tab),
-        }
     }
     pub fn unresolved_publish_attempts(&self) -> impl Iterator<Item = &AttemptStatus> {
         self.publish_attempts
@@ -573,12 +585,14 @@ impl App {
         }
     }
 
-    /// Loads the store; on Refresh, `invalidate` first makes the prompt archive rebuild its index
-    /// on the next resolve (this waits for any in-flight rebuild, so it stays off the UI thread).
+    /// Loads the store and checks which `candidates` still exist; on Refresh, `invalidate` first
+    /// makes the prompt archive rebuild its index on the next resolve (this waits for any
+    /// in-flight rebuild, so it stays off the UI thread).
     fn load_task(
         application: Arc<CoreApplication>,
         generation: u64,
         invalidate: Option<Arc<PromptArchive>>,
+        candidates: Vec<PathBuf>,
     ) -> Task<Message> {
         let lock_application = application.clone();
         Task::batch([
@@ -590,9 +604,14 @@ impl App {
                             // cards report it there.
                             let _ = archive.invalidate();
                         }
-                        application
+                        let rows = application
                             .mutate(None, |store| store.read())
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| error.to_string())?;
+                        let missing = candidates.into_iter().filter(|path| !path.exists());
+                        Ok(Loaded {
+                            rows,
+                            missing: missing.collect(),
+                        })
                     })
                     .await
                     .unwrap_or_else(|error| Err(format!("Could not load publications: {error}")))
@@ -615,14 +634,19 @@ impl App {
     fn reload_invalidating(&mut self, archive: Option<Arc<PromptArchive>>) -> Task<Message> {
         self.next_search_request();
         self.load_generation = self.load_generation.wrapping_add(1);
-        Self::load_task(self.application.clone(), self.load_generation, archive)
+        let candidates = self.candidates.iter().map(|c| c.path.clone()).collect();
+        Self::load_task(
+            self.application.clone(),
+            self.load_generation,
+            archive,
+            candidates,
+        )
     }
 
     /// The one guard for reload and calendar replies: a completion stamped before the latest
     /// `reload_task` describes an older snapshot and must not replace newer rows or artwork.
-    // ponytail: a preparation started between a reload request and its LoadFinished reads the
-    // previous rows under the new stamp; that load re-prepares, but the two may finish out of
-    // order. Stamp the rows' own generation if that window matters.
+    /// A calendar preparation carries the generation of the rows it read, so one started while a
+    /// reload is pending is dropped and that reload's own preparation stands.
     fn stale_load(&mut self, message: &Message) -> bool {
         let (Message::LoadFinished(generation, _) | Message::CalendarPrepared(generation, _)) =
             message
@@ -779,8 +803,11 @@ impl App {
     }
 
     fn update_load(&mut self, message: Message) -> Task<Message> {
+        if let Message::LoadFinished(generation, _) = message {
+            self.rows_generation = generation;
+        }
         match message {
-            Message::LoadFinished(_, Ok(rows)) => return self.on_load_finished_loaded(rows),
+            Message::LoadFinished(_, Ok(loaded)) => return self.on_load_finished_loaded(loaded),
             Message::LoadFinished(_, Err(error)) => {
                 self.next_search_request();
                 self.publications = None;
@@ -1145,7 +1172,8 @@ impl App {
             return Task::none();
         }
         self.shown_previews.insert(key);
-        self.preview_tasks(self.active_tab)
+        // Each loader takes only its own keys: candidate paths or row UUIDs.
+        Task::batch([pick::preview_tasks(self), describe::preview_tasks(self)])
     }
 
     fn update_previews(&mut self, message: Message) -> Task<Message> {
@@ -1181,7 +1209,7 @@ impl App {
             Message::PreviewShown { key, shown } => return self.on_preview_shown(key, shown),
             Message::RowPreviewFinished { uuid, result } => {
                 self.row_previews.insert(uuid, Some(result));
-                return describe::preview_tasks(self, self.active_tab);
+                return describe::preview_tasks(self);
             }
             _ => unreachable!("message routed to previews handler"),
         }
@@ -1283,9 +1311,9 @@ impl App {
         });
     }
 
-    fn on_load_finished_loaded(&mut self, rows: Vec<Value>) -> Task<Message> {
+    fn on_load_finished_loaded(&mut self, Loaded { rows, missing }: Loaded) -> Task<Message> {
         self.rebase_drafts(&rows);
-        pick::retain_offerable(&mut self.candidates, &rows);
+        pick::retain_offerable(&mut self.candidates, &rows, &missing);
         self.description_editors.retain(|uuid, _| {
             rows.iter()
                 .any(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
@@ -1317,11 +1345,8 @@ impl App {
         self.calendar_artwork.clear();
         self.calendar_previews.clear();
         let shown = match self.active_tab {
-            Tab::Schedule | Tab::Describe | Tab::Publish => {
-                describe::preview_tasks(self, self.active_tab)
-            }
             Tab::Calendar => calendar::prepare_task(self),
-            Tab::Pick => Task::none(),
+            _ => describe::preview_tasks(self),
         };
         // Candidates without a label (cleared by Refresh) resolve again, after its invalidation.
         Task::batch([shown, prompt_tasks(self)])
@@ -2007,7 +2032,7 @@ impl App {
         self.revealed_publication = reveal.clone();
         let mut tasks = vec![match tab {
             Tab::Calendar => calendar::prepare_task(self),
-            _ => self.preview_tasks(tab),
+            _ => Task::none(),
         }];
         if reveal.is_some() {
             tasks.push(match tab {
@@ -2328,7 +2353,6 @@ impl App {
         self.publish_active = true;
         self.publish_run = self.publish_run.wrapping_add(1);
         let run = self.publish_run;
-        self.last_publish_cells = cells.iter().cloned().collect();
         self.publish_outcomes.clear();
         self.publish_diagnostic = None;
         let application = self.application.clone();
@@ -2854,21 +2878,7 @@ mod tests {
 
     fn app() -> (App, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
-        let paths = Paths::resolve(Some(root.path()), None).unwrap();
-        let store = Arc::new(Store::new(paths, Config::default()).unwrap());
-        let metadata = MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        );
-        let application = Arc::new(CoreApplication::new(store, metadata));
-        let (mut app, _task) = App::new(
-            application,
-            UiOptions {
-                openrouter_model: None,
-                ai_timeout: Duration::from_secs(300),
-            },
-        );
+        let (mut app, _task) = offline_app(root.path(), &[], Config::default());
         app.publications = Some(Vec::new());
         app.search_authorized = true;
         app.publish_locks = Some(HashSet::new());
@@ -3086,8 +3096,8 @@ mod tests {
 
     /// A reload drops candidates it shows were picked (now referenced) or deleted, so the
     /// Pick list never offers them again.
-    #[test]
-    fn reload_removes_picked_and_deleted_candidates_from_the_pick_list() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_removes_picked_and_deleted_candidates_from_the_pick_list() {
         let (mut app, root) = app();
         let candidate = |name: &str, bytes: &[u8]| {
             let path = root.path().join(name);
@@ -3105,11 +3115,14 @@ mod tests {
         app.candidates = vec![picked.clone(), deleted.clone(), kept.clone()];
         std::fs::remove_file(&deleted.path).unwrap();
         let row = serde_json::json!({
-            "uuid": "00000000-0000-4000-8000-000000000001",
-            "state": "PICKED",
+            "uuid": uuid(1), "state": "PICKED", "title": "Title", "description": "Description",
+            "submissionTimestamp": 1_700_002_800,
             "files": [{"basename": "elsewhere.png", "sha512sum": picked.sha512}],
+            "apparitions": []
         });
-        let _ = app.update(Message::LoadFinished(app.load_generation, Ok(vec![row])));
+        replace_rows(&app, vec![row]);
+        let reload = app.reload_task();
+        dispatch(&mut app, reload).await;
         assert_eq!(app.candidates, [kept]);
     }
 
@@ -3194,7 +3207,6 @@ mod tests {
     #[test]
     fn missing_configured_prompt_repo_disables_archive_without_config_error() {
         let root = tempfile::tempdir().unwrap();
-        let paths = Paths::resolve(Some(root.path()), None).unwrap();
         let config = Config {
             prompts: Some(PromptConfig {
                 repo: "missing/archive".into(),
@@ -3203,20 +3215,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let store = Arc::new(Store::new(paths, config).unwrap());
-        let metadata = MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        );
-        let application = Arc::new(CoreApplication::new(store, metadata));
-        let (app, _) = App::from_application(
-            application,
-            UiOptions {
-                openrouter_model: None,
-                ai_timeout: Duration::from_secs(300),
-            },
-        );
+        let (app, _) = offline_app(root.path(), &[], config);
         assert!(app.prompt_archive.is_none());
         assert!(app.prompt_archive_error.is_none());
         assert!(app.prompt_query.is_empty());
@@ -3256,24 +3255,8 @@ mod tests {
             prompts: Some(prompt_config),
             ..Config::default()
         };
-        let store =
-            Arc::new(Store::new(Paths::resolve(Some(root.path()), None).unwrap(), config).unwrap());
-        let application = Arc::new(CoreApplication::new(
-            store,
-            MetadataClient::new(
-                reqwest::Client::new(),
-                Endpoints::default(),
-                "llmfit".into(),
-            ),
-        ));
-        let (mut app, _) = App::from_application(
-            application,
-            UiOptions {
-                openrouter_model: None,
-                ai_timeout: Duration::from_secs(300),
-            },
-        );
-        let _ = app.update(Message::LoadFinished(0, Ok(Vec::new())));
+        let (mut app, _) = offline_app(root.path(), &[], config);
+        let _ = app.update(Message::LoadFinished(0, Ok(Vec::new().into())));
         let _ = app.update(Message::PromptQueryChanged("MOONLIT".into()));
         let result = completion(app.update(Message::Search)).await;
         let Message::PromptSearchFinished {
@@ -3427,44 +3410,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn typed_uncertainty_with_worker_stderr_refreshes_receipt_and_store_through_ui() {
-        use serde_json::json;
-
-        let root = tempfile::tempdir().unwrap();
+        let (root, application) =
+            crate::publishing::timeout_tests::publisher_fixture(2, "Description");
         let data_dir = root.path();
-        let tags = data_dir.join("tags.txt");
-        std::fs::write(&tags, "fake tag\n").unwrap();
-        let mut rows = Vec::new();
-        for n in 1..=2 {
-            let image = data_dir.join(format!("{n}.png"));
-            assert!(
-                std::process::Command::new("magick")
-                    .args(["-size", "4x3", "xc:white"])
-                    .arg(&image)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            rows.push(json!({
-                "uuid": format!("00000000-0000-4000-8000-{n:012}"),
-                "state":"DESCRIBED", "title":"Title", "description":"Description",
-                "submissionTimestamp":1_700_002_800,
-                "apparitionTimestampIfDifferentThanSubmission":1_700_002_800,
-                "files":[{"basename":format!("{n}.png"),"sha512sum":crate::images::file_sha512(&image).unwrap()}],
-                "apparitions":[{"platformName":"deviantart","state":"unpublished","tiers":[],"galleries":[]}]
-            }));
-        }
-        let paths = Paths::resolve(Some(data_dir), None).unwrap();
-        let store = Arc::new(
-            Store::new(
-                paths,
-                Config {
-                    tags: Some("tags.txt".into()),
-                    ..Config::default()
-                },
-            )
-            .unwrap(),
-        );
-        std::fs::write(&store.paths().json, serde_json::to_vec(&rows).unwrap()).unwrap();
         let calls = data_dir.join("calls.log");
         let worker = data_dir.join("worker.sh");
         crate::executable_fixture::write_executable(
@@ -3491,15 +3439,7 @@ done
             ),
         );
         let application = Arc::new(
-            CoreApplication::new(
-                store.clone(),
-                MetadataClient::new(
-                    reqwest::Client::new(),
-                    Endpoints::default(),
-                    "llmfit".into(),
-                ),
-            )
-            .with_publisher(crate::publishing::Publisher::new(
+            application.with_publisher(crate::publishing::Publisher::new(
                 worker,
                 data_dir.join("skill.md"),
             )),
@@ -3535,11 +3475,11 @@ done
         );
         assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
         assert_eq!(
-            store.read().unwrap()[0]["apparitions"][0]["state"],
+            app.application.store().read().unwrap()[0]["apparitions"][0]["state"],
             "published_or_scheduled"
         );
         assert_eq!(
-            store.read().unwrap()[1]["apparitions"][0]["state"],
+            app.application.store().read().unwrap()[1]["apparitions"][0]["state"],
             "unpublished"
         );
         assert!(matches!(
@@ -3632,20 +3572,7 @@ done
             prompts: Some(archive_config()),
             ..Config::default()
         };
-        let store =
-            Arc::new(Store::new(Paths::resolve(Some(root.path()), None).unwrap(), config).unwrap());
-        let metadata = MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        );
-        let (mut app, init) = App::new(
-            Arc::new(CoreApplication::new(store, metadata)),
-            UiOptions {
-                openrouter_model: None,
-                ai_timeout: Duration::from_secs(1),
-            },
-        );
+        let (mut app, init) = offline_app(root.path(), &[], config);
         dispatch(&mut app, init).await;
         let request_id = app.search_request_id;
         let search = Message::SearchFinished {
@@ -3687,10 +3614,11 @@ done
         })
     }
 
-    /// An App over `rows` in `root` with its unpolled startup task; providers sit on a closed port.
-    fn offline_app(root: &Path, rows: &[Value]) -> (App, Task<Message>) {
+    /// An App over `rows` and `config` in `root` with its unpolled startup task; providers sit on
+    /// a closed port.
+    fn offline_app(root: &Path, rows: &[Value], config: Config) -> (App, Task<Message>) {
         let paths = Paths::resolve(Some(root), None).unwrap();
-        let store = Arc::new(Store::new(paths, Config::default()).unwrap());
+        let store = Arc::new(Store::new(paths, config).unwrap());
         std::fs::write(&store.paths().json, serde_json::to_vec(rows).unwrap()).unwrap();
         let closed = || "http://127.0.0.1:1".to_owned();
         let metadata = MetadataClient::new(
@@ -3712,7 +3640,7 @@ done
     }
 
     async fn loaded_offline_app(root: &Path, rows: &[Value]) -> App {
-        let (mut app, init) = offline_app(root, rows);
+        let (mut app, init) = offline_app(root, rows, Config::default());
         dispatch(&mut app, init).await;
         app
     }
@@ -3879,7 +3807,8 @@ done
     #[tokio::test(flavor = "current_thread")]
     async fn replies_from_before_the_latest_reload_cannot_replace_newer_rows_or_calendar() {
         let root = tempfile::tempdir().unwrap();
-        let (mut app, init) = offline_app(root.path(), &[calendar_row("old.png")]);
+        let (mut app, init) =
+            offline_app(root.path(), &[calendar_row("old.png")], Config::default());
         let startup = run_task(init).await;
         for message in startup.clone() {
             let _ = app.update(message);
@@ -3907,6 +3836,26 @@ done
         let data_dir = &app.application.store().paths().data_dir;
         assert!(!app.prompt_matches.contains_key(&data_dir.join("old.png")));
         assert!(app.prompt_matches.contains_key(&data_dir.join("new.png")));
+        assert!(app.calendar_prepared && !app.calendar_preparing);
+    }
+
+    /// A preparation that read the rows a pending reload replaces cannot overwrite that reload's
+    /// own preparation, even when it finishes last.
+    #[tokio::test(flavor = "current_thread")]
+    async fn calendar_preparation_of_replaced_rows_is_dropped_after_the_reload_prepares() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = loaded_offline_app(root.path(), &[calendar_row("old.png")]).await;
+        replace_rows(&app, vec![calendar_row("new.png")]);
+        let reload = run_task(app.update(Message::Refresh)).await;
+        let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
+        for message in reload {
+            let task = app.update(message);
+            dispatch(&mut app, task).await;
+        }
+        for message in old_prepared {
+            assert!(iced_runtime::task::into_stream(app.update(message)).is_none());
+        }
+        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), ["new.png"]);
         assert!(app.calendar_prepared && !app.calendar_preparing);
     }
 

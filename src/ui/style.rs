@@ -67,7 +67,7 @@ pub fn art<'a>(
     preview: Option<&Option<Result<std::path::PathBuf, String>>>,
     missing: bool,
     height: f32,
-    key: String,
+    key: &str,
 ) -> Element<'a, Message> {
     match preview {
         Some(Some(Ok(path))) => thumbnail(path, height),
@@ -79,22 +79,19 @@ pub fn art<'a>(
     }
 }
 
-fn placeholder<'a>(height: f32, key: String) -> Element<'a, Message> {
-    let hidden = Message::PreviewShown {
-        key: key.clone(),
-        shown: false,
+fn placeholder<'a>(height: f32, key: &str) -> Element<'a, Message> {
+    let report = {
+        let key = key.to_owned();
+        move |shown| Message::PreviewShown {
+            key: key.clone(),
+            shown,
+        }
     };
     sensor(text("Loading preview…").color(MUTED))
-        .on_show({
-            let key = key.clone();
-            move |_| Message::PreviewShown {
-                key: key.clone(),
-                shown: true,
-            }
-        })
-        .on_hide(hidden)
+        .on_hide(report(false))
+        .on_show(move |_| report(true))
         .anticipate(height)
-        .key(key)
+        .key(key.to_owned())
         .into()
 }
 

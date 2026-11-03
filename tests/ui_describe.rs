@@ -60,7 +60,7 @@ fn fixture_app_with_model(
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap().into())));
     (app, application)
 }
 
@@ -158,7 +158,7 @@ fn local_fixture_app(
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap().into())));
     (app, application)
 }
 
@@ -228,7 +228,7 @@ async fn local_generation_checks_and_exposes_fit_before_install_consent() {
             ai_timeout: Duration::from_secs(5),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap().into())));
     let _ = app.update(Message::SelectSource(Source::Local));
     let task = app.update(Message::GenerateOne(id(1)));
     let fit_result = common::ui::first_output(task).await;
@@ -794,7 +794,7 @@ async fn pick_previews_load_exactly_the_shown_placeholders_anywhere_in_the_list(
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(f.store.read().unwrap().into())));
     let candidates =
         publicator::ui::pick::search_candidates(&f.store, 25, &["images".into()]).unwrap();
     assert_eq!(candidates.len(), 10);
@@ -808,7 +808,7 @@ async fn pick_previews_load_exactly_the_shown_placeholders_anywhere_in_the_list(
         publicator::images::thumb_name(&candidate.path, &candidate.sha512).unwrap()
     };
     let key = |candidate: &publicator::images::Candidate| {
-        publicator::ui::pick::preview_key(&candidate.path)
+        publicator::ui::pick::preview_key(&candidate.path).into_owned()
     };
     let (last, hidden) = (&candidates[9], &candidates[4]);
     let _ = app.update(shown(key(hidden), true));

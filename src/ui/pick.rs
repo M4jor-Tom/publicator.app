@@ -87,8 +87,8 @@ pub fn pick_candidate(
 const LIMITS: [usize; 5] = [0, 25, 50, 75, 100];
 
 /// The key a candidate card's preview placeholder reports when it is on screen.
-pub fn preview_key(path: &std::path::Path) -> String {
-    path.to_string_lossy().into_owned()
+pub fn preview_key(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
+    path.to_string_lossy()
 }
 
 pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
@@ -103,7 +103,7 @@ pub(super) fn preview_tasks(app: &mut App) -> Task<Message> {
         .candidates
         .iter()
         .filter(|candidate| {
-            app.shown_previews.contains(&preview_key(&candidate.path))
+            app.shown_previews.contains(&*preview_key(&candidate.path))
                 && !app.previews.contains_key(&candidate.path)
         })
         .take(capacity)
@@ -153,12 +153,17 @@ pub(super) fn pick_task(app: &mut App, candidate: Candidate) -> Task<Message> {
     )
 }
 
-/// Keeps the candidates still offerable after a reload: on disk and not referenced by a
-/// publication (a pick or another tool may have claimed them since the search).
-pub(super) fn retain_offerable(candidates: &mut Vec<Candidate>, rows: &[serde_json::Value]) {
+/// Keeps the candidates still offerable after a reload: not `missing` from disk and not
+/// referenced by a publication (a pick or another tool may have claimed them since the search).
+pub(super) fn retain_offerable(
+    candidates: &mut Vec<Candidate>,
+    rows: &[serde_json::Value],
+    missing: &std::collections::HashSet<std::path::PathBuf>,
+) {
     let references = images::References::new(rows);
     candidates.retain(|candidate| {
-        candidate.path.exists() && !references.protects(&candidate.path, &candidate.sha512)
+        !missing.contains(&candidate.path)
+            && !references.protects(&candidate.path, &candidate.sha512)
     });
 }
 
@@ -314,7 +319,7 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
     let preview = state.previews.get(&candidate.path);
     let missing = matches!(preview, Some(Some(Err(_)))) && !candidate.path.exists();
     let mut content = column![
-        style::art(preview, missing, 240.0, preview_key(&candidate.path)),
+        style::art(preview, missing, 240.0, &preview_key(&candidate.path)),
         text(
             candidate
                 .path

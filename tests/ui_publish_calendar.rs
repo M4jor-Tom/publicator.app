@@ -31,7 +31,7 @@ fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> publicator
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(vec![row])));
+    let _ = app.update(Message::LoadFinished(0, Ok(vec![row].into())));
     app
 }
 
@@ -110,7 +110,7 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
             ai_timeout: Duration::from_secs(1),
         },
     );
-    let _ = app.update(Message::LoadFinished(0, Ok(vec![row.clone()])));
+    let _ = app.update(Message::LoadFinished(0, Ok(vec![row.clone()].into())));
     let _ = app.update(Message::PublishLocksFinished(Ok(
         std::collections::HashSet::new(),
     )));
@@ -278,7 +278,7 @@ fn scheduled_jump_app() -> (
             Ok(())
         })
         .unwrap();
-    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap().into())));
     (app, store, root)
 }
 
@@ -1666,7 +1666,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     common::ui::send(
         &mut app,
         Message::PreviewShown {
-            key: publicator::ui::pick::preview_key(&exact_path),
+            key: publicator::ui::pick::preview_key(&exact_path).into(),
             shown: true,
         },
     )
@@ -1746,7 +1746,7 @@ async fn publication_jump_maps_all_phases_to_the_next_action() {
                 Ok(())
             })
             .unwrap();
-        let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap())));
+        let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap().into())));
         let task = app.update(Message::JumpToPublication(common::id(9)));
         assert_eq!(app.current_tab(), expected);
         assert!(

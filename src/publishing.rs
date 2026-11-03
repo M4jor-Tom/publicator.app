@@ -931,7 +931,7 @@ mod approved_bytes_tests {
 }
 
 #[cfg(test)]
-mod timeout_tests {
+pub(crate) mod timeout_tests {
     use super::*;
     use crate::{
         config::{Config, Paths},
@@ -940,7 +940,7 @@ mod timeout_tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    pub(super) fn publisher_fixture(count: usize, description: &str) -> (TempDir, Application) {
+    pub(crate) fn publisher_fixture(count: usize, description: &str) -> (TempDir, Application) {
         let root = tempfile::tempdir().unwrap();
         let mut rows = Vec::new();
         for n in 1..=count {
