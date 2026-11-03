@@ -29,7 +29,6 @@ The original audit changed no application code. Publishing these documents fixes
 |---|---|
 
 | [Native UI](native-ui.md) | Reproducible interactions and actual viewport geometry |
-| [Test infrastructure](test-infrastructure.md) | CI, packaging, development launch, fixtures and coverage |
 | [Fixtures](fixtures.md) | Offline synthetic-data requirements beyond fake image filenames |
 | [Validation](validation.md) | Recorded commands/results, limits and future verification gates |
 
