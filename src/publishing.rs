@@ -29,6 +29,7 @@ const MAX_LINE: usize = 1024 * 1024;
 // ponytail: fixed per-worker timeouts and a 1 MiB frame cap; tune only when real browser behavior requires it.
 #[derive(Clone, Copy)]
 struct Timeouts {
+    check_steps: Duration,
     ready: Duration,
     artwork: Duration,
     cleanup: Duration,
@@ -36,6 +37,7 @@ struct Timeouts {
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
+            check_steps: Duration::from_secs(60),
             ready: Duration::from_secs(90),
             artwork: Duration::from_secs(600),
             cleanup: Duration::from_secs(5),
@@ -128,12 +130,13 @@ impl Publisher {
         self
     }
     pub async fn check_steps(&self) -> Result<()> {
-        let status = Command::new(&self.worker)
-            .arg("--check-steps")
-            .arg("--skill")
-            .arg(&self.skill)
-            .status()
-            .await?;
+        let mut command = Command::new(&self.worker);
+        command.arg("--check-steps").arg("--skill").arg(&self.skill);
+        let mut checker = OwnedProcess::spawn(&mut command)?;
+        let status = tokio::time::timeout(self.timeouts.check_steps, checker.child.wait()).await;
+        checker.shutdown(self.timeouts.cleanup).await;
+        let status =
+            status.map_err(|_| Error::Protocol("publishing step check timed out".into()))??;
         if status.success() {
             Ok(())
         } else {
@@ -215,12 +218,12 @@ impl Publisher {
         zone: chrono_tz::Tz,
         cancel: &AtomicBool,
     ) -> Result<PublishExecution> {
-        let mut child = start_worker(&self.worker, &store.paths().data_dir)?;
-        let process_group = child.id();
-        let diagnostics = drain_stderr(&mut child);
+        let mut worker = start_worker(&self.worker, &store.paths().data_dir)?;
+        let mut drain = tokio::task::JoinSet::new();
+        let diagnostics = drain_stderr(&mut worker.child, &mut drain);
         let result = self
             .run_batch(
-                &mut child,
+                &mut worker.child,
                 journal,
                 store,
                 batch,
@@ -230,12 +233,17 @@ impl Publisher {
                 cancel,
             )
             .await;
-        shutdown(&mut child, self.timeouts.cleanup, process_group).await;
-        let diagnostics = match diagnostics {
-            Some(task) => task.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let detail = String::from_utf8_lossy(&diagnostics);
+        worker.shutdown(self.timeouts.cleanup).await;
+        // A descendant that left the worker group may hold stderr open: keep what was read
+        // by the deadline; dropping the set aborts the drain.
+        let _ = tokio::time::timeout(self.timeouts.cleanup, drain.join_next()).await;
+        drop(drain);
+        let detail = String::from_utf8_lossy(
+            &diagnostics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned();
         let (result, diagnostics) = with_worker_diagnostics(result, &detail);
         Ok(PublishExecution {
             result,
@@ -412,22 +420,26 @@ async fn open_worker(
     Ok((input, output))
 }
 
-fn drain_stderr(child: &mut Child) -> Option<tokio::task::JoinHandle<Vec<u8>>> {
-    child.stderr.take().map(|mut stderr| {
-        tokio::spawn(async move {
-            let mut retained = Vec::new();
+/// Keeps the first 8 KiB of worker stderr while draining the rest so the worker never blocks.
+fn drain_stderr(
+    child: &mut Child,
+    tasks: &mut tokio::task::JoinSet<()>,
+) -> Arc<std::sync::Mutex<Vec<u8>>> {
+    let retained = Arc::<std::sync::Mutex<Vec<u8>>>::default();
+    if let Some(mut stderr) = child.stderr.take() {
+        let retained = Arc::clone(&retained);
+        tasks.spawn(async move {
             let mut chunk = [0u8; 4096];
-            loop {
-                let count = match stderr.read(&mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => count,
-                };
-                let remaining = 8192usize.saturating_sub(retained.len());
-                retained.extend_from_slice(&chunk[..count.min(remaining)]);
+            while let Ok(count @ 1..) = stderr.read(&mut chunk).await {
+                let mut buffer = retained
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let room = 8192usize.saturating_sub(buffer.len());
+                buffer.extend_from_slice(&chunk[..count.min(room)]);
             }
-            retained
-        })
-    })
+        });
+    }
+    retained
 }
 
 struct PreparedBatch {
@@ -716,16 +728,63 @@ fn job_command_valid(job: &PublishJob) -> Result<()> {
     command.validate().map_err(Error::Validation)?;
     encode_line(&command).map(|_| ())
 }
-fn start_worker(path: &Path, data_root: &Path) -> Result<Child> {
+fn start_worker(path: &Path, data_root: &Path) -> Result<OwnedProcess> {
     let mut c = Command::new(path);
     c.arg("--data-root")
         .arg(data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    c.process_group(0);
-    Ok(c.spawn()?)
+    OwnedProcess::spawn(&mut c)
+}
+
+/// A child leading its own process group (browser descendants included). `shutdown` is the
+/// cooperative path; dropping it unawaited (an aborted or interrupted publish) SIGKILLs the group.
+struct OwnedProcess {
+    child: Child,
+    group: Option<u32>,
+}
+
+impl OwnedProcess {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.kill_on_drop(true).spawn()?;
+        Ok(Self {
+            group: child.id(),
+            child,
+        })
+    }
+
+    async fn shutdown(&mut self, cleanup_timeout: Duration) {
+        let child = &mut self.child;
+        #[cfg(unix)]
+        if let Some(pid) = self.group {
+            // The child is the process-group leader; signal the group so browser descendants
+            // receive the same bounded graceful-then-forced cleanup.
+            unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+            let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            let _ = child.wait().await;
+            self.group = None;
+            return;
+        }
+        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
+        }
+    }
+}
+
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        // Unawaited drops happen only while the leader is unreaped, so its group ID is not reused.
+        #[cfg(unix)]
+        if let Some(pid) = self.group.take() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
+    }
 }
 fn encode_line(command: &WorkerCommand) -> Result<Vec<u8>> {
     let mut line = serde_json::to_vec(command)?;
@@ -782,23 +841,6 @@ async fn read_matching_terminal(
         _ => Err(Error::Protocol(
             "worker terminal identity/version mismatch".into(),
         )),
-    }
-}
-async fn shutdown(child: &mut Child, cleanup_timeout: Duration, process_group: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = process_group {
-        // The child is the process-group leader; signal the group so browser descendants
-        // receive the same bounded graceful-then-forced cleanup.
-        unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
-        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        let _ = child.wait().await;
-        return;
-    }
-    let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
     }
 }
 use chrono::{Datelike, Timelike};
@@ -959,16 +1001,18 @@ mod timeout_tests {
         let root = tempfile::tempdir().unwrap();
         let worker = write_worker(root.path(), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
 
-        let output = start_worker(&worker, root.path())
+        let mut process = start_worker(&worker, root.path()).unwrap();
+        let mut stdout = String::new();
+        process
+            .child
+            .stdout
+            .take()
             .unwrap()
-            .wait_with_output()
+            .read_to_string(&mut stdout)
             .await
             .unwrap();
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!("--data-root\n{}\n", root.path().display())
-        );
+        assert!(process.child.wait().await.unwrap().success());
+        assert_eq!(stdout, format!("--data-root\n{}\n", root.path().display()));
     }
 
     #[tokio::test]
@@ -996,6 +1040,7 @@ done"#,
                 ready: Duration::from_millis(250),
                 artwork: Duration::from_millis(250),
                 cleanup: Duration::from_millis(30),
+                ..Timeouts::default()
             });
         let report = publisher
             .publish(&application, request(), Arc::new(AtomicBool::new(false)))
@@ -1019,6 +1064,7 @@ done"#,
                 ready: Duration::from_millis(50),
                 artwork: Duration::from_millis(250),
                 cleanup: Duration::from_millis(50),
+                ..Timeouts::default()
             });
         let error = publisher
             .publish(&application, request(), Arc::new(AtomicBool::new(false)))
@@ -1040,6 +1086,7 @@ done"#,
                 ready: Duration::from_millis(250),
                 artwork: Duration::from_millis(50),
                 cleanup: Duration::from_millis(50),
+                ..Timeouts::default()
             });
         let report = publisher
             .publish(&application, request(), Arc::new(AtomicBool::new(false)))
@@ -1066,6 +1113,7 @@ done"#,
                 ready: Duration::from_millis(250),
                 artwork: Duration::from_millis(50),
                 cleanup: Duration::from_millis(100),
+                ..Timeouts::default()
             });
         let report = publisher
             .publish(&application, request(), Arc::new(AtomicBool::new(false)))
@@ -1209,5 +1257,299 @@ done"#,
         let receipt: Value =
             serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
         assert_eq!(receipt["applied"], true);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Checkpoint {
+        /// Receipt write that follows `skip` successful ones: 0 intent, 1 terminal, 2 applied.
+        Receipt(usize, crate::store::CommitFailureForTest),
+        Store(crate::store::CommitFailureForTest),
+    }
+
+    #[derive(Debug)]
+    enum AfterReopen {
+        Clean,
+        Replayed,
+        Blocked(crate::publish_journal::ReconcileOutcome),
+    }
+
+    fn sent(calls: &Path) -> Vec<String> {
+        std::fs::read_to_string(calls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The only attempt's ID and its durable receipt state.
+    fn durable_receipt(root: &Path) -> (String, &'static str) {
+        let mut attempts = std::fs::read_dir(root.join(".publicator/publish"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 1, "{attempts:?}");
+        let attempt = attempts.pop().unwrap();
+        let id = attempt.file_name().unwrap().to_string_lossy().into_owned();
+        let Ok(bytes) = std::fs::read(attempt.join("receipt.json")) else {
+            return (id, "absent");
+        };
+        let receipt: Value = serde_json::from_slice(&bytes).unwrap();
+        let state = match (receipt["terminal"]["type"].as_str(), &receipt["applied"]) {
+            (None, Value::Bool(false)) => "pending",
+            (Some("scheduled"), Value::Bool(false)) => "scheduled",
+            (Some("scheduled"), Value::Bool(true)) => "applied",
+            other => panic!("unexpected receipt state {other:?}"),
+        };
+        (id, state)
+    }
+
+    async fn assert_checkpoint(checkpoint: Checkpoint, receipt: &str, after: AfterReopen) {
+        let (root, app, store, publisher, calls) = publishing_boundary_fixture();
+        let first = vec!["00000000-0000-4000-8000-000000000001".to_owned()];
+        let publish = || publisher.publish(&app, request(), Arc::new(AtomicBool::new(false)));
+        match checkpoint {
+            Checkpoint::Receipt(skip, failure) => {
+                crate::publish_journal::fail_receipt_write_for_test(skip, failure)
+            }
+            Checkpoint::Store(failure) => crate::store::fail_next_commit_for_test(failure),
+        }
+        assert!(publish().await.is_err(), "{checkpoint:?}");
+        let expected_sent = if matches!(checkpoint, Checkpoint::Receipt(0, _)) {
+            Vec::new()
+        } else {
+            first
+        };
+        assert_eq!(sent(&calls), expected_sent, "{checkpoint:?} next send");
+        let (attempt, state) = durable_receipt(root.path());
+        assert_eq!(state, receipt, "{checkpoint:?} durable receipt");
+
+        let journal = PublishJournal::new(root.path()).unwrap();
+        let recovery = journal.recover(&store).unwrap();
+        match after {
+            AfterReopen::Clean => assert_eq!(recovery, Default::default(), "{checkpoint:?}"),
+            AfterReopen::Replayed => {
+                assert_eq!(recovery.replayed, [attempt], "{checkpoint:?}");
+                assert!(recovery.blocked.is_empty(), "{checkpoint:?}");
+            }
+            AfterReopen::Blocked(decision) => {
+                assert_eq!(recovery.blocked.len(), 1, "{checkpoint:?}");
+                let receipt_path = root.path().join(".publicator/publish").join(&attempt);
+                let bytes = std::fs::read(receipt_path.join("receipt.json")).unwrap();
+                assert!(matches!(
+                    publish().await,
+                    Err(Error::ReconciliationRequired(_))
+                ));
+                assert_eq!(sent(&calls), expected_sent, "{checkpoint:?} blocked resend");
+                assert_eq!(
+                    std::fs::read(receipt_path.join("receipt.json")).unwrap(),
+                    bytes
+                );
+                journal.reconcile(&store, &attempt, decision).unwrap();
+            }
+        }
+        let retry = publish().await.unwrap();
+        assert!(retry.error.is_none(), "{checkpoint:?}: {retry:?}");
+        assert_eq!(
+            sent(&calls),
+            [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002"
+            ],
+            "{checkpoint:?} exactly-once sends"
+        );
+        for row in store.read().unwrap() {
+            assert_eq!(row["apparitions"][0]["state"], "published_or_scheduled");
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_and_store_checkpoint_failures_never_resend_and_recover_exactly_once() {
+        use crate::{
+            publish_journal::ReconcileOutcome,
+            store::CommitFailureForTest::{AfterRename, BeforeRename},
+        };
+        use AfterReopen::{Blocked, Clean, Replayed};
+        let scheduled = ReconcileOutcome::Scheduled {
+            actual_url: Some("https://example.invalid/work".into()),
+        };
+        let cases = [
+            (Checkpoint::Receipt(0, BeforeRename), "absent", Clean),
+            (
+                Checkpoint::Receipt(0, AfterRename),
+                "pending",
+                Blocked(ReconcileOutcome::NotSubmitted),
+            ),
+            (
+                Checkpoint::Receipt(1, BeforeRename),
+                "pending",
+                Blocked(scheduled),
+            ),
+            (Checkpoint::Receipt(1, AfterRename), "scheduled", Replayed),
+            (Checkpoint::Store(BeforeRename), "scheduled", Replayed),
+            (Checkpoint::Store(AfterRename), "scheduled", Replayed),
+            (Checkpoint::Receipt(2, BeforeRename), "scheduled", Replayed),
+            (Checkpoint::Receipt(2, AfterRename), "applied", Clean),
+        ];
+        for (checkpoint, receipt, after) in cases {
+            assert_checkpoint(checkpoint, receipt, after).await;
+        }
+    }
+
+    fn recorded(gate: &Path) -> Vec<i32> {
+        std::fs::read_to_string(gate)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect()
+    }
+
+    fn alive(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(')')?.1.trim_start().chars().next())
+            .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    }
+
+    fn all_dead(pids: &[i32]) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while pids.iter().any(|&pid| alive(pid)) {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// SIGKILLs the PIDs recorded in a gate file if the test fails before the publisher does.
+    struct KillRecorded(PathBuf);
+
+    impl Drop for KillRecorded {
+        fn drop(&mut self) {
+            for pid in recorded(&self.0).into_iter().filter(|&pid| alive(pid)) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    /// Step checker that hangs with a same-group child after recording "<pid> <child pid>".
+    fn hanging_checker(root: &Path) -> (Publisher, PathBuf, PathBuf) {
+        let (gate, started) = (root.join("checker"), root.join("started"));
+        let worker = write_worker(
+            root,
+            &format!(
+                r#"#!/bin/sh
+if [ "$1" = "--check-steps" ]; then
+  sleep 1000 & echo "$$ $!" > '{gate}.tmp'; mv '{gate}.tmp' '{gate}'; wait
+fi
+touch '{started}'"#,
+                gate = gate.display(),
+                started = started.display()
+            ),
+        );
+        (Publisher::new(worker, root.join("skill.md")), gate, started)
+    }
+
+    #[tokio::test]
+    async fn hanging_step_check_is_killed_with_its_children_and_releases_the_publisher() {
+        let (root, application) = publisher_fixture(1, "Description");
+        let (publisher, gate, started) = hanging_checker(root.path());
+        let _watchdog = KillRecorded(gate.clone());
+        let publisher = publisher.with_timeouts(Timeouts {
+            check_steps: Duration::from_secs(1),
+            cleanup: Duration::from_millis(50),
+            ..Timeouts::default()
+        });
+        // The second run proves the lock was released: it times out again instead of Busy.
+        for _ in 0..2 {
+            let _ = std::fs::remove_file(&gate);
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                publisher.publish(&application, request(), Arc::default()),
+            )
+            .await
+            .expect("step check deadline bounds the publish")
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("step check timed out"),
+                "{error}"
+            );
+            let pids = recorded(&gate);
+            assert_eq!(pids.len(), 2, "{pids:?}");
+            assert!(all_dead(&pids), "checker tree survived: {pids:?}");
+            assert!(!started.exists());
+            drop(publish_journal::publisher_lock(root.path()).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_publish_during_the_step_check_kills_the_checker_group() {
+        let (root, application) = publisher_fixture(1, "Description");
+        let (publisher, gate, started) = hanging_checker(root.path());
+        let _watchdog = KillRecorded(gate.clone());
+        let mut publish = Box::pin(publisher.publish(&application, request(), Arc::default()));
+        let gated = tokio::time::timeout(Duration::from_secs(10), async {
+            while !gate.exists() {
+                tokio::select! {
+                    result = &mut publish => panic!("publish ended during the step check: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(gated.is_ok(), "checker never started");
+        drop(publish);
+        let pids = recorded(&gate);
+        assert!(all_dead(&pids), "checker tree survived: {pids:?}");
+        assert!(!started.exists());
+        drop(publish_journal::publisher_lock(root.path()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn detached_stderr_holder_cannot_stall_teardown_or_lose_diagnostics() {
+        let (root, application) = publisher_fixture(1, "Description");
+        let holder = root.path().join("holder");
+        let _watchdog = KillRecorded(holder.clone());
+        let worker = write_worker(
+            root.path(),
+            &format!(
+                r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) echo 'stderr before detaching' >&2
+  python3 -c 'import os, sys, time; os.setsid(); open(sys.argv[1] + ".tmp", "w").write(str(os.getpid())); os.rename(sys.argv[1] + ".tmp", sys.argv[1]); time.sleep(1000)' '{holder}' >/dev/null &
+  while [ ! -e '{holder}' ]; do sleep 0.01; done
+  printf '%s' "$line" | jq -c '{{protocol:1,type:"failed",attempt_id,uuid,error:"safe"}}' ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done"#,
+                holder = holder.display()
+            ),
+        );
+        let publisher =
+            Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
+                cleanup: Duration::from_millis(100),
+                ..Timeouts::default()
+            });
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.publish(&application, request(), Arc::default()),
+        )
+        .await
+        .expect("a detached stderr holder must not stall teardown")
+        .unwrap();
+        assert_eq!(report.failed, 1);
+        let error = report.error.unwrap();
+        assert!(
+            error.contains("worker stderr: stderr before detaching"),
+            "{error}"
+        );
+        let pids = recorded(&holder);
+        assert!(
+            pids.len() == 1 && alive(pids[0]),
+            "holder must outlive the worker group: {pids:?}"
+        );
     }
 }

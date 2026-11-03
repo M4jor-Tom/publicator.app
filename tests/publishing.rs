@@ -264,28 +264,6 @@ fn fake_worker(f: &Fixture, body: &str) -> PathBuf {
     );
     path
 }
-fn proc_stat(pid: i32) -> Option<(char, i32, i32)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    let mut fields = fields.split_whitespace();
-    Some((
-        fields.next()?.chars().next()?,
-        fields.next()?.parse().ok()?,
-        fields.next()?.parse().ok()?,
-    ))
-}
-fn live_process_group_members(pgid: i32) -> Vec<(i32, char)> {
-    let mut members = std::fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
-        .filter_map(|pid| proc_stat(pid).map(|(state, _, group)| (pid, state, group)))
-        .filter(|(_, state, group)| *group == pgid && !matches!(state, 'Z' | 'X'))
-        .map(|(pid, state, _)| (pid, state))
-        .collect::<Vec<_>>();
-    members.sort_unstable();
-    members
-}
 #[tokio::test]
 async fn mixed_case_webp_is_converted_before_worker_start_submission() {
     let f = Fixture::new();
@@ -534,7 +512,7 @@ done"#,
         .trim()
         .parse()
         .unwrap();
-    let first_descendant_status = proc_stat(descendant_pid);
+    let first_descendant_status = common::proc_stat(descendant_pid);
     let worker_fields = std::fs::read_to_string(&worker_info)
         .unwrap()
         .split_whitespace()
@@ -557,7 +535,7 @@ done"#,
     assert_eq!(*worker_group, *worker_pid);
     assert_eq!(*descendant_group, *worker_group);
     assert_ne!(
-        proc_stat(std::process::id() as i32).unwrap().2,
+        common::proc_stat(std::process::id() as i32).unwrap().2,
         *worker_group
     );
     assert!(
@@ -569,11 +547,11 @@ done"#,
         assert_eq!(group, *worker_group);
     }
 
-    let first_live = live_process_group_members(*worker_group);
+    let first_live = common::live_process_group_members(*worker_group);
     let wait_started = tokio::time::Instant::now();
     let deadline = wait_started + Duration::from_secs(1);
     let mut live = first_live.clone();
-    let mut terminal_descendant_status = proc_stat(descendant_pid);
+    let mut terminal_descendant_status = common::proc_stat(descendant_pid);
     while !live.is_empty()
         || terminal_descendant_status
             .is_some_and(|(state, _, group)| group == *worker_group && !matches!(state, 'Z' | 'X'))
@@ -583,8 +561,8 @@ done"#,
             "owned worker group still has live processes after SIGKILL: {live:?}; descendant stat={terminal_descendant_status:?}; first post-return stat={first_descendant_status:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-        live = live_process_group_members(*worker_group);
-        terminal_descendant_status = proc_stat(descendant_pid);
+        live = common::live_process_group_members(*worker_group);
+        terminal_descendant_status = common::proc_stat(descendant_pid);
     }
     eprintln!(
         "cleanup evidence: worker_pid={worker_pid} worker_pgid={worker_group} descendant_pid={descendant_pid} descendant_parent={descendant_parent} descendant_pgid={descendant_group} term_received=true first_post_return={first_descendant_status:?} first_live_group={first_live:?} terminal_descendant={terminal_descendant_status:?} terminal_live_group={live:?} publish_elapsed_ms={} post_signal_wait_ms={}",
@@ -1074,4 +1052,32 @@ done"#,
     assert_eq!(report.failed, 1);
     assert_eq!(std::fs::read(received).unwrap(), approved);
     assert_ne!(std::fs::read(&original).unwrap(), approved);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborting_an_in_flight_publish_kills_the_worker_group_and_keeps_the_intent() {
+    let f = configured_fixture();
+    let (calls, gate) = (f.path("calls.log"), f.path("gate"));
+    let worker = f.path("worker.sh");
+    common::executable::write_executable(&worker, &common::hanging_submit_worker(&calls, &gate));
+    let _watchdog = common::GroupWatchdog(&gate);
+    let app = Arc::new(app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused"))));
+    let request = || PublishRequest {
+        uuids: None,
+        headless: true,
+    };
+    let task = tokio::spawn({
+        let app = app.clone();
+        async move { app.publish(request(), Arc::default()).await }
+    });
+    assert!(common::eventually(Duration::from_secs(20), || {
+        common::gate_pids(&gate).is_some()
+    }));
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    common::assert_abandoned_attempt(f.root.path(), &gate, &calls);
+    assert!(matches!(
+        app.publish(request(), Arc::default()).await,
+        Err(publicator::error::Error::ReconciliationRequired(_))
+    ));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
 }

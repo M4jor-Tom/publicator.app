@@ -415,3 +415,134 @@ fn unsafe_attempt_ids_and_empty_receipts_are_rejected() {
     std::fs::write(empty.join("receipt.json"), []).unwrap();
     assert!(journal.recover(&f.store).is_err());
 }
+
+#[test]
+fn interrupted_intent_directories_neither_block_nor_hide_real_receipts() {
+    use publicator::publish_journal::{ReconcileOutcome, publisher_lock};
+    let f = publish_fixture();
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    // A crash inside `begin` leaves an attempt directory with no receipt, possibly holding a
+    // partial temporary file; nothing was dispatched for it.
+    let empty = f.path(".publicator/publish/00000000-0000-4000-8000-000000000098");
+    let partial = f.path(".publicator/publish/00000000-0000-4000-8000-000000000099");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&partial).unwrap();
+    std::fs::write(partial.join(".tmpAbC123"), b"{\"job\":").unwrap();
+    let lock = publisher_lock(f.root.path()).unwrap();
+    assert!(journal.recover(&f.store).unwrap().blocked.is_empty());
+    assert!(
+        journal
+            .blocked_attempts_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        journal
+            .attempt_statuses_locked(&f.store)
+            .unwrap()
+            .is_empty()
+    );
+    drop(lock);
+    let error = journal
+        .reconcile(
+            &f.store,
+            "00000000-0000-4000-8000-000000000098",
+            ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("nothing was dispatched"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(partial.join(".tmpAbC123")).unwrap(),
+        b"{\"job\":"
+    );
+
+    let (job, snap) = job_for(&f);
+    journal.begin(&job, &snap).unwrap();
+    assert_eq!(journal.recover(&f.store).unwrap().blocked.len(), 1);
+    std::fs::write(
+        f.path(&format!(
+            ".publicator/publish/{}/receipt.json",
+            job.attempt_id
+        )),
+        b"{",
+    )
+    .unwrap();
+    assert!(journal.recover(&f.store).is_err());
+}
+
+#[test]
+fn resolved_receipts_accept_only_their_own_decision_and_terminal() {
+    use publicator::{error::Error, publish_journal::ReconcileOutcome};
+    let f = publish_fixture();
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    let durable = |job: &PublishJob| {
+        let receipt = format!(".publicator/publish/{}/receipt.json", job.attempt_id);
+        (
+            std::fs::read(f.path(&receipt)).unwrap(),
+            std::fs::read(&f.store.paths().json).unwrap(),
+        )
+    };
+    let conflict = |job: &PublishJob, outcome| {
+        assert!(matches!(
+            journal.reconcile(&f.store, &job.attempt_id, outcome),
+            Err(Error::ReconciliationRequired(_))
+        ));
+    };
+    let unscheduled = ReconcileOutcome::Scheduled { actual_url: None };
+
+    let (released, snap) = job_for(&f);
+    journal.begin(&released, &snap).unwrap();
+    journal
+        .reconcile(
+            &f.store,
+            &released.attempt_id,
+            ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap();
+    let before = durable(&released);
+    journal
+        .reconcile(
+            &f.store,
+            &released.attempt_id,
+            ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap();
+    conflict(&released, unscheduled.clone());
+    assert!(journal.terminal(&scheduled(&released)).is_err());
+    assert_eq!(durable(&released), before);
+    assert_eq!(f.read()[0]["apparitions"][0]["state"], "unpublished");
+
+    let (applied, snap) = job_for(&f);
+    journal.begin(&applied, &snap).unwrap();
+    journal.terminal(&scheduled(&applied)).unwrap();
+    journal
+        .apply_scheduled(&f.store, &applied.attempt_id)
+        .unwrap();
+    let before = durable(&applied);
+    journal.terminal(&scheduled(&applied)).unwrap();
+    assert!(
+        journal
+            .terminal(&WorkerEvent::Failed {
+                protocol: 1,
+                attempt_id: applied.attempt_id.clone(),
+                uuid: applied.uuid.clone(),
+                error: "late conflicting terminal".into(),
+            })
+            .is_err()
+    );
+    conflict(&applied, ReconcileOutcome::NotSubmitted);
+    conflict(
+        &applied,
+        ReconcileOutcome::Scheduled {
+            actual_url: Some("https://www.deviantart.com/example/art/other".into()),
+        },
+    );
+    journal
+        .reconcile(&f.store, &applied.attempt_id, unscheduled)
+        .unwrap();
+    assert_eq!(durable(&applied), before);
+}

@@ -144,7 +144,7 @@ async fn run() -> Result<()> {
         Command::VisionModels => vision_models().await,
         Command::PromptAudit { data_dir } => prompt_audit(data_dir),
         Command::DaPublish(args) => da_publish(args).await,
-        Command::CheckSteps => check_steps().await,
+        Command::CheckSteps => until_interrupted(check_steps()).await,
     }
 }
 fn validate(data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
@@ -347,7 +347,7 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
         verbose,
     } = args;
     if check_only {
-        return check_steps().await;
+        return until_interrupted(check_steps()).await;
     }
     let (paths, _, store) = paths(data_dir, json)?;
     let publisher = Publisher::from_env();
@@ -356,15 +356,14 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
     }
     let ids = publication_ids(&store, uuid, all)?;
     let app = Application::new(store.clone(), metadata_client()).with_publisher(publisher);
-    let result = app
-        .publish(
-            PublishRequest {
-                uuids: ids,
-                headless,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let result = until_interrupted(app.publish(
+        PublishRequest {
+            uuids: ids,
+            headless,
+        },
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .await;
     print_unresolved(&paths.data_dir, &store, &result);
     print_publish_report(result?, verbose)
 }
@@ -405,6 +404,21 @@ fn print_unresolved(data_dir: &Path, store: &Store, result: &Result<PublishRepor
          Inspect DeviantArt first, then record what you found with one command above.\n\
          Retry or upload by hand only after --outcome not-submitted. Never delete .publicator/ receipts."
     );
+}
+/// SIGINT/SIGTERM drop `work`, which kills its owned worker/checker process group and releases
+/// the publisher lock; an attempt already sent keeps its receipt and stays blocked.
+async fn until_interrupted<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+        result = work => return result,
+    }
+    Err(Error::Protocol(
+        "publishing interrupted; the worker was stopped and an in-flight attempt stays unresolved until reconciled".into(),
+    ))
 }
 fn reconcile(
     paths: &Paths,

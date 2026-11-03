@@ -86,6 +86,106 @@ impl Fixture {
     }
 }
 
+/// `/proc/PID/stat` state, parent PID and process group.
+pub fn proc_stat(pid: i32) -> Option<(char, i32, i32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    let mut fields = fields.split_whitespace();
+    Some((
+        fields.next()?.chars().next()?,
+        fields.next()?.parse().ok()?,
+        fields.next()?.parse().ok()?,
+    ))
+}
+
+pub fn live_process_group_members(pgid: i32) -> Vec<(i32, char)> {
+    let mut members = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter_map(|pid| proc_stat(pid).map(|(state, _, group)| (pid, state, group)))
+        .filter(|(_, state, group)| *group == pgid && !matches!(state, 'Z' | 'X'))
+        .map(|(pid, state, _)| (pid, state))
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members
+}
+
+/// Poll `ready` every 10 ms until it holds or `timeout` passes.
+pub fn eventually(timeout: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !ready() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    true
+}
+
+/// Worker that logs each submit to `calls`, then hangs with a same-group child after
+/// atomically writing "<worker pid = pgid> <child pid>" to `gate`.
+pub fn hanging_submit_worker(calls: &std::path::Path, gate: &std::path::Path) -> String {
+    format!(
+        r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) echo sent >> '{calls}'; sleep 1000 & echo "$$ $!" > '{gate}.tmp'; mv '{gate}.tmp' '{gate}'; wait ;;
+esac
+done"#,
+        calls = calls.display(),
+        gate = gate.display()
+    )
+}
+
+pub fn gate_pids(gate: &std::path::Path) -> Option<(i32, i32)> {
+    let text = std::fs::read_to_string(gate).ok()?;
+    let mut pids = text.split_whitespace().map(str::parse);
+    Some((pids.next()?.ok()?, pids.next()?.ok()?))
+}
+
+/// SIGKILLs the live members of the process group recorded in `gate` on drop, so a failed
+/// assertion never strands fixture processes.
+pub struct GroupWatchdog<'a>(pub &'a std::path::Path);
+
+impl Drop for GroupWatchdog<'_> {
+    fn drop(&mut self) {
+        if let Some((group, _)) = gate_pids(self.0) {
+            for (pid, _) in live_process_group_members(group) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+}
+
+/// After an abrupt stop mid-submit: the worker group is gone, the publisher lock is free and
+/// the one sent attempt keeps its terminal-less intent receipt.
+pub fn assert_abandoned_attempt(
+    root: &std::path::Path,
+    gate: &std::path::Path,
+    calls: &std::path::Path,
+) {
+    let (group, _) = gate_pids(gate).expect("worker gate");
+    assert!(
+        eventually(std::time::Duration::from_secs(5), || {
+            live_process_group_members(group).is_empty()
+        }),
+        "worker group survived: {:?}",
+        live_process_group_members(group)
+    );
+    drop(publicator::publish_journal::publisher_lock(root).expect("publisher lock is free"));
+    let attempts = std::fs::read_dir(root.join(".publicator/publish"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("receipt.json"))
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&attempts[0]).unwrap()).unwrap();
+    assert!(receipt["terminal"].is_null(), "{receipt}");
+    assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
+}
+
 /// Writes a decodable solid-colour image; the format follows the path suffix.
 pub fn solid_image(path: &std::path::Path, color: &str, width: u32, height: u32) {
     let status = std::process::Command::new("magick")

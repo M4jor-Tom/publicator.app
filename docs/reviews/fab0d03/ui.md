@@ -108,13 +108,3 @@ the rejected duplicate completion through App::update, so reducer idempotence re
 newer UI operation between where relevant. Assert no duplicate history/write, wrong selection reset,
 extra send, stale error overwrite or lease/close effect. Observe task actions as well as disk bytes;
 keep unknown receipts and retry protection intact.
-
-## CLI-C01 — P2 · Gap · Successful reconciliation lacks a complete CLI witness
-
-**Evidence:** `tests/cli.rs:219–834` covers external CWD, argument conflicts, check-only, PTY consent,
-worker failures and unknown exits; successful CLI reconciliation end-to-end remains a gap.
-
-**Regression / close when:** Create a synthetic unresolved receipt with a fake worker, reconcile
-through the public CLI using each supported human decision, restart/read status and assert the
-intended persisted result and retry eligibility. Unknown stays blocked until that explicit action.
-Use unrelated CWD and temporary data; no real remote inspection or browser access.

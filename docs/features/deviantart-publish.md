@@ -30,6 +30,11 @@ The worker is an isolated child that trusts its startup `--data-root` and the Ru
 
 Classify a nonzero `da-publish` exit before any manual action. When the summary shows `unknown: 1` or more, or a later run refuses with `reconciliation required`, the CLI lists each blocked attempt as `UNRESOLVED <attempt> (<uuid>): <reason>` with its two reconcile commands. The submit may have reached DeviantArt: inspect DeviantArt first, then run `da-publish --reconcile-attempt <attempt> --outcome scheduled [--url URL]` if it is there or `--outcome not-submitted` if it is absent. Retry or manual upload is allowed only after `not-submitted`. `unknown: 0` with no `UNRESOLVED` line (a `failed` result or an error before dispatch) is a safe failure: check for a leftover draft, then the static skill's manual steps apply. Unresolved receipts are never deleted. `tests/cli.rs` checks that the CLI guidance and the skill's recovery prose agree.
 
+- Each `.publicator/publish/<attempt>/` holds one `receipt.json`, installed by temp-file rename and never removed. A directory without it is an interrupted intent creation, so nothing was dispatched: recovery and status skip it and leave it in place, and `--reconcile-attempt` on it reports `not found: … nothing was dispatched`. Empty, malformed or symlinked receipts still stop recovery for investigation.
+- `da-publish --reconcile-attempt ID --outcome scheduled [--url URL] | not-submitted` records the human decision under the publisher lock. An attempt already applied or released accepts only the same decision again; a different one is refused with `reconciliation required` and changes nothing.
+- The step check (60 s deadline) and the worker each lead their own process group. A timeout or failure kills and reaps the whole group before `.publicator/publish.lock` is released.
+- Dropping or aborting a publish, or SIGINT/SIGTERM to `da-publish`, SIGKILLs the owned group and releases the lock; an artwork already sent keeps its terminal-less receipt and blocks retry until reconciled. Worker stderr is awaited for at most the cleanup deadline after shutdown, so a detached descendant holding it open cannot stall teardown.
+
 ## Invariants
 
 - The complete source document, target, options, tags, schedule and artwork identity validate before sending.

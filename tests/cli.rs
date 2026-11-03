@@ -857,6 +857,155 @@ fn validate_rejects_invalid_schedule_semantics() {
     }
 }
 
+/// Kills and reaps the CLI even when an assertion fails first.
+struct ReapedChild(std::process::Child);
+
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn sigint_during_publish_stops_the_worker_group_and_keeps_the_attempt_blocked() {
+    let f = publish_fixture();
+    let root = f.root.path();
+    let (calls, gate) = (root.join("calls.log"), root.join("gate"));
+    common::executable::write_executable(
+        &root.join("worker.sh"),
+        &common::hanging_submit_worker(&calls, &gate),
+    );
+    fs::write(root.join("skill.md"), "fixture skill").unwrap();
+    let _watchdog = common::GroupWatchdog(&gate);
+    let mut cli = ReapedChild(
+        publish_command(root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let started = common::eventually(std::time::Duration::from_secs(20), || {
+        common::gate_pids(&gate).is_some()
+    });
+    assert!(started, "worker never reached submit");
+    assert_eq!(unsafe { libc::kill(cli.0.id() as i32, libc::SIGINT) }, 0);
+    assert!(common::eventually(
+        std::time::Duration::from_secs(10),
+        || { cli.0.try_wait().unwrap().is_some() }
+    ));
+    let mut stderr = String::new();
+    cli.0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(cli.0.wait().unwrap().code(), Some(1), "{stderr}");
+    assert!(stderr.contains("interrupted"), "{stderr}");
+    common::assert_abandoned_attempt(root, &gate, &calls);
+    let retry = publish_command(root).output().unwrap();
+    assert!(!retry.status.success());
+    assert!(String::from_utf8_lossy(&retry.stderr).contains("unresolved"));
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn cli_reconciliation_of_an_unknown_outcome_restores_exactly_the_decided_state() {
+    let url = "https://www.deviantart.com/example/art/work";
+    for (decision, sends, stored_url) in [
+        (vec!["--outcome", "scheduled", "--url", url], 1, Some(url)),
+        (vec!["--outcome", "scheduled"], 1, None),
+        (vec!["--outcome", "not-submitted"], 2, None),
+    ] {
+        let f = publish_fixture();
+        let root = f.root.path();
+        let elsewhere = tempdir().unwrap();
+        let calls = root.join("calls.log");
+        let lost_once = root.join("lost-once");
+        common::executable::write_executable(
+            &root.join("worker.sh"),
+            &format!(
+                r#"#!/bin/sh
+[ "$1" = "--check-steps" ] && exit 0
+while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) echo sent >> '{calls}'
+  if [ -e '{lost}' ]; then printf '%s' "$line" | jq -c '{{protocol:1,type:"scheduled",attempt_id,uuid}}'
+  else touch '{lost}'; printf '%s' "$line" | jq -c '{{protocol:1,type:"unknown",attempt_id,uuid,error:"confirmation lost"}}'; fi ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done"#,
+                calls = calls.display(),
+                lost = lost_once.display()
+            ),
+        );
+        fs::write(root.join("skill.md"), "fixture skill").unwrap();
+        let run = |extra: &[&str]| {
+            let output = publish_command(root)
+                .current_dir(elsewhere.path())
+                .args(extra)
+                .output()
+                .unwrap();
+            let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+            (
+                output.status.success(),
+                text(&output.stdout),
+                text(&output.stderr),
+            )
+        };
+        let sent = || fs::read_to_string(&calls).unwrap().lines().count();
+
+        let (ok, stdout, _) = run(&[]);
+        assert!(!ok && stdout.contains("unknown: 1"), "{stdout}");
+        let (ok, _, stderr) = run(&[]);
+        assert!(!ok && stderr.contains("unresolved"), "{stderr}");
+        assert_eq!(sent(), 1);
+        let attempt = fs::read_dir(root.join(".publicator/publish"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let (ok, stdout, stderr) =
+            run(&[&["--reconcile-attempt", &attempt][..], &decision].concat());
+        assert!(
+            ok && stdout.contains(&format!("reconciled {attempt}")),
+            "{stderr}"
+        );
+
+        let (ok, stdout, stderr) = run(&[]);
+        assert!(ok, "{decision:?}: {stdout} {stderr}");
+        assert!(
+            stdout.contains(&format!("published: {}", sends - 1)),
+            "{stdout}"
+        );
+        assert_eq!(sent(), sends, "{decision:?}");
+        let delivery = f.read()[0]["apparitions"][0].clone();
+        assert_eq!(delivery["state"], "published_or_scheduled");
+        assert_eq!(delivery.get("url").and_then(Value::as_str), stored_url);
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(root.join(format!(".publicator/publish/{attempt}/receipt.json"))).unwrap(),
+        )
+        .unwrap();
+        let resolved = if sends == 1 {
+            "applied"
+        } else {
+            "not_submitted"
+        };
+        assert_eq!(receipt[resolved], true, "{receipt}");
+        let (ok, stdout, _) = run(&[]);
+        assert!(
+            ok && stdout.contains("published: 0, failed: 0, unknown: 0"),
+            "{stdout}"
+        );
+        assert_eq!(sent(), sends);
+    }
+}
+
 /// Phrases the CLI unknown-outcome guidance and the skill's recovery prose must share.
 const RECOVERY_PHRASES: [&str; 7] = [
     "UNRESOLVED",

@@ -29,8 +29,6 @@ The original audit changed no application code. Publishing these documents fixes
 |---|---|
 | [Metadata](metadata.md) | Newer edits, provider tests, deadlines, admission and persistence |
 | [Prompts](prompts.md) | Archive refresh, Git paths, Nearest contract and bounded search |
-| [Publishing](publishing.md) | Browser effect, approved bytes, journal and subprocess ownership |
-| [Worker/operator](worker-operator.md) | Prober IPC, manual recovery, protocol and abrupt termination |
 | [UI](ui.md) | Drafts, close actions, model selection and completion ordering |
 | [Native UI](native-ui.md) | Reproducible interactions and actual viewport geometry |
 | [Test infrastructure](test-infrastructure.md) | CI, packaging, development launch, fixtures and coverage |

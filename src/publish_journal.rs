@@ -450,7 +450,7 @@ impl PublishJournal {
         let receipt = self.read_receipt(attempt_id)?;
         receipt.require_database(store)?;
         if receipt.applied || receipt.not_submitted {
-            return Ok(());
+            return receipt.same_resolution(&outcome);
         }
         match outcome {
             ReconcileOutcome::Scheduled { actual_url } => {
@@ -509,10 +509,14 @@ impl PublishJournal {
             Err(error) => return Err(error.into()),
         };
         paths.sort_by_key(|entry| entry.file_name());
-        Ok(paths.into_iter().map(|entry| self.receipt_entry(entry)))
+        Ok(paths
+            .into_iter()
+            .filter_map(|entry| self.receipt_entry(entry).transpose()))
     }
 
-    fn receipt_entry(&self, entry: fs::DirEntry) -> Result<Receipt> {
+    /// `None` for an interrupted `begin`: receipts are installed by rename and never removed,
+    /// and nothing is dispatched until `begin` returns, so a missing receipt means no send.
+    fn receipt_entry(&self, entry: fs::DirEntry) -> Result<Option<Receipt>> {
         let attempt_id = entry.file_name().to_string_lossy().into_owned();
         validate_attempt(&attempt_id)?;
         if !entry.file_type()?.is_dir() {
@@ -520,7 +524,10 @@ impl PublishJournal {
                 "publish journal entry is not a directory".into(),
             ));
         }
-        self.read_receipt(&attempt_id)
+        match self.read_receipt(&attempt_id) {
+            Err(Error::NotFound(_)) => Ok(None),
+            receipt => receipt.map(Some),
+        }
     }
 
     fn attempt_path(&self, attempt_id: &str) -> Result<PathBuf> {
@@ -552,7 +559,15 @@ impl PublishJournal {
             }
         }
         let path = attempt.join("receipt.json");
-        let metadata = fs::symlink_metadata(&path)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::NotFound(
+                    "publish attempt has no intent receipt; nothing was dispatched".into(),
+                )
+            } else {
+                error.into()
+            }
+        })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(Error::Validation(
                 "publish receipt must be a regular file".into(),
@@ -589,6 +604,25 @@ impl Receipt {
             ));
         }
         Ok(())
+    }
+
+    /// A resolved attempt accepts only its own decision again.
+    fn same_resolution(&self, outcome: &ReconcileOutcome) -> Result<()> {
+        let same = match (outcome, &self.terminal) {
+            (ReconcileOutcome::NotSubmitted, _) => self.not_submitted,
+            (
+                ReconcileOutcome::Scheduled { actual_url },
+                Some(WorkerEvent::Scheduled { url, .. }),
+            ) => self.applied && url == actual_url,
+            (ReconcileOutcome::Scheduled { .. }, _) => false,
+        };
+        if same {
+            Ok(())
+        } else {
+            Err(Error::ReconciliationRequired(
+                "attempt was already resolved with a different outcome".into(),
+            ))
+        }
     }
 
     fn retry_resolved(&self) -> bool {
@@ -958,13 +992,54 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut temp = NamedTempFile::new_in(parent)?;
     temp.write_all(bytes)?;
     temp.as_file_mut().sync_all()?;
+    #[cfg(test)]
+    let injected = take_receipt_failure_for_test();
+    #[cfg(test)]
+    if injected == Some(CommitFailureForTest::BeforeRename) {
+        return Err(std::io::Error::other("injected receipt pre-rename failure").into());
+    }
     temp.persist(path).map_err(|error| Error::Io(error.error))?;
+    #[cfg(test)]
+    if injected == Some(CommitFailureForTest::AfterRename) {
+        return Err(Error::DurabilityUncertain {
+            path: path.to_owned(),
+            source: std::io::Error::other("injected receipt post-rename sync failure"),
+        });
+    }
     File::open(parent)
         .and_then(|dir| dir.sync_all())
         .map_err(|source| Error::DurabilityUncertain {
             path: path.to_owned(),
             source,
         })
+}
+
+#[cfg(test)]
+use crate::store::CommitFailureForTest;
+
+#[cfg(test)]
+thread_local! {
+    static RECEIPT_FAILURE_FOR_TEST: std::cell::Cell<Option<(usize, CommitFailureForTest)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Fail the receipt write that follows `skip` successful ones on this thread
+/// (per job: 0 = intent, 1 = terminal, 2 = applied).
+#[cfg(test)]
+pub(crate) fn fail_receipt_write_for_test(skip: usize, failure: CommitFailureForTest) {
+    RECEIPT_FAILURE_FOR_TEST.with(|slot| slot.set(Some((skip, failure))));
+}
+
+#[cfg(test)]
+fn take_receipt_failure_for_test() -> Option<CommitFailureForTest> {
+    RECEIPT_FAILURE_FOR_TEST.with(|slot| match slot.take() {
+        Some((0, failure)) => Some(failure),
+        Some((skip, failure)) => {
+            slot.set(Some((skip - 1, failure)));
+            None
+        }
+        None => None,
+    })
 }
 
 #[cfg(test)]
@@ -1035,10 +1110,11 @@ mod durability_tests {
 
     #[test]
     fn failed_parent_sync_prevents_confirming_new_intent_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let (root, store, _journal, job, approved) = intent_fixture();
         let attempt = root
             .path()
-            .join(".publicator/publish/00000000-0000-4000-8000-000000000001");
+            .join(".publicator/publish")
+            .join(&job.attempt_id);
         let error = create_durable_dirs_with(root.path(), &attempt, |_| {
             Err(std::io::Error::other("injected sync failure"))
         });
@@ -1046,11 +1122,48 @@ mod durability_tests {
             matches!(error, Err(Error::Io(ref cause)) if cause.to_string() == "injected sync failure")
         );
         assert!(attempt.exists());
+        // After reopening, the receipt-less directory neither blocks nor can be reconciled.
+        let journal = PublishJournal::new(root.path()).unwrap();
+        assert_eq!(journal.recover(&store).unwrap(), RecoveryReport::default());
+        for outcome in [
+            ReconcileOutcome::NotSubmitted,
+            ReconcileOutcome::Scheduled { actual_url: None },
+        ] {
+            assert!(matches!(
+                journal.reconcile(&store, &job.attempt_id, outcome),
+                Err(Error::NotFound(_))
+            ));
+        }
+        assert_eq!(fs::read_dir(&attempt).unwrap().count(), 0);
+        let mut retry = job.clone();
+        retry.attempt_id = "00000000-0000-4000-8000-000000000003".into();
+        journal.begin(&retry, &approved).unwrap();
+        assert_eq!(journal.recover(&store).unwrap().blocked.len(), 1);
     }
 
     fn scheduled_fixture(
         url: Option<&str>,
     ) -> (tempfile::TempDir, Store, PublishJournal, PublishJob) {
+        let (root, store, journal, job, approved) = intent_fixture();
+        journal.begin(&job, &approved).unwrap();
+        journal
+            .terminal(&WorkerEvent::Scheduled {
+                protocol: 1,
+                attempt_id: job.attempt_id.clone(),
+                uuid: job.uuid.clone(),
+                url: url.map(str::to_owned),
+            })
+            .unwrap();
+        (root, store, journal, job)
+    }
+
+    fn intent_fixture() -> (
+        tempfile::TempDir,
+        Store,
+        PublishJournal,
+        PublishJob,
+        ApprovedSnapshot,
+    ) {
         use crate::{
             config::{Config, Paths},
             publish_protocol::ScheduleParts,
@@ -1106,16 +1219,7 @@ mod durability_tests {
             galleries: vec![],
         };
         let journal = PublishJournal::new(data).unwrap();
-        journal.begin(&job, &approved).unwrap();
-        journal
-            .terminal(&WorkerEvent::Scheduled {
-                protocol: 1,
-                attempt_id: job.attempt_id.clone(),
-                uuid: job.uuid.clone(),
-                url: url.map(str::to_owned),
-            })
-            .unwrap();
-        (root, store, journal, job)
+        (root, store, journal, job, approved)
     }
 
     #[test]
