@@ -19,7 +19,7 @@ use std::{
 
 mod common;
 use common::http::{Reply, Server};
-use common::{Fixture, id};
+use common::{Fixture, connections, id};
 
 fn model_option() -> ModelOption {
     VISION_MODELS[0].clone()
@@ -65,10 +65,6 @@ fn silent() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     (listener, url)
-}
-fn connections(listener: &TcpListener) -> usize {
-    listener.set_nonblocking(true).unwrap();
-    std::iter::from_fn(|| listener.accept().ok()).count()
 }
 fn reply(path: &str, status: u16, body: Value) -> Reply {
     Reply {
@@ -151,6 +147,29 @@ async fn refused_or_silent_ollama_is_unavailable_and_never_pulled_or_chatted() {
         assert!(begun.elapsed() < Duration::from_secs(3), "{ollama}");
     }
     assert_eq!(connections(&listener), 1, "only the tags probe connected");
+}
+
+/// A reply that arrives but is not tags JSON is a protocol fault, not an unavailable service
+/// (refused and silent services are covered above).
+#[tokio::test]
+async fn malformed_tags_reply_is_a_protocol_error_not_unavailability() {
+    let not_json = Reply {
+        path: "/api/tags".into(),
+        status: 200,
+        body: "<html>not Ollama</html>".into(),
+    };
+    let server = Server::start(vec![not_json]);
+    let (client, _llmfit) = local_client_for_test(&server);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let status = client.local_status(&model_option(), deadline).await;
+    let requests = server.requests();
+    server.finish();
+    let error = status.unwrap_err().to_string();
+    assert!(
+        error.starts_with("protocol error: invalid Ollama JSON"),
+        "{error}"
+    );
+    assert_eq!(paths(&requests), ["/api/tags"]);
 }
 
 const INHERITED_KEY: &str = "DUMMY-inherited-openrouter-key";

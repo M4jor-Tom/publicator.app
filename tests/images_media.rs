@@ -161,19 +161,20 @@ fn one_pixel_and_portrait_sources_keep_their_shape_and_pixels() {
     }
 }
 
-/// Undecodable sources: half of a real PNG and WebP, text named PNG, and an artwork deleted
-/// after its digest was recorded. Inputs stay tiny, so no decoder needs a child-process bound.
+/// Undecodable sources: half of a real PNG, WebP and JPEG (libjpeg reports that truncation only
+/// as a warning), text named PNG, and an artwork deleted after its digest was recorded. Inputs
+/// stay tiny, so no decoder needs a child-process bound.
 #[test]
 fn truncated_text_and_missing_sources_are_refused_and_cache_nothing() {
     let f = Fixture::new();
-    for name in ["cut.png", "cut.webp"] {
+    for name in ["cut.png", "cut.webp", "cut.jpg"] {
         let path = generated(&f, name, &["-size", "64x64", "gradient:red-blue"]);
         let whole = fs::read(&path).unwrap();
         fs::write(&path, &whole[..whole.len() / 2]).unwrap();
     }
     fs::write(f.path("text.png"), "plain text, not an image").unwrap();
     f.image("gone.png", 4, 4);
-    let names = ["cut.png", "cut.webp", "text.png", "gone.png"];
+    let names = ["cut.png", "cut.webp", "cut.jpg", "text.png", "gone.png"];
     let digests = names.map(|name| file_sha512(&f.path(name)).unwrap());
     fs::remove_file(f.path("gone.png")).unwrap();
     let cache = f.path(".thumbs");

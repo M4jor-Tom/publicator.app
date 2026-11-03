@@ -233,6 +233,9 @@ impl Publisher {
                 cancel,
             )
             .await;
+        // `run_batch` sent `close` or dropped stdin: either way `serve` closes the browser
+        // session on its way out, so let the worker exit before the group is signalled.
+        let _ = tokio::time::timeout(self.timeouts.cleanup, worker.child.wait()).await;
         worker.shutdown(self.timeouts.cleanup).await;
         // A descendant that left the worker group may hold stderr open: keep what was read
         // by the deadline; dropping the set aborts the drain.
@@ -989,6 +992,8 @@ mod timeout_tests {
         path
     }
 
+    const READY: &str = "IFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'";
+
     fn request() -> PublishRequest {
         PublishRequest {
             uuids: None,
@@ -1019,6 +1024,7 @@ mod timeout_tests {
     async fn cleanup_force_kills_worker_that_ignores_termination() {
         let (root, application) = publisher_fixture(1, "Description");
         let pid_file = root.path().join("pid");
+        let _watchdog = KillRecorded(pid_file.clone());
         let worker = write_worker(
             root.path(),
             &format!(
@@ -1042,10 +1048,14 @@ done"#,
                 cleanup: Duration::from_millis(30),
                 ..Timeouts::default()
             });
-        let report = publisher
-            .publish(&application, request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .unwrap();
+        // The spinning worker never reads `close`: waiting for its exit is bounded too.
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.publish(&application, request(), Arc::default()),
+        )
+        .await
+        .expect("cleanup deadlines bound a worker that ignores close and SIGTERM")
+        .unwrap();
         assert_eq!(report.failed, 1);
         let pid = std::fs::read_to_string(pid_file).unwrap();
         assert!(std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_err());
@@ -1054,14 +1064,12 @@ done"#,
     #[tokio::test]
     async fn worker_that_never_becomes_ready_obeys_ready_deadline() {
         let (root, application) = publisher_fixture(1, "Description");
-        let worker = write_worker(
-            root.path(),
-            "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\nsleep 10\n",
-        );
+        let (worker, watchdog) = hanging_worker(root.path(), "IFS= read -r open || exit 1");
 
+        // Long enough for the worker to record its PIDs: nothing it sends can signal that.
         let publisher =
             Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
-                ready: Duration::from_millis(50),
+                ready: Duration::from_secs(1),
                 artwork: Duration::from_millis(250),
                 cleanup: Duration::from_millis(50),
                 ..Timeouts::default()
@@ -1071,14 +1079,15 @@ done"#,
             .await
             .unwrap_err();
         assert!(error.to_string().contains("worker ready timeout"));
+        assert_reaped(&watchdog.0);
     }
 
     #[tokio::test]
     async fn terminal_read_timeout_keeps_attempt_unknown_and_blocks_retry() {
         let (root, application) = publisher_fixture(1, "Description");
-        let worker = write_worker(
+        let (worker, watchdog) = hanging_worker(
             root.path(),
-            "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nIFS= read -r submit || exit 1\nsleep 10\n",
+            &format!("{READY}\nIFS= read -r submit || exit 1"),
         );
 
         let publisher =
@@ -1094,6 +1103,7 @@ done"#,
             .unwrap();
         assert_eq!(report.unknown, 1);
         assert!(report.error.unwrap().contains("artwork timeout"));
+        assert_reaped(&watchdog.0);
         let retry = publisher
             .publish(&application, request(), Arc::new(AtomicBool::new(false)))
             .await;
@@ -1103,10 +1113,7 @@ done"#,
     #[tokio::test]
     async fn large_submit_to_nonreading_worker_times_out_with_unknown_intent() {
         let (root, application) = publisher_fixture(1, &"d".repeat(900_000));
-        let worker = write_worker(
-            root.path(),
-            "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\nIFS= read -r open || exit 1\necho '{\"protocol\":1,\"type\":\"ready\"}'\nsleep 10\n",
-        );
+        let (worker, watchdog) = hanging_worker(root.path(), READY);
 
         let publisher =
             Publisher::new(worker, root.path().join("skill.md")).with_timeouts(Timeouts {
@@ -1121,6 +1128,7 @@ done"#,
             .unwrap();
         assert_eq!(report.unknown, 1);
         assert!(report.error.unwrap().contains("write timeout"));
+        assert_reaped(&watchdog.0);
     }
 
     fn publishing_boundary_fixture() -> (
@@ -1432,6 +1440,32 @@ done"#,
         }
     }
 
+    /// Shell that starts a same-group `sleep` and atomically records "<pid> <child pid>" in `gate`.
+    fn hold_recorded_child(gate: &Path) -> String {
+        format!(
+            r#"sleep 1000 & echo "$$ $!" > '{gate}.tmp'; mv '{gate}.tmp' '{gate}'"#,
+            gate = gate.display()
+        )
+    }
+
+    /// Worker that first records its held child, then runs `protocol` and waits forever;
+    /// the returned guard kills what it recorded.
+    fn hanging_worker(root: &Path, protocol: &str) -> (PathBuf, KillRecorded) {
+        let gate = root.join("worker-gate");
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = \"--check-steps\" ] && exit 0\n{}\n{protocol}\nwait\n",
+            hold_recorded_child(&gate)
+        );
+        (write_worker(root, &script), KillRecorded(gate))
+    }
+
+    /// Both PIDs recorded in `gate` are gone once the publisher returns.
+    fn assert_reaped(gate: &Path) {
+        let pids = recorded(gate);
+        assert_eq!(pids.len(), 2, "{pids:?}");
+        assert!(all_dead(&pids), "fixture tree survived: {pids:?}");
+    }
+
     /// Step checker that hangs with a same-group child after recording "<pid> <child pid>".
     fn hanging_checker(root: &Path) -> (Publisher, PathBuf, PathBuf) {
         let (gate, started) = (root.join("checker"), root.join("started"));
@@ -1440,10 +1474,10 @@ done"#,
             &format!(
                 r#"#!/bin/sh
 if [ "$1" = "--check-steps" ]; then
-  sleep 1000 & echo "$$ $!" > '{gate}.tmp'; mv '{gate}.tmp' '{gate}'; wait
+  {held}; wait
 fi
 touch '{started}'"#,
-                gate = gate.display(),
+                held = hold_recorded_child(&gate),
                 started = started.display()
             ),
         );
@@ -1474,9 +1508,7 @@ touch '{started}'"#,
                 error.to_string().contains("step check timed out"),
                 "{error}"
             );
-            let pids = recorded(&gate);
-            assert_eq!(pids.len(), 2, "{pids:?}");
-            assert!(all_dead(&pids), "checker tree survived: {pids:?}");
+            assert_reaped(&gate);
             assert!(!started.exists());
             drop(publish_journal::publisher_lock(root.path()).unwrap());
         }
@@ -1499,8 +1531,7 @@ touch '{started}'"#,
         .await;
         assert!(gated.is_ok(), "checker never started");
         drop(publish);
-        let pids = recorded(&gate);
-        assert!(all_dead(&pids), "checker tree survived: {pids:?}");
+        assert_reaped(&gate);
         assert!(!started.exists());
         drop(publish_journal::publisher_lock(root.path()).unwrap());
     }

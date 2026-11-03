@@ -3561,10 +3561,14 @@ done
         format!("00000000-0000-4000-8000-{n:012}")
     }
 
+    /// Inherited repository variables (a Git hook's `GIT_DIR`, ...) never redirect `-C dir`.
     fn git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .args(args)
             .stdout(std::process::Stdio::null())
             .status()

@@ -159,9 +159,19 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
     }
 }
 
+/// Git for the disposable archive: inherited repository variables (a Git hook's `GIT_DIR`, ...)
+/// would otherwise redirect `-C archive` to the caller's repository.
+fn git_command() -> std::process::Command {
+    let mut git = std::process::Command::new("git");
+    git.env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    git
+}
+
 fn initialize_prompt_archive(archive: &Path, name: &str, email: &str) {
     let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
+        let output = git_command()
             .arg("-C")
             .arg(archive)
             .args(args)
@@ -491,7 +501,7 @@ fn calendar_publication(
 }
 
 fn commit_prompt_archive_if_changed(archive: &Path) -> Result<(), String> {
-    let diff = std::process::Command::new("git")
+    let diff = git_command()
         .arg("-C")
         .arg(archive)
         .args(["diff", "--cached", "--quiet", "--exit-code"])
@@ -500,7 +510,7 @@ fn commit_prompt_archive_if_changed(archive: &Path) -> Result<(), String> {
     match diff.status.code() {
         Some(0) => Ok(()),
         Some(1) => {
-            let commit = std::process::Command::new("git")
+            let commit = git_command()
                 .arg("-C")
                 .arg(archive)
                 .args(["commit", "-qm", "archive disposable calendar prompts"])
@@ -1114,14 +1124,14 @@ mod tests {
         fs::write(&publications, serde_json::to_vec(&saved).unwrap()).unwrap();
         let manifest = fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap();
         let archive = dir.path().join("prompt-archive");
-        let head = Command::new("git")
+        let head = git_command()
             .arg("-C")
             .arg(&archive)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
         assert!(head.status.success());
-        let archive_status = Command::new("git")
+        let archive_status = git_command()
             .arg("-C")
             .arg(&archive)
             .args(["status", "--porcelain"])
@@ -1140,7 +1150,7 @@ mod tests {
             fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap(),
             manifest
         );
-        let second_head = Command::new("git")
+        let second_head = git_command()
             .arg("-C")
             .arg(&archive)
             .args(["rev-parse", "HEAD"])
@@ -1148,7 +1158,7 @@ mod tests {
             .unwrap();
         assert!(second_head.status.success());
         assert_eq!(second_head.stdout, head.stdout);
-        let second_status = Command::new("git")
+        let second_status = git_command()
             .arg("-C")
             .arg(&archive)
             .args(["status", "--porcelain"])

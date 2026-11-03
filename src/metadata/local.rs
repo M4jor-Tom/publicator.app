@@ -84,6 +84,8 @@ impl MetadataClient {
                     available: true,
                 })
             }
+            // A reply that arrived malformed is a protocol fault, not an unavailable service.
+            Err(error @ Error::Protocol(_)) => Err(error),
             Err(_) => Ok(LocalStatus {
                 fit,
                 installed: false,

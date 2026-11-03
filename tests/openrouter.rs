@@ -21,16 +21,15 @@ use common::{
     http::{Reply, Server},
 };
 
+fn keyless(base: &str) -> MetadataClient {
+    let endpoints = Endpoints {
+        openrouter: base.into(),
+        ollama: String::new(),
+    };
+    MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::new())
+}
 fn client(base: &str) -> MetadataClient {
-    MetadataClient::new(
-        reqwest::Client::new(),
-        Endpoints {
-            openrouter: base.into(),
-            ollama: String::new(),
-        },
-        PathBuf::new(),
-    )
-    .with_openrouter_key("DUMMY-test-credential")
+    keyless(base).with_openrouter_key("DUMMY-test-credential")
 }
 /// Opaque bytes: the client forwards them base64-encoded; decoding is tested in tests/images*.rs.
 fn image() -> (tempfile::TempDir, PreparedImage) {
@@ -83,12 +82,39 @@ async fn silent_headers_end_generation_at_its_deadline_with_no_later_request() {
         "ended after {:?}",
         begun.elapsed()
     );
-    listener.set_nonblocking(true).unwrap();
-    let connections = std::iter::from_fn(|| listener.accept().ok()).count();
     assert_eq!(
-        connections, 1,
+        common::connections(&listener),
+        1,
         "the catalogue fallback ran past the shared deadline"
     );
+}
+
+/// Child half of the next test: it runs only with an empty `OPENROUTER_KEY` of its own.
+#[tokio::test]
+async fn missing_key_child() {
+    if std::env::var("OPENROUTER_KEY").as_deref() != Ok("") {
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = keyless(&format!("http://{}", listener.local_addr().unwrap()));
+    let (_dir, image) = image();
+    let error = client.generate(&image, &request()).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "provider error: OPENROUTER_KEY is not set"
+    );
+    assert_eq!(
+        common::connections(&listener),
+        0,
+        "a keyless client reached OpenRouter"
+    );
+}
+
+#[test]
+fn a_missing_key_fails_before_any_openrouter_request() {
+    let cwd = tempfile::tempdir().unwrap();
+    let empty = [("OPENROUTER_KEY", std::ffi::OsStr::new(""))];
+    common::run_child_test("missing_key_child", cwd.path(), &empty);
 }
 
 #[test]

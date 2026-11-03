@@ -54,6 +54,14 @@ fn price(v: &Value) -> Option<f64> {
         .or_else(|| v.as_f64())
 }
 impl MetadataClient {
+    /// The configured key, else a nonempty `OPENROUTER_KEY`; without one no request is sent.
+    fn openrouter_key(&self) -> Result<String> {
+        self.openrouter_key
+            .clone()
+            .or_else(|| std::env::var("OPENROUTER_KEY").ok())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| Error::Provider("OPENROUTER_KEY is not set".into()))
+    }
     async fn bounded(
         &self,
         request: reqwest::RequestBuilder,
@@ -101,17 +109,9 @@ impl MetadataClient {
             return Ok(models.clone());
         }
         let url = format!("{}/models", self.endpoints.openrouter.trim_end_matches('/'));
-        let key = self
-            .openrouter_key
-            .as_ref()
-            .cloned()
-            .or_else(|| std::env::var("OPENROUTER_KEY").ok());
-        let mut req = self.http.get(url);
-        if let Some(key) = &key {
-            req = req.bearer_auth(key);
-        }
-        let secrets = key.as_deref().into_iter().collect::<Vec<_>>();
-        let bytes = self.bounded(req, deadline, &secrets).await?;
+        let key = self.openrouter_key()?;
+        let req = self.http.get(url).bearer_auth(&key);
+        let bytes = self.bounded(req, deadline, &[key.as_str()]).await?;
         let v: Value = serde_json::from_slice(&bytes)?;
         let rows = v
             .get("data")
@@ -131,12 +131,7 @@ impl MetadataClient {
         schema: bool,
         deadline: tokio::time::Instant,
     ) -> Result<Generated> {
-        let key = self
-            .openrouter_key
-            .as_ref()
-            .cloned()
-            .or_else(|| std::env::var("OPENROUTER_KEY").ok())
-            .ok_or_else(|| Error::Provider("OPENROUTER_KEY is not set".into()))?;
+        let key = self.openrouter_key()?;
         let model = model.strip_prefix("openrouter/").unwrap_or(model);
         let rejected = self.rejected_schemas.lock().unwrap().contains(model);
         let use_schema = schema && !rejected;

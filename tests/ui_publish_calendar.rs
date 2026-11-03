@@ -253,12 +253,10 @@ fn options_app() -> (
     };
     let f = common::Fixture::with_config(config);
     let store = Arc::new(f.store.clone());
-    let row = serde_json::json!({
-        "uuid":"00000000-0000-4000-8000-000000000009", "state":"DESCRIBED",
-        "title":"Title", "description":"Description", "submissionTimestamp":1700000000,
-        "files":[{"basename":"art.png","sha512sum":"0".repeat(128)}],
-        "apparitions":[{"platformName":"deviantart","state":"unpublished","priceIfNotFree":2.5,"tiers":["Gold"],"galleries":["Art"]}]
-    });
+    // Real artwork bytes: a publish from this app can fail only for the reason a test names.
+    let mut row = f.art_row(9, "DESCRIBED");
+    row["apparitions"] = serde_json::json!([{"platformName":"deviantart","state":"unpublished",
+        "priceIfNotFree":2.5,"tiers":["Gold"],"galleries":["Art"]}]);
     let mut app = loaded_default_app(&f, row);
     let _ = app.update(publicator::ui::Message::PublishLocksFinished(Ok(
         std::collections::HashSet::new(),
@@ -284,6 +282,8 @@ fn scheduled_jump_app() -> (
     (app, store, root)
 }
 
+/// Holds the first submit in a recorded same-group child until `release` exists or the test
+/// process is gone: a killed test runner runs no destructor, so the hold bounds itself.
 #[cfg(feature = "desktop")]
 fn held_publisher_worker(
     f: &common::Fixture,
@@ -300,15 +300,17 @@ submit)
   uuid=$(printf '%s' "$line" | jq -r .uuid)
   attempt=$(printf '%s' "$line" | jq -r .attempt_id)
   echo "$uuid" >> '{}'
-  if [ ! -e '{}' ]; then touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; fi
+  if [ ! -e '{started}' ]; then
+    (while [ ! -e '{release}' ] && kill -0 $PPID 2>/dev/null; do sleep 0.01; done) &
+    echo "$$ $!" > '{started}.tmp'; mv '{started}.tmp' '{started}'; wait $!
+  fi
   printf '{{"protocol":1,"type":"scheduled","attempt_id":"%s","uuid":"%s","url":"https://example.test/%s"}}\n' "$attempt" "$uuid" "$uuid" ;;
 close) exit 0 ;;
 esac
 done"#,
         calls.display(),
-        started.display(),
-        started.display(),
-        release.display()
+        started = started.display(),
+        release = release.display()
     );
     fake_publisher_worker(f, &body)
 }
@@ -336,6 +338,7 @@ where
 }
 
 /// A publish whose first delivery is held inside the fake worker until `release_publish`.
+/// `started` records "<worker pid = group> <hold pid>"; dropping kills that group's survivors.
 #[cfg(feature = "desktop")]
 struct HeldPublish {
     fixture: common::Fixture,
@@ -343,7 +346,15 @@ struct HeldPublish {
     store: std::sync::Arc<publicator::store::Store>,
     actions: iced_runtime::futures::BoxStream<iced_runtime::Action<publicator::ui::Message>>,
     calls: std::path::PathBuf,
+    started: std::path::PathBuf,
     release: std::path::PathBuf,
+}
+
+#[cfg(feature = "desktop")]
+impl Drop for HeldPublish {
+    fn drop(&mut self) {
+        drop(common::GroupWatchdog(&self.started));
+    }
 }
 
 /// Publishes the pending publications `numbers`, beside the `extra` rows, and holds delivery.
@@ -378,6 +389,7 @@ async fn held_publish(numbers: &[u64], extra: &[serde_json::Value]) -> HeldPubli
         store,
         actions,
         calls,
+        started,
         release,
     }
 }
@@ -396,6 +408,14 @@ async fn release_publish(held: &mut HeldPublish) -> publicator::ui::Message {
         completion,
         publicator::ui::Message::PublishFinished(..)
     ));
+    let (group, _) = common::gate_pids(&held.started).expect("worker gate");
+    assert!(
+        common::eventually(std::time::Duration::from_secs(5), || {
+            common::live_process_group_members(group).is_empty()
+        }),
+        "worker group survived its publish: {:?}",
+        common::live_process_group_members(group)
+    );
     completion
 }
 
@@ -749,10 +769,13 @@ async fn publish_flushes_valid_option_edits_before_admission() {
         value: "6.25".into(),
     });
     let messages = common::ui::send(&mut app, Message::PublishSelected).await;
+    // Admitted after the flush, then refused by this app's one deliberate gap: no publisher.
+    let refused = Err("invalid state: publisher is not configured".to_owned());
     assert!(
         messages
             .messages.iter()
-            .any(|message| matches!(message, Message::PublishFinished(_, completion) if completion.result.is_err()))
+            .any(|message| matches!(message, Message::PublishFinished(_, completion) if completion.result == refused)),
+        "{messages:?}"
     );
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
@@ -1554,11 +1577,15 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     });
     let repo = f.path("prompt-archive");
     std::fs::create_dir_all(repo.join("archive")).unwrap();
+    // Inherited repository variables (a Git hook's GIT_DIR, ...) never redirect these commits.
     let git = |args: &[&str]| {
         assert!(
             Command::new("git")
                 .arg("-C")
                 .arg(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
                 .args(args)
                 .status()
                 .unwrap()

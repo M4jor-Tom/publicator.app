@@ -148,6 +148,13 @@ async fn valid_publication_is_scheduled_by_the_real_worker_with_one_zone_and_a_s
         submit[2], artwork_sha512,
         "staged bytes differ from the artwork"
     );
+    // `serve` closes the browser session on `close`, before the publisher signals the group.
+    assert_eq!(
+        recorded(&record, "close").len(),
+        1,
+        "{:?}",
+        records(&record)
+    );
 }
 
 #[tokio::test]

@@ -376,3 +376,9 @@ pub mod ui {
         let _ = app.update(completion);
     }
 }
+
+/// Drains the backlog of a listener that never accepts: the connections made to it.
+pub fn connections(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    std::iter::from_fn(|| listener.accept().ok()).count()
+}

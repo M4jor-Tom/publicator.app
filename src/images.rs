@@ -438,10 +438,11 @@ fn first_frame(path: &Path) -> OsString {
 }
 
 /// Detects the format of the first frame, so a sequence is admitted by its container format.
+/// Decoder warnings refuse the file: libjpeg reports a truncated JPEG only as a warning.
 fn actual_mime(path: &Path) -> Result<String> {
     let output = run_tool(
         Command::new("identify")
-            .args(["-format", "%m"])
+            .args(["-regard-warnings", "-format", "%m"])
             .arg(first_frame(path)),
     )?;
     if !output.status.success() {

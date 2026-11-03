@@ -78,20 +78,31 @@ mod tests {
         );
     }
 
+    const OVERRIDE: &str = "http://127.0.0.1:1";
+
+    /// Child half of the next test: it runs only with the CLI override in its own environment.
+    #[test]
+    fn gui_endpoint_child() {
+        if std::env::var("PUBLICATOR_OLLAMA_URL").as_deref() != Ok(OVERRIDE) {
+            return;
+        }
+        assert_eq!(gui_metadata_endpoints().ollama, "http://localhost:11434");
+    }
+
     #[test]
     fn gui_ignores_inherited_cli_ollama_endpoint_override() {
-        let previous = std::env::var_os("PUBLICATOR_OLLAMA_URL");
-        unsafe {
-            std::env::set_var("PUBLICATOR_OLLAMA_URL", "http://127.0.0.1:1");
-        }
-        let ollama = gui_metadata_endpoints().ollama;
-        unsafe {
-            if let Some(previous) = previous {
-                std::env::set_var("PUBLICATOR_OLLAMA_URL", previous);
-            } else {
-                std::env::remove_var("PUBLICATOR_OLLAMA_URL");
-            }
-        }
-        assert_eq!(ollama, "http://localhost:11434");
+        // The override is set for the child only; `timeout` kills and reaps a hung child.
+        let child = std::process::Command::new("timeout")
+            .args(["-k", "5", "60"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::gui_endpoint_child"])
+            .env("PUBLICATOR_OLLAMA_URL", OVERRIDE)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
     }
 }
