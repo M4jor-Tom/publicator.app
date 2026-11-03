@@ -40,6 +40,7 @@ fn setup() -> (tempfile::TempDir, Config) {
     };
     (dir, cfg)
 }
+/// Arbitrary bytes: prompt search matches names and hashes and never decodes images.
 fn image(dir: &Path, text: &[u8], basename: &str) {
     std::fs::write(dir.join(basename), text).unwrap();
 }

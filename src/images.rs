@@ -6,6 +6,7 @@ use openssl::hash::{Hasher, MessageDigest};
 use serde_json::Value;
 use std::{
     collections::HashSet,
+    ffi::OsString,
     fs::{self, File, Metadata},
     io::Read,
     path::{Path, PathBuf},
@@ -333,16 +334,16 @@ fn write_thumb(
         .suffix(&format!(".{extension}"))
         .tempfile_in(cache)?;
     let status = Command::new("magick")
-        .arg(source)
+        .arg(first_frame(source))
         .args(["-resize", "300x300>"])
         .arg(temp.path())
-        .status();
-    if !matches!(status, Ok(status) if status.success()) {
-        eprintln!(
-            "ImageMagick thumbnail conversion failed for {}; caching the original",
+        .status()?;
+    // An unresized original is not a thumbnail: fail and cache nothing, so the next call retries.
+    if !status.success() {
+        return Err(Error::InvalidState(format!(
+            "thumbnail conversion failed for {}",
             path.display()
-        );
-        fs::copy(source, temp.path())?;
+        )));
     }
     temp.as_file_mut().sync_all()?;
     before_persist();
@@ -372,10 +373,19 @@ pub fn prepare_ai_image(
     })
 }
 
+/// ImageMagick's `path[0]`: only the first frame or page of a sequence. Without it, `identify`
+/// prints one format token per frame (`GIFGIF`) and a converter writes one file per frame.
+fn first_frame(path: &Path) -> OsString {
+    let mut frame = path.as_os_str().to_owned();
+    frame.push("[0]");
+    frame
+}
+
+/// Detects the format of the first frame, so a sequence is admitted by its container format.
 fn actual_mime(path: &Path) -> Result<String> {
     let output = Command::new("identify")
         .args(["-format", "%m"])
-        .arg(path)
+        .arg(first_frame(path))
         .output()?;
     if !output.status.success() {
         return Err(Error::InvalidState(format!(
@@ -414,7 +424,9 @@ pub fn validate_upload(path: &Path) -> Result<()> {
 }
 
 /// Stages a PNG conversion when the content is WebP or the name says `.webp` (the worker
-/// rejects that suffix); any other source is uploaded as is.
+/// rejects that suffix); any other source is uploaded as is. The conversion reads the whole
+/// sequence on purpose: an animated WebP yields no single PNG and stays rejected, rather than
+/// uploading a still of an animation.
 pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
     let webp_name = source
         .extension()
@@ -727,6 +739,7 @@ mod tests {
         let art = root.path().join("art");
         let path = art.join("candidate.png");
         let aside = art.join("aside.png");
+        // Arbitrary bytes: deletion binds file identity and hash, never decodes.
         fs::write(&path, b"authorized A").unwrap();
         let result = delete_authorized(&store, &path, || {
             fs::rename(&path, &aside).unwrap();

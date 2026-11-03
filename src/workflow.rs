@@ -557,6 +557,7 @@ mod pick_delete_race_tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("art")).unwrap();
         let path = root.path().join("art/candidate.png");
+        // Arbitrary bytes: this race test exercises hashing and locking, never decoding.
         fs::write(&path, b"disposable candidate").unwrap();
         let store = Store::new(
             Paths::resolve(Some(root.path()), None).unwrap(),

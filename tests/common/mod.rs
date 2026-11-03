@@ -11,6 +11,7 @@ use tempfile::TempDir;
 pub fn id(n: u64) -> String {
     format!("00000000-0000-4000-8000-{n:012}")
 }
+/// Placeholder digest: for state tests; identity/upload tests use `Fixture::art_row`.
 pub fn row(n: u64, state: &str) -> Value {
     json!({"uuid": id(n), "state": state, "title": "Title", "description": "Description",
         "submissionTimestamp": 1_700_000_000, "files": [{"basename": format!("{n}.png"), "sha512sum": "0".repeat(128)}], "apparitions": []})
@@ -152,4 +153,34 @@ pub fn bounded_output(
         stdout,
         stderr,
     }
+}
+
+/// Decodes `path` with ImageMagick's `identify -format`, failing the test if it cannot.
+pub fn identify(path: &std::path::Path, format: &str) -> String {
+    let output = std::process::Command::new("identify")
+        .args(["-format", format])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "identify {}", path.display());
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Runs one test of the current test binary in a child process, so it can use another working
+/// directory or `PATH` without touching this process; `timeout` kills and reaps a hung child.
+pub fn run_child_test(test: &str, cwd: &std::path::Path, envs: &[(&str, &std::ffi::OsStr)]) {
+    let output = std::process::Command::new("timeout")
+        .args(["-k", "5", "120"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .current_dir(cwd)
+        .envs(envs.iter().copied())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child test {test} failed:\n{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

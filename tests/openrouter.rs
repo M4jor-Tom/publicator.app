@@ -18,6 +18,7 @@ fn client(base: &str) -> MetadataClient {
     )
     .with_openrouter_key("DUMMY-test-credential")
 }
+/// Opaque bytes: the client forwards them base64-encoded; decoding is tested in tests/images*.rs.
 fn image() -> (tempfile::TempDir, PreparedImage) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("art.png");

@@ -3,11 +3,11 @@
 - **Does:** Finds unpublished candidates, deduplicates by content identity, caches resized previews and prepares DeviantArt-compatible uploads.
 - **Run:** `nix run .#ui -- --data-dir DIR`; `nix run .#da-publish -- --data-dir DIR`.
 - **Code:** `src/images.rs`, `src/ui/`, `src/publishing.rs`, `src/store.rs`.
-- **Tests:** `tests/images.rs`, `tests/prompt_search.rs`, `tests/ui*.rs`, `tests/publishing.rs`.
+- **Tests:** `tests/images.rs`, `tests/images_media.rs`, `tests/images_fs.rs`, `tests/prompt_search.rs`, `tests/ui*.rs`, `tests/publishing.rs`.
 - **Config:** `publicable` image roots are configured in the data-dir `publicator.toml`.
 - **Data:** `.thumbs/` is a persistent content-addressed cache; `.publicator/` holds publish staging. Both are data-dir runtime state, not source assets.
 - **Decisions:** Generate previews lazily; never upload WebP. Data repo should ignore `.thumbs/` and `.publicator/`.
-- **Verify:** `nix develop -c cargo test --test images --test publishing`
+- **Verify:** `nix develop -c cargo test --test images --test images_media --test images_fs --test publishing`
 
 ## How it works
 
@@ -16,6 +16,10 @@ Pick scans only configured roots and excludes already-published file identities.
 ## Invariants
 
 - Candidate selection is bounded to configured roots; it does not accept arbitrary paths.
+- Discovery admits the suffixes `jpg`, `jpeg`, `png`, `webp`, `gif`, `bmp`, `tiff` and `mp4` (any case), the same list as prompt search. `.tif` is not admitted; rename such files to `.tiff`.
+- A configured root may itself be a symlink: it is resolved and must stay inside the data directory. Entries below a root are never followed: symlinked files and directories, dangling links and loops are not offered, and deleting through a symlink entry or outside a configured root is refused. An unreadable file is skipped with a logged error; an unreadable directory fails the search rather than silently hiding its artwork.
+- Format detection reads the first frame only (`path[0]`), so an animated GIF/WebP or multipage TIFF is admitted by its container format. Previews and AI input are the first frame; an upload is passed through unchanged, so an admitted animated GIF stays animated. An animated WebP upload is rejected: its PNG conversion reads the whole sequence and yields no single image, and a still of an animation is not uploaded in its place. Whether DeviantArt accepts multipage TIFF is out of scope; the upload admission list is unchanged.
+- A failed thumbnail conversion is an error and caches nothing, so the next request retries; the original is never cached as its preview. Full-size originals cached by the earlier fallback are not evicted automatically: delete `.thumbs/` once to rebuild them.
 - One reference policy (`images::References`) serves normal discovery, prompt search and deletion: a file is protected when its basename or its content hash (`sha512sum` or `fileSha512sum`, any case, in `files` or `previewFilesIfNotFree`) is recorded by any publication. A referenced basename stays protected after its bytes change.
 - A search offers one candidate per content identity: byte-identical copies and files reached through overlapping roots collapse to a single candidate, matching Pick, which keys new rows by content hash.
 - Cache entries are content-addressed and persist across runs; they are not temporary `/tmp` files.

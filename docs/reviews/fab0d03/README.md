@@ -28,8 +28,6 @@ The original audit changed no application code. Publishing these documents fixes
 | File | Scope |
 |---|---|
 | [Metadata](metadata.md) | Newer edits, provider tests, deadlines, admission and persistence |
-| [Images](images.md) | Destructive paths, artwork identity, codecs, cache and search parity |
-| [Image coverage](image-coverage.md) | Masked hash tests, filesystem/cache/media policy probes |
 | [Prompts](prompts.md) | Archive refresh, Git paths, Nearest contract and bounded search |
 | [Publishing](publishing.md) | Browser effect, approved bytes, journal and subprocess ownership |
 | [Worker/operator](worker-operator.md) | Prober IPC, manual recovery, protocol and abrupt termination |

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{Fixture, row, solid_image};
+use common::{Fixture, identify, row, solid_image};
 use publicator::{
     config::Config,
     images::{
@@ -9,10 +9,7 @@ use publicator::{
     },
 };
 use serde_json::json;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 #[test]
 fn search_accepts_only_configured_unique_paths_and_supported_limits() {
@@ -209,6 +206,7 @@ fn discovery_skips_changed_bytes_under_a_referenced_basename() {
     published["files"][0]["basename"] = json!("changed.png");
     published["files"][0]["sha512sum"] = json!(old_hash);
     f.write(json!([published]));
+    // Arbitrary bytes: only the changed hash under a referenced basename matters here.
     fs::write(&referenced, b"edited after picking").unwrap();
 
     let candidates = find_candidates(
@@ -238,6 +236,7 @@ fn referenced_basename_blocks_delete_even_when_art_bytes_changed() {
     };
     let mut published = row(1, "APPEARED");
     published["files"][0]["basename"] = json!("changed.png");
+    // Placeholder digest: the referenced basename alone must block the delete.
     published["files"][0]["sha512sum"] = json!("f".repeat(128));
     f.write(json!([published]));
     let before_delete = fs::read(&p).unwrap();
@@ -295,16 +294,6 @@ fn cache_reuses_content_identity_and_really_resizes() {
     assert_eq!(fs::read(&t).unwrap(), cached_bytes);
 }
 
-fn identify(path: &Path, format: &str) -> String {
-    let output = std::process::Command::new("identify")
-        .args(["-format", format])
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "identify {}", path.display());
-    String::from_utf8(output.stdout).unwrap()
-}
-
 #[test]
 fn changed_source_never_fills_the_cache_under_its_old_identity() {
     let f = Fixture::new();
@@ -331,6 +320,7 @@ fn corrupt_and_symlinked_cache_entries_are_rebuilt_and_directories_refused() {
     let entry = cache.join(thumb_name(&source, &sha).unwrap());
     fs::create_dir_all(&cache).unwrap();
 
+    // Deliberately corrupt cache entry: rebuild policy, not codec fidelity.
     fs::write(&entry, b"truncated partial entry").unwrap();
     assert_eq!(ensure_thumb(&source, &cache, &sha).unwrap(), entry);
     assert_eq!(identify(&entry, "%m %wx%h"), "PNG 300x200");
@@ -456,6 +446,7 @@ fn prepared_ai_images_report_mime_for_supported_image_formats() {
         assert_eq!(prepared.mime, expected, "{extension}");
     }
     let unknown = f.path("unknown.bin");
+    // Undecodable bytes: corrupt-input rejection; format policy is in tests/images_media.rs.
     fs::write(&unknown, b"not an image").unwrap();
     assert!(validate_upload(&unknown).is_err());
 }
@@ -464,6 +455,7 @@ fn prepared_ai_images_report_mime_for_supported_image_formats() {
 fn ai_preparation_rejects_video_instead_of_claiming_image_mime() {
     let f = Fixture::new();
     let video = f.path("clip.mp4");
+    // Undecodable bytes, not a real video: decodable unsupported media is in images_media.rs.
     fs::write(&video, b"not an image").unwrap();
     assert!(prepare_ai_image(&video, &f.path(".thumbs"), None).is_err());
 }
@@ -473,6 +465,7 @@ fn basename_lookup_ignores_hidden_runtime_directories() {
     let f = Fixture::new();
     fs::create_dir_all(f.path("art")).unwrap();
     fs::create_dir_all(f.path(".thumbs")).unwrap();
+    // Arbitrary bytes: the basename index never reads content.
     fs::write(f.path("art/same.png"), b"art").unwrap();
     fs::write(f.path(".thumbs/same.png"), b"cache").unwrap();
     let result = publicator::images::index_by_basename(f.root.path()).unwrap();
