@@ -17,7 +17,7 @@ struct Args {
     #[arg(long)]
     json: Option<PathBuf>,
     /// Initial OpenRouter vision model; unsupported names fail before any provider work.
-    #[arg(long, value_parser = publicator::ui::openrouter_model)]
+    #[arg(long, value_parser = publicator::metadata::openrouter_model)]
     openrouter_model: Option<ModelOption>,
     #[arg(long, default_value_t = 300)]
     ai_timeout: u64,

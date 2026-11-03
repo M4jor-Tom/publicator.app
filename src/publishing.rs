@@ -1,7 +1,7 @@
 use crate::{
     application::Application,
     error::{Error, Result},
-    images::{prepare_upload, validate_upload},
+    images::prepare_upload,
     model::{Phase, phase},
     publish_journal::{self, PublishJournal},
     publish_protocol::{PublishJob, ScheduleParts, SessionOpen, WorkerCommand, WorkerEvent},
@@ -132,11 +132,10 @@ impl Publisher {
     pub async fn check_steps(&self) -> Result<()> {
         let mut command = Command::new(&self.worker);
         command.arg("--check-steps").arg("--skill").arg(&self.skill);
-        let mut checker = OwnedProcess::spawn(&mut command)?;
-        let status = tokio::time::timeout(self.timeouts.check_steps, checker.child.wait()).await;
-        checker.shutdown(self.timeouts.cleanup).await;
-        let status =
-            status.map_err(|_| Error::Protocol("publishing step check timed out".into()))??;
+        let status = OwnedProcess::spawn(&mut command)?
+            .shutdown(self.timeouts.check_steps, self.timeouts.cleanup)
+            .await
+            .ok_or_else(|| Error::Protocol("publishing step check timed out".into()))??;
         if status.success() {
             Ok(())
         } else {
@@ -234,9 +233,10 @@ impl Publisher {
             )
             .await;
         // `run_batch` sent `close` or dropped stdin: either way `serve` closes the browser
-        // session on its way out, so let the worker exit before the group is signalled.
-        let _ = tokio::time::timeout(self.timeouts.cleanup, worker.child.wait()).await;
-        worker.shutdown(self.timeouts.cleanup).await;
+        // session on its way out, so the worker gets a grace period before any signal.
+        worker
+            .shutdown(self.timeouts.cleanup, self.timeouts.cleanup)
+            .await;
         // A descendant that left the worker group may hold stderr open: keep what was read
         // by the deadline; dropping the set aborts the drain.
         let _ = tokio::time::timeout(self.timeouts.cleanup, drain.join_next()).await;
@@ -483,7 +483,6 @@ fn prepare_batch(
 fn stage_upload(store: &Store, artwork: &crate::artwork::Artwork) -> Result<(TempDir, PathBuf)> {
     let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
     let upload = prepare_upload(&artwork.stage(staging.path())?, staging.path())?;
-    validate_upload(&upload)?;
     Ok((staging, upload))
 }
 
@@ -742,7 +741,8 @@ fn start_worker(path: &Path, data_root: &Path) -> Result<OwnedProcess> {
 }
 
 /// A child leading its own process group (browser descendants included). `shutdown` is the
-/// cooperative path; dropping it unawaited (an aborted or interrupted publish) SIGKILLs the group.
+/// cooperative path; dropping it unawaited (an aborted or interrupted publish) SIGKILLs the group,
+/// even mid-shutdown.
 struct OwnedProcess {
     child: Child,
     group: Option<u32>,
@@ -759,8 +759,16 @@ impl OwnedProcess {
         })
     }
 
-    async fn shutdown(&mut self, cleanup_timeout: Duration) {
+    /// Waits up to `grace` for the child to exit on its own, then SIGTERMs the group, waits up to
+    /// `cleanup_timeout`, SIGKILLs it and reaps the child. Returns the exit observed within
+    /// `grace`, or `None` when the child had to be signalled.
+    async fn shutdown(
+        &mut self,
+        grace: Duration,
+        cleanup_timeout: Duration,
+    ) -> Option<std::io::Result<std::process::ExitStatus>> {
         let child = &mut self.child;
+        let exited = tokio::time::timeout(grace, child.wait()).await.ok();
         #[cfg(unix)]
         if let Some(pid) = self.group {
             // The child is the process-group leader; signal the group so browser descendants
@@ -770,13 +778,13 @@ impl OwnedProcess {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             let _ = child.wait().await;
             self.group = None;
-            return;
+            return exited;
         }
-        let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
         if child.try_wait().ok().flatten().is_none() {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
         }
+        exited
     }
 }
 
@@ -1267,12 +1275,11 @@ done"#,
         assert_eq!(receipt["applied"], true);
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum Checkpoint {
-        /// Receipt write that follows `skip` successful ones: 0 intent, 1 terminal, 2 applied.
-        Receipt(usize, crate::store::CommitFailureForTest),
-        Store(crate::store::CommitFailureForTest),
-    }
+    /// `fail_commit_for_test` arguments: the receipt write that follows `skip` successful ones
+    /// (0 intent, 1 terminal, 2 applied), or the next Store write.
+    type Checkpoint = (&'static str, usize, crate::store::CommitFailureForTest);
+    const RECEIPT: &str = "receipt.json";
+    const STORE: &str = "publications.json";
 
     #[derive(Debug)]
     enum AfterReopen {
@@ -1315,14 +1322,10 @@ done"#,
         let (root, app, store, publisher, calls) = publishing_boundary_fixture();
         let first = vec!["00000000-0000-4000-8000-000000000001".to_owned()];
         let publish = || publisher.publish(&app, request(), Arc::new(AtomicBool::new(false)));
-        match checkpoint {
-            Checkpoint::Receipt(skip, failure) => {
-                crate::publish_journal::fail_receipt_write_for_test(skip, failure)
-            }
-            Checkpoint::Store(failure) => crate::store::fail_next_commit_for_test(failure),
-        }
+        let (file, skip, failure) = checkpoint;
+        crate::store::fail_commit_for_test(file, skip, failure);
         assert!(publish().await.is_err(), "{checkpoint:?}");
-        let expected_sent = if matches!(checkpoint, Checkpoint::Receipt(0, _)) {
+        let expected_sent = if (file, skip) == (RECEIPT, 0) {
             Vec::new()
         } else {
             first
@@ -1381,22 +1384,18 @@ done"#,
             actual_url: Some("https://example.invalid/work".into()),
         };
         let cases = [
-            (Checkpoint::Receipt(0, BeforeRename), "absent", Clean),
+            ((RECEIPT, 0, BeforeRename), "absent", Clean),
             (
-                Checkpoint::Receipt(0, AfterRename),
+                (RECEIPT, 0, AfterRename),
                 "pending",
                 Blocked(ReconcileOutcome::NotSubmitted),
             ),
-            (
-                Checkpoint::Receipt(1, BeforeRename),
-                "pending",
-                Blocked(scheduled),
-            ),
-            (Checkpoint::Receipt(1, AfterRename), "scheduled", Replayed),
-            (Checkpoint::Store(BeforeRename), "scheduled", Replayed),
-            (Checkpoint::Store(AfterRename), "scheduled", Replayed),
-            (Checkpoint::Receipt(2, BeforeRename), "scheduled", Replayed),
-            (Checkpoint::Receipt(2, AfterRename), "applied", Clean),
+            ((RECEIPT, 1, BeforeRename), "pending", Blocked(scheduled)),
+            ((RECEIPT, 1, AfterRename), "scheduled", Replayed),
+            ((STORE, 0, BeforeRename), "scheduled", Replayed),
+            ((STORE, 0, AfterRename), "scheduled", Replayed),
+            ((RECEIPT, 2, BeforeRename), "scheduled", Replayed),
+            ((RECEIPT, 2, AfterRename), "applied", Clean),
         ];
         for (checkpoint, receipt, after) in cases {
             assert_checkpoint(checkpoint, receipt, after).await;

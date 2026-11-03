@@ -92,8 +92,9 @@ impl Application {
                 "generation requires SCHEDULED publication".into(),
             ));
         }
-        let image = artwork(&self.store, row)?;
-        let admitted = admitted_pair(row);
+        let image = crate::artwork::resolve(&self.store.paths().data_dir, row)?;
+        // The draft generation started from; completion overwrites only fields still holding it.
+        let admitted = WorkflowMetadata::of(row);
         self.reserve(vec![uuid.to_owned()])?;
         drop(_op);
         let _lease = Lease {
@@ -191,7 +192,7 @@ impl Application {
         let deadline = Instant::now() + request.timeout;
         let rows = self.store.read()?;
         let row = lookup(&rows, uuid)?;
-        let image = artwork(&self.store, row)?;
+        let image = crate::artwork::resolve(&self.store.paths().data_dir, row)?;
         let generated = self
             .generate_provider(&image, request, preferred.as_deref(), deadline)
             .await?;
@@ -273,12 +274,8 @@ impl Application {
         let prepared = self.prepare_image(image, deadline).await?;
         match request.source {
             Source::OpenRouter => {
-                let remaining = GenerationRequest {
-                    timeout: deadline.saturating_duration_since(Instant::now()),
-                    ..request.clone()
-                };
                 self.metadata
-                    .openrouter_generate(&prepared, &remaining, preferred)
+                    .openrouter_generate_until(&prepared, request, preferred, deadline)
                     .await
             }
             Source::Local => {
@@ -334,23 +331,6 @@ fn lookup<'a>(rows: &'a [Value], uuid: &str) -> Result<&'a Value> {
     rows.iter()
         .find(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
         .ok_or_else(|| Error::NotFound(uuid.into()))
-}
-// AI input is the recorded artwork identity, never a same-named or changed file.
-fn artwork(store: &Store, row: &Value) -> Result<Artwork> {
-    crate::artwork::resolve(&store.paths().data_dir, row)
-}
-/// The draft generation started from; completion overwrites only fields still holding it.
-fn admitted_pair(row: &Value) -> WorkflowMetadata {
-    let field = |key| {
-        row.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    WorkflowMetadata {
-        title: field("title"),
-        description: field("description"),
-    }
 }
 fn validate_request(request: &GenerationRequest) -> Result<()> {
     let allowed = VISION_MODELS.iter().any(|model| match request.source {

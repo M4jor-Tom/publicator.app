@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     ffi::OsString,
     fs::{self, File, Metadata},
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::SystemTime,
@@ -67,6 +67,16 @@ fn file_identity_from_metadata(metadata: &Metadata) -> FileIdentity {
 }
 
 pub fn file_sha512(path: &Path) -> Result<String> {
+    copy_hashing(path, &mut std::io::sink())
+}
+
+/// Copies `path` into `copy`; true when exactly the bytes written hash to `sha512`.
+pub(crate) fn copy_verified(path: &Path, copy: &mut impl Write, sha512: &str) -> Result<bool> {
+    Ok(copy_hashing(path, copy)?.eq_ignore_ascii_case(sha512))
+}
+
+/// Streams `path` into `copy` in one read and returns the SHA-512 of the bytes written.
+fn copy_hashing(path: &Path, copy: &mut impl Write) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Hasher::new(MessageDigest::sha512())
         .map_err(|e| Error::Config(format!("SHA-512 unavailable: {e}")))?;
@@ -79,6 +89,7 @@ pub fn file_sha512(path: &Path) -> Result<String> {
         hasher
             .update(&buffer[..count])
             .map_err(|e| Error::Config(e.to_string()))?;
+        copy.write_all(&buffer[..count])?;
     }
     Ok(hasher
         .finish()
@@ -157,8 +168,13 @@ pub(crate) struct References {
 impl References {
     pub(crate) fn new(rows: &[Value]) -> Self {
         Self {
-            basenames: published_basenames(rows),
-            hashes: published_hashes(rows),
+            basenames: published_file_fields(rows, &["basename", "fileName"])
+                .map(str::to_owned)
+                .collect(),
+            hashes: published_file_fields(rows, &["sha512sum", "fileSha512sum"])
+                .filter(|hash| !hash.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect(),
         }
     }
 
@@ -225,19 +241,6 @@ fn published_file_fields<'a>(rows: &'a [Value], keys: &'a [&str]) -> impl Iterat
         })
 }
 
-fn published_basenames(rows: &[Value]) -> HashSet<String> {
-    published_file_fields(rows, &["basename", "fileName"])
-        .map(str::to_owned)
-        .collect()
-}
-
-pub(crate) fn published_hashes(rows: &[Value]) -> HashSet<String> {
-    published_file_fields(rows, &["sha512sum", "fileSha512sum"])
-        .filter(|hash| !hash.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
 pub fn thumb_name(path: &Path, sha: &str) -> Result<String> {
     if sha.len() != 128 || !sha.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return Err(Error::Validation(
@@ -259,22 +262,23 @@ pub fn thumb_name(path: &Path, sha: &str) -> Result<String> {
 /// Returns the cached preview of the content identified by `sha512`, creating it from `path`
 /// only when the bytes read from `path` still hash to `sha512`.
 pub fn ensure_thumb(path: &Path, cache: &Path, sha512: &str) -> Result<PathBuf> {
-    ensure_thumb_with_hook(path, cache, sha512, || {})
+    Ok(ensure_thumb_with_hook(path, cache, sha512, || {})?.0)
 }
 
+/// `ensure_thumb`, plus the mime a reused entry was identified as (none for a new entry).
 fn ensure_thumb_with_hook(
     path: &Path,
     cache: &Path,
     sha512: &str,
     before_persist: impl FnOnce(),
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Option<String>)> {
     let target = cache.join(thumb_name(path, sha512)?);
     fs::create_dir_all(cache)?;
-    if reusable(&target)? {
-        return Ok(target);
+    if let Some(mime) = reusable(&target)? {
+        return Ok((target, Some(mime)));
     }
-    // ponytail: converts a private copy so the hashed bytes are the converted bytes; costs one
-    // source-sized copy per cache miss. Hash while streaming if large sources make that matter.
+    // ponytail: converts a private copy, hashed as it is written, so the hashed bytes are the
+    // converted bytes; costs one source-sized copy per cache miss.
     let source = verified_copy(path, cache, sha512)?;
     if !actual_mime(source.path())?.starts_with("image/") {
         return Err(Error::InvalidState(format!(
@@ -283,18 +287,18 @@ fn ensure_thumb_with_hook(
         )));
     }
     write_thumb(path, source.path(), cache, &target, before_persist)?;
-    Ok(target)
+    Ok((target, None))
 }
 
-/// Cache-entry policy: a decodable regular file is reused; a missing entry is created; corrupt
-/// bytes or a symlink are rebuilt and atomically replaced (a symlink's target is never written);
-/// any other entry type, such as a directory, is an error and is never removed.
-fn reusable(target: &Path) -> Result<bool> {
+/// Cache-entry policy: a decodable regular file is reused (its mime is returned); a missing entry
+/// is created; corrupt bytes or a symlink are rebuilt and atomically replaced (a symlink's target
+/// is never written); any other entry type, such as a directory, is an error and is never removed.
+fn reusable(target: &Path) -> Result<Option<String>> {
     match fs::symlink_metadata(target) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
-        Ok(metadata) if metadata.is_file() => Ok(actual_mime(target).is_ok()),
-        Ok(metadata) if metadata.file_type().is_symlink() => Ok(false),
+        Ok(metadata) if metadata.is_file() => Ok(actual_mime(target).ok()),
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(None),
         Ok(_) => Err(Error::InvalidState(format!(
             "thumbnail cache entry is not a regular file: {}",
             target.display()
@@ -307,12 +311,11 @@ fn verified_copy(path: &Path, cache: &Path, sha512: &str) -> Result<NamedTempFil
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    let copy = Builder::new()
+    let mut copy = Builder::new()
         .prefix(".source-")
         .suffix(&suffix)
         .tempfile_in(cache)?;
-    fs::copy(path, copy.path())?;
-    if !file_sha512(copy.path())?.eq_ignore_ascii_case(sha512) {
+    if !copy_verified(path, copy.as_file_mut(), sha512)? {
         return Err(Error::InvalidState(format!(
             "{} no longer matches its recorded content; preview refused",
             path.display()
@@ -416,8 +419,11 @@ pub fn prepare_ai_image(
         Some(sha) => sha.to_owned(),
         None => file_sha512(path)?,
     };
-    let prepared = ensure_thumb(path, cache, &sha)?;
-    let mime = actual_mime(&prepared)?;
+    let (prepared, reused_mime) = ensure_thumb_with_hook(path, cache, &sha, || {})?;
+    let mime = match reused_mime {
+        Some(mime) => mime,
+        None => actual_mime(&prepared)?,
+    };
     if !mime.starts_with("image/") {
         return Err(Error::InvalidState(format!(
             "AI input is not an image: {mime}"
@@ -481,8 +487,9 @@ pub fn validate_upload(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stages a PNG conversion when the content is WebP or the name says `.webp` (the worker
-/// rejects that suffix); any other source is uploaded as is. The conversion reads the whole
+/// Returns upload content `validate_upload` accepts: a staged PNG conversion when the content is
+/// WebP or the name says `.webp` (the worker rejects that suffix), any other decodable source as
+/// is (its format check is the one `validate_upload` applies). The conversion reads the whole
 /// sequence on purpose: an animated WebP yields no single PNG and stays rejected, rather than
 /// uploading a still of an animation.
 pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
@@ -511,7 +518,7 @@ pub fn prepare_upload(source: &Path, attempt_dir: &Path) -> Result<PathBuf> {
     }
     temp.as_file_mut().sync_all()?;
     temp.persist(&target).map_err(|e| e.error)?;
-    Ok(target)
+    validate_upload(&target).map(|()| target)
 }
 
 pub fn delete_candidate(store: &Store, authorized: &[Candidate], path: &Path) -> Result<()> {
@@ -736,25 +743,28 @@ mod bound {
 }
 
 pub fn index_by_basename(root: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
-    fn walk(root: &Path, index: &mut std::collections::HashMap<String, PathBuf>) -> Result<()> {
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                if !entry.file_name().to_string_lossy().starts_with('.') {
-                    walk(&path, index)?;
-                }
-            } else if entry.file_type()?.is_file() {
-                index
-                    .entry(entry.file_name().to_string_lossy().into_owned())
-                    .or_insert(path);
-            }
-        }
-        Ok(())
-    }
     let mut index = std::collections::HashMap::new();
-    walk(root, &mut index)?;
+    visit_visible_files(root, &mut |entry| {
+        index
+            .entry(entry.file_name().to_string_lossy().into_owned())
+            .or_insert_with(|| entry.path());
+    })?;
     Ok(index)
+}
+
+/// Visits every regular file under `dir` in directory order, skipping dot-directories; symlinks
+/// are not followed.
+pub(crate) fn visit_visible_files(dir: &Path, visit: &mut impl FnMut(&fs::DirEntry)) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
+            visit_visible_files(&entry.path(), visit)?;
+        } else if kind.is_file() {
+            visit(&entry);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -876,7 +886,7 @@ mod tests {
 
         assert!(unpublished_while_paused);
         assert_eq!(second.unwrap(), entry);
-        assert_eq!(first.unwrap(), entry);
+        assert_eq!(first.unwrap().0, entry);
         let names = fs::read_dir(&cache)
             .unwrap()
             .map(|item| item.unwrap().file_name())

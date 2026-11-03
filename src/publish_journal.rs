@@ -3,17 +3,15 @@ use crate::{
     error::{Error, Result},
     model::{Phase, deliveries_complete, phase, validate_metadata},
     publish_protocol::{PublishJob, WorkerEvent},
-    store::Store,
+    store::{Flock, Store, write_atomic},
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
 };
-use tempfile::NamedTempFile;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ApprovedSnapshot {
@@ -110,14 +108,7 @@ pub struct PublishJournal {
 
 /// Held across the browser batch or explicit human reconciliation.
 pub struct PublisherLock {
-    _file: File,
-}
-
-impl Drop for PublisherLock {
-    fn drop(&mut self) {
-        // Close alone leaves flock held by concurrent fork children until exec/exit.
-        let _ = FileExt::unlock(&self._file);
-    }
+    _lock: Flock,
 }
 
 pub fn publisher_lock(data_dir: &Path) -> Result<PublisherLock> {
@@ -138,7 +129,7 @@ pub fn publisher_lock(data_dir: &Path) -> Result<PublisherLock> {
             Error::Io(error)
         }
     })?;
-    Ok(PublisherLock { _file: file })
+    Ok(PublisherLock { _lock: Flock(file) })
 }
 
 pub fn snapshot(store: &Store, uuid: &str) -> Result<ApprovedSnapshot> {
@@ -983,63 +974,6 @@ fn create_real_directory(path: &Path, message: &str) -> Result<bool> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::Config("receipt path has no parent".into()))?;
-    let mut temp = NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.as_file_mut().sync_all()?;
-    #[cfg(test)]
-    let injected = take_receipt_failure_for_test();
-    #[cfg(test)]
-    if injected == Some(CommitFailureForTest::BeforeRename) {
-        return Err(std::io::Error::other("injected receipt pre-rename failure").into());
-    }
-    temp.persist(path).map_err(|error| Error::Io(error.error))?;
-    #[cfg(test)]
-    if injected == Some(CommitFailureForTest::AfterRename) {
-        return Err(Error::DurabilityUncertain {
-            path: path.to_owned(),
-            source: std::io::Error::other("injected receipt post-rename sync failure"),
-        });
-    }
-    File::open(parent)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|source| Error::DurabilityUncertain {
-            path: path.to_owned(),
-            source,
-        })
-}
-
-#[cfg(test)]
-use crate::store::CommitFailureForTest;
-
-#[cfg(test)]
-thread_local! {
-    static RECEIPT_FAILURE_FOR_TEST: std::cell::Cell<Option<(usize, CommitFailureForTest)>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Fail the receipt write that follows `skip` successful ones on this thread
-/// (per job: 0 = intent, 1 = terminal, 2 = applied).
-#[cfg(test)]
-pub(crate) fn fail_receipt_write_for_test(skip: usize, failure: CommitFailureForTest) {
-    RECEIPT_FAILURE_FOR_TEST.with(|slot| slot.set(Some((skip, failure))));
-}
-
-#[cfg(test)]
-fn take_receipt_failure_for_test() -> Option<CommitFailureForTest> {
-    RECEIPT_FAILURE_FOR_TEST.with(|slot| match slot.take() {
-        Some((0, failure)) => Some(failure),
-        Some((skip, failure)) => {
-            slot.set(Some((skip - 1, failure)));
-            None
-        }
-        None => None,
-    })
 }
 
 #[cfg(test)]

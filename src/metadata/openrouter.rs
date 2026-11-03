@@ -166,6 +166,16 @@ impl MetadataClient {
         preferred: Option<&str>,
     ) -> Result<Generated> {
         let deadline = tokio::time::Instant::now() + request.timeout;
+        self.openrouter_generate_until(image, request, preferred, deadline)
+            .await
+    }
+    pub(crate) async fn openrouter_generate_until(
+        &self,
+        image: &PreparedImage,
+        request: &super::GenerationRequest,
+        preferred: Option<&str>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Generated> {
         let selected = preferred.unwrap_or(&request.model.openrouter_name);
         let selected = selected.strip_prefix("openrouter/").unwrap_or(selected);
         let generated = match self

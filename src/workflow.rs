@@ -34,6 +34,22 @@ pub struct Metadata {
     pub description: String,
 }
 
+impl Metadata {
+    /// A row's saved title and description; an absent field reads as empty.
+    pub fn of(row: &Value) -> Self {
+        let field = |key| {
+            row.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Self {
+            title: field("title"),
+            description: field("description"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MetadataPatch {
     pub title: Option<String>,
@@ -394,16 +410,7 @@ fn select_platform(
     explicit: bool,
     config: &Config,
 ) -> Result<()> {
-    let title = pub_
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let description = pub_
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let Metadata { title, description } = Metadata::of(pub_);
     let profile_name = pub_
         .get("scheduleProfile")
         .and_then(Value::as_str)

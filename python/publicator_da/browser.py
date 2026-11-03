@@ -192,7 +192,8 @@ def _submit_entry(page, job, before_commit):
         combo.scroll_into_view_if_needed()
         for gallery in job["galleries"]:
             if gallery not in _combo_labels(combo): _pick_combo(page, combo, gallery)
-        if missing := [gallery for gallery in job["galleries"] if gallery not in _combo_labels(combo)]:
+        selected = set(_combo_labels(combo))
+        if missing := [gallery for gallery in job["galleries"] if gallery not in selected]:
             raise RuntimeError(f"galleries did not stay selected: {missing}")
     _pick_schedule(page, job["schedule"])
     set_checkbox(page, "matureContent", True)

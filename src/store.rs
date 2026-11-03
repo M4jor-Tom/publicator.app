@@ -8,7 +8,7 @@ use jsonschema::Validator;
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 use tempfile::NamedTempFile;
@@ -43,24 +43,27 @@ impl Store {
 
     pub fn read(&self) -> Result<Publications> {
         let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let lock = self.lock_file()?;
-        lock.lock_shared()?;
+        let _lock = self.lock(FileExt::lock_shared)?;
         self.read_unlocked()
     }
 
     pub fn mutate<R>(&self, f: impl FnOnce(&mut Publications) -> Result<R>) -> Result<R> {
         let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let lock = self.lock_file()?;
-        lock.lock_exclusive()?;
+        let _lock = self.lock(FileExt::lock_exclusive)?;
         self.mutate_unlocked(f)
     }
 
     pub fn with_exclusive_read<R>(&self, f: impl FnOnce(&Publications) -> Result<R>) -> Result<R> {
         let _process = MUTATION_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let lock = self.lock_file()?;
-        lock.lock_exclusive()?;
+        let _lock = self.lock(FileExt::lock_exclusive)?;
         let rows = self.read_unlocked()?;
         f(&rows)
+    }
+
+    fn lock(&self, how: fn(&File) -> std::io::Result<()>) -> Result<Flock> {
+        let file = self.lock_file()?;
+        how(&file)?;
+        Ok(Flock(file))
     }
 
     fn read_unlocked(&self) -> Result<Publications> {
@@ -78,15 +81,7 @@ impl Store {
         let mut rows = self.read_unlocked()?;
         let output = f(&mut rows)?;
         validate_publications_with(&rows, &self.config, &self.validator)?;
-        let parent = self
-            .paths
-            .json
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let temp = stage(parent, &rows)?;
-        commit(temp, &self.paths.json, parent, |parent| {
-            File::open(parent)?.sync_all()
-        })?;
+        write_atomic(&self.paths.json, &serde_json::to_vec_pretty(&rows)?)?;
         Ok(output)
     }
 
@@ -105,32 +100,47 @@ impl Store {
     }
 }
 
-/// Writes and syncs `rows` to a temporary file beside the database; dropping it on error removes it.
-fn stage(parent: &std::path::Path, rows: &Publications) -> Result<NamedTempFile> {
+/// A held flock, released explicitly on drop: closing alone leaves it held by concurrent fork
+/// children (magick, git, the browser worker) until they exec or exit.
+pub(crate) struct Flock(pub(crate) File);
+
+impl Drop for Flock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+/// Replaces `target` with `bytes`: written and synced to a temporary file beside it (removed on
+/// error), renamed over it, then the directory synced. A failure after the rename is
+/// `DurabilityUncertain`: the new bytes may be visible but are not confirmed durable.
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(temp.as_file_mut(), rows)?;
+    temp.write_all(bytes)?;
     #[cfg(test)]
-    injected_failure_for_test(CommitFailureForTest::StagingWrite)?;
-    temp.as_file_mut().flush()?;
+    injected_failure_for_test(target, CommitFailureForTest::StagingWrite)?;
+    temp.flush()?;
     #[cfg(test)]
-    injected_failure_for_test(CommitFailureForTest::Flush)?;
-    temp.as_file_mut().sync_all()?;
+    injected_failure_for_test(target, CommitFailureForTest::Flush)?;
+    temp.as_file().sync_all()?;
     #[cfg(test)]
-    injected_failure_for_test(CommitFailureForTest::FileSync)?;
-    Ok(temp)
+    injected_failure_for_test(target, CommitFailureForTest::FileSync)?;
+    commit(temp, target, parent, |parent| {
+        File::open(parent)?.sync_all()
+    })
 }
 
 fn commit(
     temp: NamedTempFile,
-    target: &std::path::Path,
-    parent: &std::path::Path,
-    sync_parent: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+    target: &Path,
+    parent: &Path,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
     #[cfg(test)]
-    injected_failure_for_test(CommitFailureForTest::BeforeRename)?;
+    injected_failure_for_test(target, CommitFailureForTest::BeforeRename)?;
     temp.persist(target).map_err(|e| Error::Io(e.error))?;
     #[cfg(test)]
-    if let Err(source) = injected_failure_for_test(CommitFailureForTest::AfterRename) {
+    if let Err(source) = injected_failure_for_test(target, CommitFailureForTest::AfterRename) {
         return Err(Error::DurabilityUncertain {
             path: target.to_owned(),
             source,
@@ -166,24 +176,40 @@ impl CommitFailureForTest {
 }
 
 #[cfg(test)]
+type ArmedFailure = (&'static str, usize, CommitFailureForTest);
+
+#[cfg(test)]
 thread_local! {
-    static COMMIT_FAILURE_FOR_TEST: std::cell::Cell<Option<CommitFailureForTest>> = const { std::cell::Cell::new(None) };
+    static COMMIT_FAILURE_FOR_TEST: std::cell::Cell<Option<ArmedFailure>> = const { std::cell::Cell::new(None) };
 }
 
+/// Fails `point` in the write of a file named `file` that follows `skip` successful ones on this
+/// thread (a publish job writes `receipt.json` as 0 intent, 1 terminal, 2 applied).
 #[cfg(test)]
-pub(crate) fn fail_next_commit_for_test(failure: CommitFailureForTest) {
-    COMMIT_FAILURE_FOR_TEST.with(|slot| slot.set(Some(failure)));
+pub(crate) fn fail_commit_for_test(file: &'static str, skip: usize, point: CommitFailureForTest) {
+    COMMIT_FAILURE_FOR_TEST.with(|slot| slot.set(Some((file, skip, point))));
 }
 
-/// Fails, once, the commit step armed by `fail_next_commit_for_test`; other steps run normally.
+/// Fails `point` in the next `publications.json` Store write on this thread.
 #[cfg(test)]
-fn injected_failure_for_test(point: CommitFailureForTest) -> std::io::Result<()> {
-    COMMIT_FAILURE_FOR_TEST.with(|slot| {
-        if slot.get() != Some(point) {
-            return Ok(());
+pub(crate) fn fail_next_commit_for_test(point: CommitFailureForTest) {
+    fail_commit_for_test("publications.json", 0, point);
+}
+
+/// Fails, once, the write step armed by `fail_commit_for_test`; other files and steps run normally.
+#[cfg(test)]
+fn injected_failure_for_test(target: &Path, point: CommitFailureForTest) -> std::io::Result<()> {
+    COMMIT_FAILURE_FOR_TEST.with(|slot| match slot.get() {
+        Some((file, skip, armed))
+            if armed == point && target.file_name() == Some(file.as_ref()) =>
+        {
+            slot.set(skip.checked_sub(1).map(|left| (file, left, armed)));
+            if skip > 0 {
+                return Ok(());
+            }
+            Err(std::io::Error::other(point.message()))
         }
-        slot.set(None);
-        Err(std::io::Error::other(point.message()))
+        _ => Ok(()),
     })
 }
 
@@ -259,24 +285,7 @@ mod commit_tests {
 
     /// A fresh descriptor can take the exclusive lock only if the failed writer released it.
     fn assert_unlocked_and_clean(dir: &std::path::Path, store: &Store) {
-        // ponytail: parallel lib tests fork children (magick, git) that inherit every open
-        // descriptor until exec drops it (CLOEXEC), so a lock we released can look held for a
-        // few milliseconds; retry briefly instead of serializing the suite.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match FileExt::try_lock_exclusive(&store.lock_file().unwrap()) {
-                Ok(()) => break,
-                Err(error) if std::time::Instant::now() < deadline => {
-                    assert_eq!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock,
-                        "Store lock released"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(error) => panic!("Store lock released: {error}"),
-            }
-        }
+        FileExt::try_lock_exclusive(&store.lock_file().unwrap()).expect("Store lock released");
         assert_eq!(
             entries(dir),
             ["publications.json", "publications.json.lock"],

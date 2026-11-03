@@ -91,19 +91,6 @@ pub struct UiOptions {
     pub ai_timeout: Duration,
 }
 
-/// The supported vision model an OpenRouter name selects, with or without its `openrouter/`
-/// prefix; any other name is refused before provider work.
-pub fn openrouter_model(name: &str) -> Result<ModelOption, String> {
-    VISION_MODELS
-        .iter()
-        .find(|model| {
-            model.openrouter_name == name
-                || model.openrouter_name.strip_prefix("openrouter/") == Some(name)
-        })
-        .cloned()
-        .ok_or_else(|| format!("unsupported OpenRouter model {name:?}"))
-}
-
 pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Result {
     iced::application(
         move || App::new(application.clone(), options.clone()),
@@ -1289,7 +1276,7 @@ impl App {
                 .iter()
                 .find(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid.as_str()))
             {
-                let (title, description) = row_metadata(row);
+                let workflow::Metadata { title, description } = workflow::Metadata::of(row);
                 draft.rebase(title, description);
             }
             draft.is_dirty() || draft.is_saving()
@@ -1576,7 +1563,10 @@ impl App {
             .drafts
             .get(&uuid)
             .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-            .or_else(|| self.publication(&uuid).map(row_metadata));
+            .or_else(|| {
+                let saved = workflow::Metadata::of(self.publication(&uuid)?);
+                Some((saved.title, saved.description))
+            });
         if let Some((title, description)) = current {
             let draft = self
                 .drafts
@@ -2791,19 +2781,6 @@ fn app_theme(_: &App) -> Theme {
     THEME.clone()
 }
 
-fn row_metadata(row: &Value) -> (String, String) {
-    (
-        row.get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .into(),
-        row.get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .into(),
-    )
-}
-
 fn set_option(options: &mut Vec<String>, value: String, selected: bool) {
     if selected && !options.contains(&value) {
         options.push(value);
@@ -3758,12 +3735,17 @@ done
         app.drafts
             .get(uuid)
             .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-            .unwrap_or_else(|| row_metadata(app.publication(uuid).unwrap()))
+            .unwrap_or_else(|| pair(app.publication(uuid).unwrap()))
     }
 
     fn stored(app: &App, uuid: &str) -> (String, String) {
         let rows = app.application.store().read().unwrap();
-        row_metadata(rows.iter().find(|row| row["uuid"] == uuid).unwrap())
+        pair(rows.iter().find(|row| row["uuid"] == uuid).unwrap())
+    }
+
+    fn pair(row: &Value) -> (String, String) {
+        let saved = workflow::Metadata::of(row);
+        (saved.title, saved.description)
     }
 
     #[tokio::test(flavor = "current_thread")]

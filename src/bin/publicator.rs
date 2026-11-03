@@ -3,7 +3,10 @@ use publicator::{
     application::Application,
     config::{Config, Paths},
     error::{Error, Result},
-    metadata::{Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS},
+    metadata::{
+        Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS,
+        openrouter_model,
+    },
     model::{GENERATE_MARKER, Phase, phase},
     prompts::{PromptArchive, audit},
     publish_journal::{self, PublishJournal, ReconcileOutcome},
@@ -119,22 +122,19 @@ fn metadata_client() -> MetadataClient {
     MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"))
 }
 fn choose_model(source: Source, requested: Option<&str>) -> Result<ModelOption> {
-    let candidates = VISION_MODELS.iter().filter(|m| match source {
+    match source {
         Source::OpenRouter => {
-            m.openrouter_name == requested.unwrap_or("openrouter/google/gemma-4-26b-a4b-it:free")
-                || m.openrouter_name.strip_prefix("openrouter/") == requested
+            openrouter_model(requested.unwrap_or("openrouter/google/gemma-4-26b-a4b-it:free"))
+                .map_err(Error::Validation)
         }
-        Source::Local => m.ollama_name == requested.unwrap_or(""),
-    });
-    candidates.into_iter().next().cloned().ok_or_else(|| {
-        Error::Validation(match source {
-            Source::Local => "local generation requires a catalogue --model".into(),
-            Source::OpenRouter => format!(
-                "unknown OpenRouter model {:?}",
-                requested.unwrap_or("openrouter/google/gemma-4-26b-a4b-it:free")
-            ),
-        })
-    })
+        Source::Local => VISION_MODELS
+            .iter()
+            .find(|m| Some(m.ollama_name.as_str()) == requested)
+            .cloned()
+            .ok_or_else(|| {
+                Error::Validation("local generation requires a catalogue --model".into())
+            }),
+    }
 }
 async fn run() -> Result<()> {
     match Cli::parse().command {

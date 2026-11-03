@@ -44,6 +44,19 @@ pub static VISION_MODELS: LazyLock<[ModelOption; 2]> = LazyLock::new(|| {
     ]
 });
 
+/// The supported vision model an OpenRouter name selects, with or without its `openrouter/`
+/// prefix; any other name is refused before provider work.
+pub fn openrouter_model(name: &str) -> std::result::Result<ModelOption, String> {
+    VISION_MODELS
+        .iter()
+        .find(|model| {
+            model.openrouter_name == name
+                || model.openrouter_name.strip_prefix("openrouter/") == Some(name)
+        })
+        .cloned()
+        .ok_or_else(|| format!("unsupported OpenRouter model {name:?}"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenerationRequest {
     pub source: Source,

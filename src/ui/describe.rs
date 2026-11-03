@@ -176,12 +176,12 @@ fn local_fit_view(state: &App) -> Element<'_, Message> {
 }
 
 fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
-    let (saved_title, saved_description) = super::row_metadata(row);
+    let saved = crate::workflow::Metadata::of(row);
     let (title, description) = state
         .drafts
         .get(&uuid)
         .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-        .unwrap_or((saved_title, saved_description));
+        .unwrap_or((saved.title, saved.description));
     let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![

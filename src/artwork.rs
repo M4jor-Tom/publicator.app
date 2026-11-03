@@ -1,11 +1,11 @@
 //! A publication's artwork, found by its recorded content identity rather than by name alone.
 use crate::{
     error::{Error, Result},
-    images::file_sha512,
+    images::{copy_verified, file_sha512, visit_visible_files},
 };
 use serde_json::Value;
 use std::{
-    fs,
+    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -35,7 +35,11 @@ pub fn resolve(data_dir: &Path, row: &Value) -> Result<Artwork> {
         .or_else(|| field("fileSha512sum"))
         .ok_or_else(|| Error::Validation("artwork hash is missing".into()))?;
     let mut named = Vec::new();
-    find_named(data_dir, basename, &mut named)?;
+    visit_visible_files(data_dir, &mut |entry| {
+        if entry.file_name() == basename {
+            named.push(entry.path());
+        }
+    })?;
     if named.is_empty() {
         return Err(Error::NotFound(format!("artwork {basename}")));
     }
@@ -58,25 +62,11 @@ impl Artwork {
             .file_name()
             .ok_or_else(|| Error::Validation("artwork has no file name".into()))?;
         let staged = dir.join(name);
-        fs::copy(&self.path, &staged)?;
-        if !file_sha512(&staged)?.eq_ignore_ascii_case(&self.sha512) {
+        if !copy_verified(&self.path, &mut File::create(&staged)?, &self.sha512)? {
             return Err(Error::ReconciliationRequired(
                 "artwork content changed while staging the upload".into(),
             ));
         }
         Ok(staged)
     }
-}
-
-fn find_named(dir: &Path, basename: &str, found: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
-            find_named(&entry.path(), basename, found)?;
-        } else if kind.is_file() && entry.file_name() == basename {
-            found.push(entry.path());
-        }
-    }
-    Ok(())
 }
