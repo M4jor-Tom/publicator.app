@@ -34,20 +34,35 @@ fn pick_is_idempotent_by_content_and_creates_no_platform_or_metadata() {
 
 #[test]
 fn pick_deduplicates_legacy_hash_case_insensitively_and_keeps_existing_order() {
+    for list in ["files", "previewFilesIfNotFree"] {
+        let f = Fixture::new();
+        let c = candidate(&f, "already.png");
+        let mut existing = row(1, "PICKED");
+        let legacy = Value::String(c.sha512.to_ascii_uppercase());
+        existing[list] = json!([{"basename": "1.png", "fileSha512sum": legacy}]);
+        f.write(json!([existing]));
+        assert_eq!(pick(&f.store, &c, 1_800_000_000).unwrap(), common::id(1));
+        assert_eq!(f.store.read().unwrap().len(), 1, "{list}");
+    }
+}
+
+#[test]
+fn pick_refuses_a_candidate_whose_bytes_changed_since_discovery() {
     let f = Fixture::new();
-    let c = candidate(&f, "already.png");
-    let mut existing = row(1, "PICKED");
-    existing["files"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("sha512sum");
-    existing["files"][0]["fileSha512sum"] = Value::String(c.sha512.to_ascii_uppercase());
-    f.write(json!([existing]));
+    let path = f.colored("art.png", "red");
+    let c = Candidate {
+        sha512: file_sha512(&path).unwrap(),
+        path,
+    };
+    let before = std::fs::metadata(&c.path).unwrap().len();
+    common::solid_image(&c.path, "blue", 2, 2);
     assert_eq!(
-        pick(&f.store, &c, 1_800_000_000).unwrap(),
-        "00000000-0000-4000-8000-000000000001"
+        std::fs::metadata(&c.path).unwrap().len(),
+        before,
+        "same-size"
     );
-    assert_eq!(f.store.read().unwrap().len(), 1);
+    assert!(pick(&f.store, &c, 1_800_000_000).is_err());
+    assert!(f.store.read().unwrap().is_empty());
 }
 
 #[test]
@@ -58,6 +73,10 @@ fn custom_date_pins_without_inventing_a_profile_and_approval_freezes_it() {
     publication["scheduleProfile"] = json!("removed-profile");
     f.write(json!([publication]));
     let custom = epoch("2027-01-01T18:30:00Z");
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    let removed = DateEdit::Preset("removed-profile".into());
+    assert!(edit_date(&f.store, &common::id(1), removed, custom).is_err());
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
     edit_date(
         &f.store,
         &common::id(1),

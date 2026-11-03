@@ -65,6 +65,8 @@ fn recorded(record: &Path, kind: &str) -> Vec<Value> {
 fn fixture() -> Fixture {
     let mut config = Config {
         tags: Some("tags.txt".into()),
+        tiers: vec!["Gold".into(), "Silver".into()],
+        galleries: vec!["Art".into(), "Artwork".into()],
         ..Config::default()
     };
     config
@@ -119,7 +121,10 @@ async fn publish(f: &Fixture, worker: &Path) -> Result<PublishReport> {
 async fn valid_publication_is_scheduled_by_the_real_worker_with_one_zone_and_a_staged_copy() {
     let tools = tempfile::tempdir().unwrap();
     let f = fixture();
-    let publication = with_image(&f);
+    let mut publication = with_image(&f);
+    let (tiers, galleries) = (json!(["Silver", "Gold"]), json!(["Artwork", "Art"]));
+    publication["apparitions"][0]["tiers"] = tiers.clone();
+    publication["apparitions"][0]["galleries"] = galleries.clone();
     let artwork_sha512 = publication["files"][0]["sha512sum"].clone();
     f.write(json!([publication]));
     let (worker, record) = launcher(tools.path(), "valid", "scheduled");
@@ -134,6 +139,7 @@ async fn valid_publication_is_scheduled_by_the_real_worker_with_one_zone_and_a_s
     let job = &submit[1];
     assert_eq!(job["uuid"], id(1));
     assert_eq!(job["schedule"]["timezone"], open[1]["timezone"]);
+    assert_eq!((&job["tiers"], &job["galleries"]), (&tiers, &galleries));
     // The worker gets a verified per-attempt copy under `.publicator/`, never the original.
     let image = Path::new(job["image_path"].as_str().unwrap());
     assert!(image.starts_with(data_dir.join(".publicator")), "{image:?}");
@@ -142,6 +148,20 @@ async fn valid_publication_is_scheduled_by_the_real_worker_with_one_zone_and_a_s
         submit[2], artwork_sha512,
         "staged bytes differ from the artwork"
     );
+}
+
+#[tokio::test]
+async fn a_failure_before_commit_from_the_real_worker_may_be_retried() {
+    let tools = tempfile::tempdir().unwrap();
+    let f = fixture();
+    f.write(json!([with_image(&f)]));
+    let (worker, record) = launcher(tools.path(), "failed", "failed");
+    for sends in [1, 2] {
+        let report = publish(&f, &worker).await.unwrap();
+        assert_eq!((report.published, report.failed), (0, 1));
+        assert_eq!(recorded(&record, "submit").len(), sends);
+    }
+    assert_worker_reaped(&record, "failed");
 }
 
 /// Builds a publication row in the data-dir fixture; the second fixture lies outside it.

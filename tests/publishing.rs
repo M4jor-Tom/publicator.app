@@ -411,25 +411,34 @@ done"#,
 #[tokio::test]
 async fn worker_stderr_is_drained_under_pressure_and_retained_in_report() {
     let f = configured_fixture();
+    // The worker leads its own group; the witness lets the watchdog kill it if the run stalls.
+    let pids = f.path("worker.pids");
+    let _watchdog = common::GroupWatchdog(&pids);
     let worker = fake_worker(
         &f,
-        r#"while IFS= read -r line; do
-case "$line" in *'"type":"open"'*) head -c 200000 /dev/zero | tr '\000' E >&2; echo '{"protocol":1,"type":"ready"}' ;;
-*'"type":"submit"'*) attempt=$(printf '%s' "$line" | sed -n 's/.*"attempt_id":"\([^"]*\)".*/\1/p'); uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p'); printf '{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fake"}\n' "$attempt" "$uuid";;
+        &format!(
+            r#"echo "$$ $$" > '{}'
+while IFS= read -r line; do
+case "$line" in *'"type":"open"'*) head -c 200000 /dev/zero | tr '\000' E >&2; echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) attempt=$(printf '%s' "$line" | sed -n 's/.*"attempt_id":"\([^"]*\)".*/\1/p'); uuid=$(printf '%s' "$line" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p'); printf '{{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fake"}}\n' "$attempt" "$uuid";;
 *'"type":"close"'*) exit 0;; esac
 done"#,
+            pids.display()
+        ),
     );
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
+    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
+    let request = PublishRequest {
+        uuids: None,
+        headless: true,
+    };
+    let publish = app.publish(request, Arc::new(AtomicBool::new(false)));
+    let report = tokio::time::timeout(Duration::from_secs(60), publish)
         .await
+        .expect("a stderr-filling worker cannot stall the run")
         .unwrap();
+    let (group, _) = common::gate_pids(&pids).expect("worker PID witness");
+    let gone = || common::live_process_group_members(group).is_empty();
+    assert!(common::eventually(Duration::from_secs(5), gone));
     assert_eq!(report.failed, 1);
     let error = report.error.unwrap();
     assert!(error.contains('E'));
@@ -439,6 +448,8 @@ done"#,
 async fn shutdown_terminates_worker_descendants() {
     let f = configured_fixture();
     let worker_info = f.path("worker.info");
+    // "<worker pid = group> <group>": the watchdog kills the spinning group on any failure.
+    let _watchdog = common::GroupWatchdog(&worker_info);
     let descendant_info = f.path("descendant.info");
     let descendant_pid_file = f.path("descendant.pid");
     let term_file = f.path("descendant.term");
@@ -805,101 +816,64 @@ done"#,
     assert_eq!(receipt["terminal"]["type"], "scheduled");
     assert_eq!(receipt["applied"], false);
 }
+/// A well-formed `failed` terminal for the job, as a printf format of its attempt id and uuid.
+const FAILED: &str =
+    r#"{"protocol":1,"type":"failed","attempt_id":"%s","uuid":"%s","error":"fake"}"#;
+
+/// Worker replies to a submit. Only the well-formed `failed` control may be retried; any other
+/// terminal (unparsable, overlong, invalid UTF-8, wrong version or identity) leaves the attempt
+/// unknown and is never sent again.
 #[tokio::test]
-async fn overlong_worker_terminal_is_unknown_and_not_retried() {
-    let f = configured_fixture();
-    let worker = fake_worker(
-        &f,
-        r#"while IFS= read -r line; do
-case "$line" in
-*'"type":"open"'*) echo '{"protocol":1,"type":"ready"}' ;;
-*'"type":"submit"'*) head -c 1048577 /dev/zero | tr '\000' x ;;
-*'"type":"close"'*) exit 0 ;;
-esac
-done"#,
-    );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    assert_eq!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .unwrap()
-            .unknown,
-        1
-    );
-    assert!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .is_err()
-    );
-}
-#[tokio::test]
-async fn malformed_worker_terminal_is_unknown_and_not_retried() {
-    let f = configured_fixture();
-    let calls = f.path("calls.log");
-    let worker = fake_worker(
-        &f,
-        &format!(
-            r#"while IFS= read -r line; do
+async fn unusable_worker_terminals_are_unknown_and_never_resent() {
+    let reply = |frame: &str| format!(r#"printf '{frame}\n' "$attempt" "$uuid""#);
+    for (name, command) in [
+        ("control", reply(FAILED)),
+        ("malformed", "echo not-json".into()),
+        (
+            "overlong",
+            r"head -c 1048577 /dev/zero | tr '\000' x".into(),
+        ),
+        ("invalid UTF-8", reply(&FAILED.replace("fake", r"\377"))),
+        ("wrong version", reply(&FAILED.replace(":1,", ":2,"))),
+        (
+            "wrong attempt",
+            reply(&FAILED.replace(r#"%s","uuid"#, r#"%s-other","uuid"#)),
+        ),
+        (
+            "wrong uuid",
+            reply(&FAILED.replace(r#"%s","error"#, r#"%s-other","error"#)),
+        ),
+    ] {
+        let f = configured_fixture();
+        let calls = f.path("calls.log");
+        let worker = fake_worker(
+            &f,
+            &format!(
+                r#"while IFS= read -r line; do
 case "$line" in
 *'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
-*'"type":"submit"'*) echo called >> '{}'; echo 'not-json' ;;
+*'"type":"submit"'*) echo called >> '{}'; attempt=$(printf '%s' "$line" | jq -r .attempt_id); uuid=$(printf '%s' "$line" | jq -r .uuid); {command} ;;
 *'"type":"close"'*) exit 0 ;;
 esac
 done"#,
-            calls.display()
-        ),
-    );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    assert_eq!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .unwrap()
-            .unknown,
-        1
-    );
-    assert!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .is_err()
-    );
-    assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
-}
-#[tokio::test]
-async fn mismatched_worker_terminal_is_unknown_and_not_retried() {
-    let f = configured_fixture();
-    let worker = fake_worker(
-        &f,
-        r#"while IFS= read -r line; do
-case "$line" in
-*'"type":"open"'*) echo '{"protocol":1,"type":"ready"}' ;;
-*'"type":"submit"'*) echo '{"protocol":1,"type":"failed","attempt_id":"00000000-0000-4000-8000-000000000099","uuid":"00000000-0000-4000-8000-000000000001","error":"wrong attempt"}' ;;
-*'"type":"close"'*) exit 0 ;;
-esac
-done"#,
-    );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    let report = app
-        .publish(request(), Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
-    assert_eq!(report.unknown, 1);
-    assert!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .is_err()
-    );
+                calls.display()
+            ),
+        );
+        let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
+        let request = || PublishRequest {
+            uuids: None,
+            headless: true,
+        };
+        let cancel = || Arc::new(AtomicBool::new(false));
+        let control = name == "control";
+        let (failed, unknown, sends) = if control { (1, 0, 2) } else { (0, 1, 1) };
+        let first = app.publish(request(), cancel()).await.unwrap();
+        assert_eq!((first.failed, first.unknown), (failed, unknown), "{name}");
+        let retry = app.publish(request(), cancel()).await;
+        assert_eq!(retry.is_ok(), control, "{name} retry");
+        let sent = std::fs::read_to_string(&calls).unwrap().lines().count();
+        assert_eq!(sent, sends, "{name} sends");
+    }
 }
 #[test]
 fn publisher_lock_holder_child() {
@@ -919,19 +893,24 @@ async fn another_process_publisher_lock_prevents_worker_start() {
     let f = configured_fixture();
     let ready = f.path("lock-ready");
     let release = f.path("lock-release");
-    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "publisher_lock_holder_child", "--nocapture"])
-        .env("PUBLICATOR_PUBLISH_LOCK_ROOT", f.root.path())
-        .env("PUBLICATOR_PUBLISH_LOCK_READY", &ready)
-        .env("PUBLICATOR_PUBLISH_LOCK_RELEASE", &release)
-        .spawn()
-        .unwrap();
-    for _ in 0..200 {
-        if ready.exists() {
-            break;
+    /// Kills and reaps the lock holder even when an assertion fails first.
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    let mut holder = Reaped(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "publisher_lock_holder_child", "--nocapture"])
+            .env("PUBLICATOR_PUBLISH_LOCK_ROOT", f.root.path())
+            .env("PUBLICATOR_PUBLISH_LOCK_READY", &ready)
+            .env("PUBLICATOR_PUBLISH_LOCK_RELEASE", &release)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(common::eventually(Duration::from_secs(10), || ready.exists()));
     let marker = f.path("started");
     let worker = fake_worker(&f, &format!("touch '{}'", marker.display()));
     let result = app(&f)
@@ -945,8 +924,7 @@ async fn another_process_publisher_lock_prevents_worker_start() {
         )
         .await;
     std::fs::write(release, "release").unwrap();
-    assert!(holder.wait().unwrap().success());
-    assert!(ready.exists());
+    assert!(holder.0.wait().unwrap().success());
     assert!(matches!(result, Err(publicator::error::Error::Busy(_))));
     assert!(!marker.exists());
 }
@@ -963,18 +941,19 @@ async fn cancellation_finishes_current_artwork_and_leaves_later_target_unattempt
     let mut rows = f.read();
     rows.as_array_mut().unwrap().push(item);
     f.write(rows);
-    let marker = f.path("in-submit");
+    let (marker, release) = (f.path("in-submit"), f.path("release"));
     let worker = fake_worker(
         &f,
         &format!(
             r#"while IFS= read -r line; do
 case "$line" in
 *'"type":"open"'*) echo '{{"protocol":1,"type":"ready"}}' ;;
-*'"type":"submit"'*) touch '{}'; sleep 0.2; printf '%s' "$line" | jq -c '{{protocol:1,type:"scheduled",attempt_id,uuid}}' ;;
+*'"type":"submit"'*) touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; printf '%s' "$line" | jq -c '{{protocol:1,type:"scheduled",attempt_id,uuid}}' ;;
 *'"type":"close"'*) exit 0 ;;
 esac
 done"#,
-            marker.display()
+            marker.display(),
+            release.display()
         ),
     );
     let cancel = Arc::new(AtomicBool::new(false));
@@ -990,16 +969,50 @@ done"#,
         )
         .await
     });
-    for _ in 0..100 {
-        if marker.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(marker.exists());
+    let entered = tokio::task::spawn_blocking(move || {
+        common::eventually(Duration::from_secs(10), || marker.exists())
+    });
+    assert!(entered.await.unwrap(), "the first submit never started");
     cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    std::fs::write(&release, "release").unwrap();
     let report = task.await.unwrap().unwrap();
     assert_eq!((report.published, report.unattempted), (1, 1));
+}
+#[tokio::test]
+async fn an_unreadable_receipt_blocks_publishing_before_any_worker_starts() {
+    // The control has no receipt, so its worker starts (and then fails to become ready).
+    for receipt in [None, Some(&b""[..]), Some(b"{")] {
+        let f = configured_fixture();
+        let attempt = f.path(".publicator/publish/00000000-0000-4000-8000-000000000777");
+        if let Some(receipt) = receipt {
+            std::fs::create_dir_all(&attempt).unwrap();
+            std::fs::write(attempt.join("receipt.json"), receipt).unwrap();
+        }
+        let marker = f.path("started");
+        let worker = fake_worker(&f, &format!("touch '{}'", marker.display()));
+        let result = app(&f)
+            .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
+            .publish(
+                PublishRequest {
+                    uuids: None,
+                    headless: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+        assert!(result.is_err(), "{receipt:?}");
+        assert_eq!(
+            marker.exists(),
+            receipt.is_none(),
+            "{receipt:?} worker start"
+        );
+        if let Some(receipt) = receipt {
+            assert_eq!(
+                std::fs::read(attempt.join("receipt.json")).unwrap(),
+                receipt
+            );
+        }
+    }
 }
 #[tokio::test]
 async fn publishing_requires_configured_publisher_on_application() {

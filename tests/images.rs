@@ -303,6 +303,8 @@ fn changed_source_never_fills_the_cache_under_its_old_identity() {
     let preserved = f.path("preserved-red.png");
     fs::copy(&source, &preserved).unwrap();
     solid_image(&source, "blue", 8, 8);
+    let len = |path: &PathBuf| fs::metadata(path).unwrap().len();
+    assert_eq!(len(&source), len(&preserved), "a same-size replacement");
     let cache = f.path(".thumbs");
 
     assert!(ensure_thumb(&source, &cache, &red_sha).is_err());

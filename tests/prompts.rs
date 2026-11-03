@@ -66,6 +66,7 @@ fn superseded_filename_resolves_old_content_not_head() {
         .unwrap()
     {
         PromptMatch::Exact(v) => {
+            assert_eq!(v.digest, digest, "the grammar digest, not a Git object id");
             assert_eq!(v.text, "old prompt");
             assert_eq!(v.paths, ["scene.txt"]);
             assert!(v.committed > 0);

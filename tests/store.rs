@@ -28,6 +28,9 @@ fn with_extensions(n: u64, state: &str) -> Value {
         {"basename": format!("{n}-a.png"), "sha512sum": "a".repeat(128), "futureFile": [n, 1]},
         {"basename": format!("{n}-b.png"), "fileSha512sum": "b".repeat(128), "futureFile": [n, 2]}
     ]);
+    value["previewFilesIfNotFree"] = json!([
+        {"basename": format!("{n}-free.png"), "fileSha512sum": "c".repeat(128), "futureFile": [n, 3]}
+    ]);
     value["apparitions"] = json!([
         {"platformName": "deviantart", "state": "unpublished", "futureApparition": {"n": n}},
         {"platformName": "pixiv", "state": "published_or_scheduled",
@@ -59,6 +62,35 @@ fn malformed_json_is_not_treated_as_an_empty_queue() {
     let f = Fixture::new();
     std::fs::write(&f.store.paths().json, b"{").unwrap();
     assert!(matches!(f.store.read(), Err(Error::Json(_))));
+}
+
+#[test]
+fn raw_price_tokens_outside_the_schema_fail_reads_and_mutations_without_writing() {
+    let f = Fixture::new();
+    let mut priced = row(1, "DESCRIBED");
+    priced["apparitions"] =
+        json!([{"platformName": "deviantart", "state": "unpublished", "priceIfNotFree": 1.5}]);
+    let valid = json!([priced]).to_string();
+    let refused = |token: &str| {
+        let text = valid.replace("1.5", token);
+        std::fs::write(&f.store.paths().json, &text).unwrap();
+        assert!(f.store.mutate(|_| Ok(())).is_err(), "{token} mutation");
+        assert_eq!(
+            std::fs::read_to_string(&f.store.paths().json).unwrap(),
+            text
+        );
+        f.store.read().unwrap_err()
+    };
+    // JSON has no non-finite numbers: these exist only as raw text, never as Store JSON.
+    for token in ["NaN", "Infinity", "-Infinity", "1e400"] {
+        assert!(matches!(refused(token), Error::Json(_)), "{token}");
+    }
+    assert!(matches!(refused("-1"), Error::Validation(_)));
+    std::fs::write(&f.store.paths().json, valid.replace("1.5", "0")).unwrap();
+    assert_eq!(
+        f.store.read().unwrap()[0]["apparitions"][0]["priceIfNotFree"],
+        0
+    );
 }
 
 #[test]

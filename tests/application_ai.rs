@@ -9,7 +9,6 @@ use publicator::{
 };
 use serde_json::json;
 use std::{
-    io::{Read, Write},
     net::TcpListener,
     sync::{
         Arc,
@@ -34,6 +33,23 @@ fn reply(path: &str, body: serde_json::Value) -> Reply {
         status: 200,
         body: body.to_string(),
     }
+}
+/// Each record's OpenRouter failure: the selected model answers 500, then the rescue catalogue does.
+fn provider_failures(records: usize) -> Vec<Reply> {
+    let failure = |path: &str| Reply {
+        path: path.into(),
+        status: 500,
+        body: "fixture failure".into(),
+    };
+    (0..records)
+        .flat_map(|_| [failure("/chat/completions"), failure("/models")])
+        .collect()
+}
+fn completion(title: &str) -> Reply {
+    reply(
+        "/chat/completions",
+        json!({"choices":[{"message":{"content":content(title)}}]}),
+    )
 }
 fn content(title: &str) -> String {
     json!({"title":title,"description":"A complete generated description."}).to_string()
@@ -288,58 +304,27 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
         rows.push(publication);
     }
     f.write(json!(rows));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let database = f.store.paths().json.clone();
-    let (observed_tx, observed_rx) = mpsc::channel();
-    let server = thread::spawn(move || {
-        let respond = |status: u16, body: String| {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 16_384];
-            let _ = stream.read(&mut request).unwrap();
-            write!(
-                stream,
-                "HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        };
-        respond(
-            200,
-            json!({"choices":[{"message":{"content":content("title-3")}}]}).to_string(),
-        );
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 16_384];
-        let _ = stream.read(&mut request).unwrap();
-        let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(database).unwrap()).unwrap();
-        observed_tx
-            .send(
-                saved[2]["title"].as_str() == Some("title-3")
-                    && saved[2]["description"].as_str()
-                        == Some("A complete generated description."),
-            )
-            .unwrap();
-        let failure = json!({"error":{"message":"fixture failure"}}).to_string();
-        write!(
-            stream,
-            "HTTP/1.1 500 Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{failure}",
-            failure.len()
-        )
-        .unwrap();
-        respond(200, json!({"data":[]}).to_string());
-        respond(
-            200,
-            json!({"choices":[{"message":{"content":content("title-1")}}]}).to_string(),
-        );
-    });
-    let app = Application::new(Arc::new(f.store.clone()), client(endpoint));
-    let report = app
-        .generate_marked(&request(Source::OpenRouter))
+    // The second (failing) record's request is held until the first success is on disk.
+    let mut replies = vec![completion("title-3")];
+    replies.extend(provider_failures(1));
+    replies.push(completion("title-1"));
+    let (server, started, release) = Server::start_paused_at(replies, 1);
+    let app = Arc::new(Application::new(
+        Arc::new(f.store.clone()),
+        client(server.url().to_owned()),
+    ));
+    let batch = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.generate_marked(&request(Source::OpenRouter)).await })
+    };
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)).unwrap())
         .await
         .unwrap();
-    server.join().unwrap();
-    assert!(observed_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+    let persisted = f.read();
+    release.send(()).unwrap();
+    let report = batch.await.unwrap().unwrap();
+    server.finish();
+    assert_eq!(persisted[2]["title"], "title-3", "saved before continuing");
     assert_eq!((report.succeeded, report.failed), (2, 1));
     assert_eq!(
         report
@@ -525,12 +510,12 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
 async fn accepted_provider_failure_saves_both_markers() {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED")]));
-    let app = Application::new(
-        Arc::new(f.store.clone()),
-        client("http://127.0.0.1:1".into()),
-    );
+    let server = Server::start(provider_failures(1));
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let result = app.generate_one(&id(1), request(Source::OpenRouter)).await;
-    assert!(result.is_err());
+    server.finish();
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("OpenRouter HTTP 500"), "{error}");
     assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
     assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
 }
@@ -545,14 +530,13 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
         rows.push(p);
     }
     f.write(json!(rows));
-    let app = Application::new(
-        Arc::new(f.store.clone()),
-        client("http://127.0.0.1:1".into()),
-    );
+    let server = Server::start(provider_failures(3));
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let report = app
         .generate_marked(&request(Source::OpenRouter))
         .await
         .unwrap();
+    server.finish();
     assert_eq!(
         report
             .results
@@ -693,9 +677,14 @@ async fn duplicate_basenames_resolve_to_the_recorded_hash_in_any_directory_order
         let thumb = |path: &std::path::Path, hash: &str| {
             thumbs.join(publicator::images::thumb_name(path, hash).unwrap())
         };
-        assert!(thumb(&red, &red_hash).exists());
         assert!(!thumb(&blue, &blue_hash).exists());
-        assert_eq!(server.requests().len(), 1);
+        let [request] = server.requests().try_into().unwrap();
+        let red_thumb = std::fs::read(thumb(&red, &red_hash)).unwrap();
+        let sent = openssl::base64::encode_block(&red_thumb);
+        assert!(
+            request.to_string().contains(&sent),
+            "not the recorded image"
+        );
     }
 }
 

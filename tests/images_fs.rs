@@ -158,6 +158,18 @@ fn deletion_refuses_symlink_entries_and_paths_outside_configured_roots() {
 }
 
 #[test]
+fn same_size_in_place_replacement_revokes_delete_authorization() {
+    let f = configured(&["art"]);
+    let path = f.colored("art/art.png", "red");
+    let authorized = forged(&path);
+    let blue = fs::read(f.colored("blue.png", "blue")).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().len(), blue.len() as u64);
+    fs::write(&path, &blue).unwrap(); // Same inode and length, other bytes.
+    assert!(delete_candidate(&f.store, &authorized, &path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), blue);
+}
+
+#[test]
 fn spaced_unicode_and_non_utf8_names_are_discovered_previewed_staged_and_deleted() {
     let f = configured(&["art"]);
     fs::create_dir_all(f.path("art/with space")).unwrap();

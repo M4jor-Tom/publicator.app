@@ -289,7 +289,7 @@ fn publication_validation_retains_extensions_zero_price_and_rejects_bad_url_or_t
     let rows: Publications = serde_json::from_value(good.clone()).unwrap();
     let cfg = Config {
         tiers: vec!["allowed".into()],
-        galleries: vec!["gallery".into()],
+        galleries: vec!["gallery".into(), "Art".into()],
         ..Config::default()
     };
     validate_publications(&rows, &cfg).unwrap();
@@ -348,14 +348,13 @@ fn publication_validation_retains_extensions_zero_price_and_rejects_bad_url_or_t
     let bad_tier: Publications =
         serde_json::from_value(make("https://example.com", "other", "gallery")).unwrap();
     assert!(validate_publications(&bad_tier, &cfg).is_err());
-    let bad_gallery: Publications =
-        serde_json::from_value(make("https://example.com", "allowed", "other")).unwrap();
-    assert!(
-        validate_publications(&bad_gallery, &cfg)
-            .unwrap_err()
-            .to_string()
-            .contains("gallery")
-    );
+    // "Art" is allowed; "Artwork" only shares its prefix.
+    for gallery in ["other", "Artwork"] {
+        let bad_gallery: Publications =
+            serde_json::from_value(make("https://example.com", "allowed", gallery)).unwrap();
+        let error = validate_publications(&bad_gallery, &cfg).unwrap_err();
+        assert!(error.to_string().contains("gallery"), "{gallery}: {error}");
+    }
 }
 
 #[test]

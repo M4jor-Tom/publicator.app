@@ -9,11 +9,9 @@ use std::{
 use tempfile::tempdir;
 
 fn cli(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_publicator"))
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .unwrap()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_publicator"));
+    command.current_dir(cwd).args(args);
+    common::bounded_output(&mut command, std::time::Duration::from_secs(120))
 }
 
 fn marked_data(root: &std::path::Path) {
@@ -120,7 +118,8 @@ fn local_reply(path: &str, value: Value) -> Reply {
 }
 
 fn run_local(root: &std::path::Path, server: &Server, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_publicator"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_publicator"));
+    command
         .current_dir(root)
         .env(
             "PATH",
@@ -140,9 +139,8 @@ fn run_local(root: &std::path::Path, server: &Server, args: &[&str]) -> std::pro
         .arg("5")
         .arg("--data-dir")
         .arg(root)
-        .args(args)
-        .output()
-        .unwrap()
+        .args(args);
+    common::bounded_output(&mut command, std::time::Duration::from_secs(60))
 }
 
 #[cfg(unix)]
@@ -198,7 +196,16 @@ fn run_local_pty(root: &std::path::Path, server: &Server, input: &[u8]) -> std::
     let mut master_file = master_file;
     master_file.write_all(input).unwrap();
     drop(master_file.try_clone().unwrap());
-    let status = child.wait().unwrap();
+    let mut status = None;
+    let exited = common::eventually(std::time::Duration::from_secs(60), || {
+        status = child.try_wait().unwrap();
+        status.is_some()
+    });
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status.expect("generate-meta exited within 60 s");
     let mut output = Vec::new();
     let mut buffer = [0; 4096];
     loop {
@@ -691,13 +698,13 @@ fn echo_first_uses_configured_timezone_and_vision_models_only_runs_llmfit() {
         &fit,
         "#!/bin/sh\nprintf '%s' '{\"models\":[{\"name\":\"google/gemma-4-26B-A4B-it\",\"fit_level\":\"Good\"},{\"name\":\"google/gemma-4-31B-it\",\"fit_level\":\"Good\"}]}'\n",
     );
-    let vision = Command::new(env!("CARGO_BIN_EXE_publicator"))
+    let mut vision = Command::new(env!("CARGO_BIN_EXE_publicator"));
+    vision
         .current_dir(cwd.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("PUBLICATOR_OLLAMA_URL", "http://127.0.0.1:1")
-        .arg("vision-models")
-        .output()
-        .unwrap();
+        .arg("vision-models");
+    let vision = common::bounded_output(&mut vision, std::time::Duration::from_secs(60));
     assert!(
         vision.status.success(),
         "{}",
@@ -762,11 +769,18 @@ fn publish_command(root: &std::path::Path) -> Command {
     command
 }
 
+fn run_publish(root: &std::path::Path) -> std::process::Output {
+    common::bounded_output(
+        &mut publish_command(root),
+        std::time::Duration::from_secs(120),
+    )
+}
+
 fn run_publish_worker(root: &std::path::Path, script: &str) -> std::process::Output {
     let worker = root.join("worker.sh");
     common::executable::write_executable(&worker, script);
     fs::write(root.join("skill.md"), "fixture skill").unwrap();
-    publish_command(root).output().unwrap()
+    run_publish(root)
 }
 
 #[test]
@@ -794,7 +808,7 @@ fn publish_unknown_worker_result_is_nonzero() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read_to_string(&starts).unwrap().lines().count(), 1);
-    let unresolved = publish_command(root).output().unwrap();
+    let unresolved = run_publish(root);
     assert!(!unresolved.status.success());
     assert!(String::from_utf8_lossy(&unresolved.stderr).contains("unresolved"));
     assert_eq!(fs::read_to_string(starts).unwrap().lines().count(), 1);
@@ -904,7 +918,7 @@ fn sigint_during_publish_stops_the_worker_group_and_keeps_the_attempt_blocked() 
     assert_eq!(cli.0.wait().unwrap().code(), Some(1), "{stderr}");
     assert!(stderr.contains("interrupted"), "{stderr}");
     common::assert_abandoned_attempt(root, &gate, &calls);
-    let retry = publish_command(root).output().unwrap();
+    let retry = run_publish(root);
     assert!(!retry.status.success());
     assert!(String::from_utf8_lossy(&retry.stderr).contains("unresolved"));
     assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 1);
@@ -1043,7 +1057,7 @@ fn unknown_publish_outcome_prints_reconcile_guidance_matching_the_skill() {
     let [attempt] = attempts.as_slice() else {
         panic!("{attempts:?}")
     };
-    let blocked = publish_command(root).output().unwrap();
+    let blocked = run_publish(root);
     assert!(!blocked.status.success());
     assert_recovery_guidance(&first.stderr, attempt);
     assert_recovery_guidance(&blocked.stderr, attempt);

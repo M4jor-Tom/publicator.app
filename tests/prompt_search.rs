@@ -9,11 +9,15 @@ fn setup() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("prompts");
     std::fs::create_dir(&repo).unwrap();
+    // Inherited repository variables (a Git hook's GIT_DIR, ...) never redirect these commits.
     let git = |args: &[&str]| {
         assert!(
             Command::new("git")
                 .arg("-C")
                 .arg(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
                 .args(args)
                 .status()
                 .unwrap()

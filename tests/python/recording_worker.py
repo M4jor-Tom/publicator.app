@@ -32,6 +32,8 @@ class RecordingSession:
         digest = hashlib.sha512(image.read_bytes()).hexdigest() if image.is_file() else None
         record("submit", job, digest)
         reply = {"type": "scheduled", "attempt_id": job["attempt_id"], "uuid": job["uuid"]}
+        if BEHAVIOUR == "failed":
+            return dict(reply, type="failed", error="form refused before commit")
         if BEHAVIOUR == "unknown":
             return dict(reply, type="unknown", error="submit clicked, no confirmation")
         if BEHAVIOUR == "fatal":

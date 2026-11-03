@@ -61,6 +61,36 @@ fn request() -> GenerationRequest {
     }
 }
 
+#[tokio::test]
+async fn silent_headers_end_generation_at_its_deadline_with_no_later_request() {
+    // Listens but never accepts or answers: the request waits for headers that never come.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = client(&format!("http://{}", listener.local_addr().unwrap()));
+    let (_dir, image) = image();
+    let timeout = Duration::from_secs(1);
+    let begun = Instant::now();
+    let request = GenerationRequest {
+        timeout,
+        ..request()
+    };
+    let error = client.generate(&image, &request).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "provider error: OpenRouter deadline exceeded"
+    );
+    assert!(
+        begun.elapsed() < timeout * 3,
+        "ended after {:?}",
+        begun.elapsed()
+    );
+    listener.set_nonblocking(true).unwrap();
+    let connections = std::iter::from_fn(|| listener.accept().ok()).count();
+    assert_eq!(
+        connections, 1,
+        "the catalogue fallback ran past the shared deadline"
+    );
+}
+
 #[test]
 fn catalogue_requires_vision_and_zero_pricing() {
     let v = json!({"id":"vendor/free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"},"supported_parameters":[]});
@@ -291,7 +321,11 @@ async fn malformed_rescue_catalogue_preserves_original_model_error() {
         .openrouter_generate(&img, &request(), None)
         .await
         .unwrap_err();
+    let requests = server.requests();
+    server.finish();
     assert!(err.to_string().contains("429"), "{err}");
+    let paths: Vec<_> = requests.iter().map(|r| r["path"].clone()).collect();
+    assert_eq!(paths, ["/chat/completions", "/models"]);
 }
 
 const SELECTED: &str = "google/gemma-4-26b-a4b-it:free";

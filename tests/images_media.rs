@@ -117,6 +117,7 @@ fn admitted_formats_keep_dimensions_pixels_and_alpha_in_previews_and_uploads() {
     for (name, mime, alpha) in [
         ("alpha.png", "image/png", true),
         ("alpha.webp", "image/webp", true),
+        ("opaque.jpg", "image/jpeg", false),
         ("opaque.gif", "image/gif", false),
         ("opaque.bmp", "image/bmp", false),
         ("opaque.tiff", "image/tiff", false),
@@ -138,6 +139,51 @@ fn admitted_formats_keep_dimensions_pixels_and_alpha_in_previews_and_uploads() {
             assert_eq!(upload, source, "{name} is uploaded as is");
         }
     }
+}
+
+#[test]
+fn one_pixel_and_portrait_sources_keep_their_shape_and_pixels() {
+    let f = Fixture::new();
+    let dot = generated(&f, "dot.png", &["-size", "1x1", "xc:red"]);
+    let halves = [
+        "-size", "200x600", "xc:red", "-size", "200x600", "xc:blue", "+append",
+    ];
+    let portrait = generated(&f, "portrait.jpg", &halves);
+    for (source, size, preview_size, pixels) in [
+        (dot, "1x1", "1x1", "100 100"),
+        (portrait, "400x600", "200x300", "100 001"),
+    ] {
+        assert_eq!(look(&source, false), format!("{size} Undefined {pixels}"));
+        let preview = prepare_ai_image(&source, &f.path(".thumbs"), None).unwrap();
+        let preview_look = format!("{preview_size} Undefined {pixels}");
+        assert_eq!(look(&preview.path, false), preview_look);
+        assert_eq!(stage(&source, &f.path("attempt")).unwrap(), source);
+    }
+}
+
+/// Undecodable sources: half of a real PNG and WebP, text named PNG, and an artwork deleted
+/// after its digest was recorded. Inputs stay tiny, so no decoder needs a child-process bound.
+#[test]
+fn truncated_text_and_missing_sources_are_refused_and_cache_nothing() {
+    let f = Fixture::new();
+    for name in ["cut.png", "cut.webp"] {
+        let path = generated(&f, name, &["-size", "64x64", "gradient:red-blue"]);
+        let whole = fs::read(&path).unwrap();
+        fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+    }
+    fs::write(f.path("text.png"), "plain text, not an image").unwrap();
+    f.image("gone.png", 4, 4);
+    let names = ["cut.png", "cut.webp", "text.png", "gone.png"];
+    let digests = names.map(|name| file_sha512(&f.path(name)).unwrap());
+    fs::remove_file(f.path("gone.png")).unwrap();
+    let cache = f.path(".thumbs");
+    for (name, sha) in names.iter().zip(&digests) {
+        let source = f.path(name);
+        let preview = prepare_ai_image(&source, &cache, Some(sha));
+        assert!(preview.is_err(), "{name} preview");
+        assert!(stage(&source, &f.path("attempt")).is_err(), "{name} upload");
+    }
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 0, "nothing cached");
 }
 
 #[test]

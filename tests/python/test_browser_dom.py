@@ -66,7 +66,8 @@ def submit(page, tmp_path):
     return browser.BrowserSession.submit(SimpleNamespace(page=page), {**JOB, "image_path": str(image)})
 
 
-@pytest.mark.parametrize("outcome, expected", [("land", "scheduled"), ("reject", "unknown"), ("login", "unknown")])
+@pytest.mark.parametrize("outcome, expected", [
+    ("land", "scheduled"), ("delayed", "scheduled"), ("reject", "unknown"), ("login", "unknown")])
 def test_submit_is_scheduled_only_after_leaving_the_form(open_form, tmp_path, monkeypatch, outcome, expected):
     monkeypatch.setattr(browser, "COMMIT_EVIDENCE_MS", 3000)
     # Selected "Artwork" must not satisfy "Art"; selected "Featured" must not be toggled off.

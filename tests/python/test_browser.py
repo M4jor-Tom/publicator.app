@@ -262,6 +262,10 @@ def test_browser_without_cookie_database_passes_no_cookies(tmp_path, monkeypatch
         session.close()
 
 
+def tree_bytes(root):
+    return {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
 def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, monkeypatch):
     source, work = tmp_path / ".deviantart-login", tmp_path / ".deviantart-session"
     source.mkdir()
@@ -292,9 +296,11 @@ def test_browser_setup_passes_headless_timezone_and_reinjects_cookies(tmp_path, 
     monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", ModuleType("playwright.sync_api"))
     __import__("sys").modules["playwright.sync_api"].sync_playwright = lambda: SimpleNamespace(start=lambda: pw)
 
+    original = tree_bytes(source)
     session = browser.BrowserSession({"login_profile": str(source), "work_profile": str(work),
                                      "headless": True, "timezone": "Europe/Paris"}, tmp_path)
     session.close()
+    assert tree_bytes(source) == original, "the login profile is never modified"
     assert calls["launch"][1] == {"headless": True, "timezone_id": "Europe/Paris"}
     assert calls["cookies"] == [{"name": "auth", "value": "secret", "domain": ".deviantart.com",
                                   "path": "/", "secure": True, "httpOnly": True}]

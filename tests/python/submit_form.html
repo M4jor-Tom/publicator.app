@@ -123,6 +123,7 @@ $("commit").onclick = () => {
     mature: document.querySelector('[name="matureContent"]').checked,
     ai: document.querySelector('[name="isAiGenerated"]').checked,
   });
-  location.assign(F.outcome === "login" ? "/users/login?referer=submit" : "/deviation/1");
+  const leave = () => location.assign(F.outcome === "login" ? "/users/login?referer=submit" : "/deviation/1");
+  if (F.outcome === "delayed") setTimeout(leave, 500); else leave();
 };
 </script>

@@ -220,6 +220,11 @@ fn options_reject_invalid_price_and_unconfigured_values_without_writing() {
             galleries: None,
         },
         PlatformOptions {
+            price: Some(Some(f64::NAN)),
+            tiers: None,
+            galleries: None,
+        },
+        PlatformOptions {
             price: None,
             tiers: Some(vec!["Nope".into()]),
             galleries: None,

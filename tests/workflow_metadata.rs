@@ -63,6 +63,7 @@ fn any_marker_occurrence_and_blank_metadata_block_approval() {
     for (title, description) in [
         ("Title", "text [[PUBLICATOR:TODO_GENERATE]] tail"),
         ("", "Description"),
+        ("Title", " \n "),
     ] {
         let f = Fixture::new();
         let mut publication = row(1, "SCHEDULED");

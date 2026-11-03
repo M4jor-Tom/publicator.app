@@ -68,6 +68,8 @@ fn profiles_reject_empty_collision_invalid_values_and_unknown_tiers() {
         "hour = 24",
         "per_slot = 0",
         "default_price = -1.0",
+        "default_price = nan",
+        "default_price = inf",
         "day = 4",
         "name = 7",
         "[[profiles]]\ndefault_tiers=['silver']",
