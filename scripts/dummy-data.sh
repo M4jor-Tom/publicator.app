@@ -1,27 +1,71 @@
 #!/usr/bin/env bash
-# Writes a disposable Publicator data dir (config, publications, art) for UI testing.
+# Writes a disposable Publicator data dir (config, tags, prompt archive, publications, art) for UI testing.
 # usage: scripts/dummy-data.sh [DIR]   (default: a fresh /tmp/publicator-dummy.XXXXXX)
+# DIR must be absent or an empty directory; anything else is refused before any tool runs.
+# PUBLICATOR_DUMMY_NOW (Unix seconds) anchors every timestamp; the fixed default keeps runs repeatable.
+# Data only: `publicator-ui` on it still uses real provider endpoints and the real worker; for
+# injected endpoints/workers use examples/ui_acceptance.rs. Never point it at real Art data.
 set -euo pipefail
 
-dir=${1:-$(mktemp -d /tmp/publicator-dummy.XXXXXX)}
+now=${PUBLICATOR_DUMMY_NOW:-1799150400} # 2027-01-05T12:00:00Z
+[[ $now =~ ^[0-9]+$ ]] || { echo "PUBLICATOR_DUMMY_NOW must be Unix seconds, got: $now" >&2; exit 2; }
+if [[ -n ${1:-} ]]; then
+  dir=$1
+  # Never reuse saved state: a symlink, file or nonempty directory may be real data.
+  if [[ -L $dir || ( -e $dir && ( ! -d $dir || -n $(ls -A -- "$dir") ) ) ]]; then
+    echo "Refusing to write into existing $dir; pass an absent path or an empty directory." >&2
+    exit 1
+  fi
+else
+  dir=$(mktemp -d /tmp/publicator-dummy.XXXXXX)
+fi
 mkdir -p "$dir/picked" "$dir/published"
-now=$(date +%s)
 day=86400
 
 art() { # art FILE SEED WIDTH HEIGHT
-  magick -seed "$2" -size "$3x$4" plasma:fractal -blur 0x2 "$1"
+  # Plasma at quarter size, scaled up: same look, ~16x less generation work.
+  magick -seed "$2" -size "$(($3 / 4))x$(($4 / 4))" plasma:fractal -resize "$3x$4!" -blur 0x2 "$1"
 }
 
-for i in 1 2 3 4 5 6 7 8; do
-  art "$dir/picked/candidate-$i.png" "$i" $((480 + i % 3 * 160)) $((640 - i % 2 * 240))
+# The prompt archive is its own repository: no caller Git context, config or hooks leak in.
+while read -r name; do
+  unset "$name"
+done < <(git rev-parse --local-env-vars)
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_DATE="$now +0000" GIT_COMMITTER_DATE="$now +0000"
+git init -q "$dir/prompts"
+printf 'Plasma dunes at noon, soft blur' >"$dir/prompts/dunes.txt"
+printf 'Plasma fog over a radio mast' >"$dir/prompts/fog.txt"
+git -C "$dir/prompts" add -A
+git -C "$dir/prompts" -c user.name=Dummy -c user.email=dummy@example.invalid commit -qm 'Dummy prompts'
+identity() { # identity LINEAGE <TEXT -> basename matching the [prompts] grammar below
+  printf '%s_%s.png' "$1" "$(sha256sum | cut -d' ' -f1)"
+}
+
+# Candidates 1-2 resolve Exact, 3 Nearest (archived lineage, unarchived text), the rest Unknown.
+candidates=(
+  "$(identity dunes.txt <"$dir/prompts/dunes.txt")"
+  "$(identity fog.txt <"$dir/prompts/fog.txt")"
+  "$(identity fog.txt <<<'An unarchived fog draft')"
+)
+for i in 4 5 6 7 8; do candidates+=("candidate-$i.png"); done
+for i in "${!candidates[@]}"; do
+  art "$dir/picked/${candidates[i]}" "$((i + 1))" $((480 + (i + 1) % 3 * 160)) $((640 - (i + 1) % 2 * 240))
 done
 
+printf 'abstract\nplasma\ndigital art\n' >"$dir/tags.txt"
 cat >"$dir/publicator.toml" <<'EOF'
 publicable = ["picked"]
+tags = "tags.txt"
 
 [deviantart]
 tiers = ["Supporter", "Patron"]
 galleries = ["Featured", "Landscapes", "Portraits"]
+
+[prompts]
+repo = "prompts"
+filename = '(?P<lineage>[^_]+)_(?P<version>[a-f0-9]{64})\.png'
+version_hash = "sha256"
 
 [schedule]
 timezone = "Europe/Paris"

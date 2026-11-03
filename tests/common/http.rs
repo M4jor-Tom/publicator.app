@@ -2,10 +2,18 @@ use serde_json::Value;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, mpsc},
+    panic::resume_unwind,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
+
+/// Bounds every wait on the code under test: a missing request or unreleased gate fails, not hangs.
+const WAIT: Duration = Duration::from_secs(10);
 
 pub struct Reply {
     pub path: String,
@@ -16,7 +24,11 @@ pub struct Reply {
 pub struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
-    thread: Option<thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    /// Disconnects when the server thread returns or unwinds; nothing is ever sent.
+    done: mpsc::Receiver<()>,
+    /// Returns the paths of scripted replies whose requests never arrived.
+    thread: Option<thread::JoinHandle<Vec<String>>>,
 }
 
 impl Server {
@@ -43,9 +55,21 @@ impl Server {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let (done_tx, done) = mpsc::channel::<()>();
         let thread = thread::spawn(move || {
-            for reply in replies {
+            let _done = done_tx;
+            let mut replies = replies.into_iter();
+            while let Some(reply) = replies.next() {
                 let (mut stream, _) = listener.accept().expect("expected HTTP request");
+                if stopping.load(Ordering::SeqCst) {
+                    // The shutdown wakeup, not a request: report what was never asked for.
+                    return std::iter::once(reply)
+                        .chain(replies)
+                        .map(|reply| reply.path)
+                        .collect();
+                }
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -59,8 +83,10 @@ impl Server {
                     .unwrap()
                     .push(serde_json::json!({"path": path, "body": body}));
                 if let Some((started, release)) = gate.take() {
-                    started.send(()).unwrap();
-                    release.recv().unwrap();
+                    let _ = started.send(());
+                    release.recv_timeout(WAIT).unwrap_or_else(|_| {
+                        panic!("paused HTTP reply for {path} was never released")
+                    });
                 }
                 let reason = if reply.status == 200 { "OK" } else { "Error" };
                 write!(
@@ -73,15 +99,37 @@ impl Server {
                 )
                 .unwrap();
             }
+            Vec::new()
         });
         Self {
             url,
             requests,
+            stop,
+            done,
             thread: Some(thread),
         }
     }
+
+    /// Requires every scripted request, waiting at most `WAIT` for in-flight ones, and
+    /// re-raises a server-thread panic (wrong path, unreleased gate) in the test.
     pub fn finish(mut self) {
-        self.thread.take().unwrap().join().unwrap();
+        let _ = self.done.recv_timeout(WAIT);
+        let unmet = self
+            .shut_down()
+            .unwrap()
+            .unwrap_or_else(|panic| resume_unwind(panic));
+        assert!(
+            unmet.is_empty(),
+            "expected HTTP requests never arrived: {unmet:?}"
+        );
+    }
+
+    /// Wakes a blocked accept and joins the thread; `None` once already shut down.
+    fn shut_down(&mut self) -> Option<thread::Result<Vec<String>>> {
+        let thread = self.thread.take()?;
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.url.trim_start_matches("http://"));
+        Some(thread.join())
     }
 
     pub fn url(&self) -> &str {
@@ -93,11 +141,13 @@ impl Server {
 }
 
 impl Drop for Server {
+    /// Lenient about unconsumed replies, but never hides a server-thread panic, and never
+    /// panics again while the test is already unwinding.
     fn drop(&mut self) {
-        // Wake accept if a test exits before consuming every scripted reply.
-        if let Some(thread) = self.thread.take() {
-            let _ = TcpStream::connect(self.url.trim_start_matches("http://"));
-            let _ = thread.join();
+        if let Some(Err(panic)) = self.shut_down()
+            && !thread::panicking()
+        {
+            resume_unwind(panic);
         }
     }
 }

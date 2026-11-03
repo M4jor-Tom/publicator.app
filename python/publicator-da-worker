@@ -1,0 +1,5 @@
+#!/bin/sh
+# Development worker entrypoint (the checkout-relative default); Nix packages inject their own.
+PYTHONPATH="$(dirname "$0")${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec python3 -m publicator_da.worker "$@"

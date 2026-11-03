@@ -13,10 +13,13 @@ check() {
     "$@" || status=1
 }
 
-check 'Quality gate regression tests' python -m unittest discover -s tests/python -p test_quality.py -v
+check 'Python tests (gates, worker, browser)' env PYTHONPATH=python pytest tests/python -q
 check 'Rust formatting' cargo fmt --all --check
 check 'Clippy (warnings are errors)' cargo clippy --locked --all-targets --features desktop -- -D warnings
 check 'Rust tests (including desktop)' cargo test --locked --all-targets --features desktop
+# Its own target dir: headless tests must never see executables left by desktop builds.
+check 'Rust tests (headless)' env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/headless" \
+    cargo test --locked --all-targets --no-default-features
 check 'Rust complexity and duplication' bash scripts/check-metrics.sh
 
 if (( status != 0 )); then

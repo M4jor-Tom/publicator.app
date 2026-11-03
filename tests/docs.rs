@@ -28,7 +28,11 @@ fn missing_repo_paths(markdown: &str, root: &Path) -> Vec<PathBuf> {
 }
 
 fn maintained_docs(root: &Path) -> Vec<PathBuf> {
-    let mut docs = vec![root.join("AGENTS.md"), root.join("docs/README.md")];
+    let mut docs = vec![
+        root.join("AGENTS.md"),
+        root.join("docs/README.md"),
+        root.join("docs/testing.md"),
+    ];
     docs.extend(
         std::fs::read_dir(root.join("docs/features"))
             .unwrap()
@@ -99,4 +103,41 @@ fn maintained_path_check_excludes_historical_roadmap_and_adr_paths() {
     .unwrap();
     assert!(roadmap.contains("Task 23"));
     assert!(adr.contains("historical") || adr.contains("Superseded"));
+}
+
+/// `file::name` spans naming a Rust or Python test whose definition is absent from `file`.
+fn missing_named_tests<'a>(markdown: &'a str, root: &Path) -> Vec<&'a str> {
+    markdown
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| {
+            span.split_once("::").is_some_and(|(file, name)| {
+                (file.ends_with(".rs") || file.ends_with(".py"))
+                    && !std::fs::read_to_string(root.join(file)).is_ok_and(|source| {
+                        source.contains(&format!("fn {name}("))
+                            || source.contains(&format!("def {name}("))
+                    })
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn testing_map_names_only_existing_tests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let map = std::fs::read_to_string(root.join("docs/testing.md")).unwrap();
+    let missing = missing_named_tests(&map, root);
+    assert!(
+        missing.is_empty(),
+        "docs/testing.md names missing tests: {missing:?}"
+    );
+    assert_eq!(
+        missing_named_tests(
+            "`tests/docs.rs::testing_map_names_only_existing_tests` `tests/docs.rs::absent_test` \
+             `tests/python/test_worker.py::test_worker_imports_no_application_modules` `Publisher::from_env`",
+            root,
+        ),
+        ["tests/docs.rs::absent_test"]
+    );
 }

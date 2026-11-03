@@ -933,3 +933,127 @@ fn unknown_publish_outcome_prints_reconcile_guidance_matching_the_skill() {
         String::from_utf8_lossy(&reconciled.stderr)
     );
 }
+
+#[test]
+fn checkout_check_steps_runs_the_default_worker_without_overrides() {
+    let output = common::bounded_output(
+        Command::new(env!("CARGO_BIN_EXE_publicator"))
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env_remove("PUBLICATOR_WORKER")
+            .env_remove("PUBLICATOR_SKILL")
+            .env_remove("PYTHONPATH")
+            .arg("check-steps"),
+        std::time::Duration::from_secs(60),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The real worker compared its STEPS with the static skill, not just Rust's exit path.
+    assert!(stdout.contains("steps in sync with the skill"), "{stdout}");
+}
+
+const DUMMY_NOW: i64 = 1_800_000_000;
+
+/// Runs `scripts/dummy-data.sh DIR` under a watchdog, optionally with spy tools first on PATH.
+fn dummy_data(dir: &std::path::Path, spies: Option<&std::path::Path>) -> std::process::Output {
+    let mut command = Command::new("bash");
+    command
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/dummy-data.sh"
+        ))
+        .arg(dir)
+        .env("PUBLICATOR_DUMMY_NOW", DUMMY_NOW.to_string());
+    if let Some(spies) = spies {
+        let path = std::env::var("PATH").unwrap();
+        command.env("PATH", format!("{}:{path}", spies.display()));
+    }
+    common::bounded_output(&mut command, std::time::Duration::from_secs(120))
+}
+
+#[test]
+fn dummy_data_refuses_existing_destinations_before_running_tools() {
+    let root = tempdir().unwrap();
+    let (spies, calls, data) = (
+        root.path().join("bin"),
+        root.path().join("calls"),
+        root.path().join("data"),
+    );
+    fs::create_dir(&spies).unwrap();
+    for tool in ["magick", "jq", "git"] {
+        common::executable::write_executable(
+            &spies.join(tool),
+            &format!("#!/bin/sh\necho {tool} >> '{}'\nexit 1\n", calls.display()),
+        );
+    }
+    fs::create_dir_all(data.join("picked")).unwrap();
+    let sentinels = [
+        ("publicator.toml", "publicable = [\"picked\"]\n"),
+        ("publications.json", "[]"),
+        ("picked/art.png", "sentinel art"),
+    ];
+    for (name, bytes) in sentinels {
+        fs::write(data.join(name), bytes).unwrap();
+    }
+    std::os::unix::fs::symlink(&data, root.path().join("link")).unwrap();
+    for target in [
+        data.clone(),
+        root.path().join("link"),
+        data.join("publications.json"),
+    ] {
+        let output = dummy_data(&target, Some(&spies));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{target:?}: {stderr}");
+        assert!(stderr.contains("Refusing"), "{target:?}: {stderr}");
+    }
+    assert!(!calls.exists(), "{}", fs::read_to_string(&calls).unwrap());
+    for (name, bytes) in sentinels {
+        assert_eq!(fs::read_to_string(data.join(name)).unwrap(), bytes);
+    }
+    assert_eq!(fs::read_dir(&data).unwrap().count(), 3);
+}
+
+#[test]
+fn dummy_data_initializes_a_fresh_valid_root_and_refuses_to_reinitialize_it() {
+    let root = tempdir().unwrap();
+    let data = root.path().join("fresh");
+    let output = dummy_data(&data, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data_arg = data.to_str().unwrap();
+    let validate = cli(root.path(), &["validate", "--data-dir", data_arg]);
+    assert!(
+        validate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validate.stderr)
+    );
+    let audit = cli(root.path(), &["prompt-audit", "--data-dir", data_arg]);
+    let report = String::from_utf8_lossy(&audit.stdout);
+    assert!(
+        report.contains("exact: 2 images") && report.contains("nearest: 1 images"),
+        "{report}"
+    );
+    let tags = publicator::config::Config::load(&data)
+        .unwrap()
+        .tags
+        .unwrap();
+    assert!(
+        !fs::read_to_string(data.join(tags))
+            .unwrap()
+            .trim()
+            .is_empty()
+    );
+    let saved = fs::read(data.join("publications.json")).unwrap();
+    let rows: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(rows[0]["submissionTimestamp"], DUMMY_NOW - 30 * 86_400);
+
+    let rerun = dummy_data(&data, None);
+    assert!(!rerun.status.success());
+    assert_eq!(fs::read(data.join("publications.json")).unwrap(), saved);
+}

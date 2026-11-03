@@ -36,14 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gui_metadata_endpoints(),
         PathBuf::from("llmfit"),
     );
-    let worker = std::env::var_os("PUBLICATOR_WORKER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("python/publicator_da/worker.py"));
-    let skill = std::env::var_os("PUBLICATOR_SKILL")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".claude/skills/publish-deviantart/SKILL.md"));
     let application =
-        Arc::new(Application::new(store, metadata).with_publisher(Publisher::new(worker, skill)));
+        Arc::new(Application::new(store, metadata).with_publisher(Publisher::from_env()));
     Ok(publicator::ui::run(
         application,
         UiOptions {

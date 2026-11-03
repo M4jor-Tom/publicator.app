@@ -350,7 +350,7 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
         return check_steps().await;
     }
     let (paths, _, store) = paths(data_dir, json)?;
-    let publisher = publisher();
+    let publisher = Publisher::from_env();
     if let Some(attempt) = reconcile_attempt {
         return reconcile(&paths, &store, &attempt, outcome, url);
     }
@@ -458,17 +458,8 @@ fn print_publish_report(report: PublishReport, verbose: bool) -> Result<()> {
     }
     Ok(())
 }
-fn publisher() -> Publisher {
-    let worker = std::env::var_os("PUBLICATOR_WORKER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("python/publicator_da/worker.py"));
-    let skill = std::env::var_os("PUBLICATOR_SKILL")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".claude/skills/publish-deviantart/SKILL.md"));
-    Publisher::new(worker, skill)
-}
 async fn check_steps() -> Result<()> {
-    publisher().check_steps().await?;
+    Publisher::from_env().check_steps().await?;
     println!("check-steps OK");
     Ok(())
 }

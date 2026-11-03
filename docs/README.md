@@ -28,11 +28,19 @@ push and pull request. No Sonar account, server, container, or analysis history 
 needed. Nix pins Rustfmt, Clippy and rust-code-analysis through `flake.lock`, and
 jscpd through a versioned, hash-verified upstream static binary in `flake.nix`.
 
-The command runs its gate regression tests, formatting, Clippy with warnings as
-errors, the Rust test suite with the `desktop` feature, and complexity/duplication
-analysis. It runs every check even if an earlier check fails. Rust files under
-`src/`, `tests/`, and `examples/` are scanned, including inline tests; build output
-and external publication data are outside these roots.
+The command runs every pytest test under `tests/python` (gate regression, worker
+and browser tests; no live browser or service), formatting, Clippy with warnings as
+errors, the Rust test suite with the `desktop` feature, the headless
+(`--no-default-features`) suite in its own `CARGO_TARGET_DIR` subdirectory `headless`,
+and complexity/duplication analysis. It runs every check even if an earlier check fails.
+Rust files under `src/`, `tests/`, and `examples/` are scanned, including inline tests;
+build output and external publication data are outside these roots.
+
+A separate CI job runs `nix flake check -L`. It builds the CLI and desktop packages and runs
+`checks.x86_64-linux.package-smoke`. From an unrelated temporary directory with an empty
+environment, that check runs the wrapped `publicator validate` and `check-steps` and
+`publicator-ui --help`. It also has the desktop wrapper's own `xdg-open` hand a URL to a fake
+`$BROWSER`, and requires the unwrapped binary's `check-steps` to fail because its assets are missing.
 
 - Cognitive complexity: maximum **15 per function/closure**.
 - Cyclomatic complexity: maximum **10 per function/closure**.
@@ -62,6 +70,9 @@ To test the gates: `nix develop -c python -m unittest discover -s tests/python -
 Failures print findings in the terminal/Actions log; temporary analyzer JSON is
 removed on exit. Fix existing findings rather than raising thresholds to make
 an initial run pass.
+
+[Behaviour-to-gate map](testing.md) names the check (automated or supervised) behind each
+publishing safety transition and the paths no check measures.
 
 ## Maintaining
 

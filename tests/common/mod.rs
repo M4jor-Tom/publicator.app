@@ -96,3 +96,60 @@ pub fn solid_image(path: &std::path::Path, color: &str, width: u32, height: u32)
         .unwrap();
     assert!(status.success(), "magick failed for {}", path.display());
 }
+
+/// Runs `command` to completion within `limit`. On timeout or panic the still-running
+/// process group (including grandchildren such as a worker) is killed and reaped.
+pub fn bounded_output(
+    command: &mut std::process::Command,
+    limit: std::time::Duration,
+) -> std::process::Output {
+    use std::{
+        io::{Read, Seek},
+        os::unix::process::CommandExt,
+        process::Stdio,
+        time::Instant,
+    };
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            if let Ok(None) = self.0.try_wait() {
+                // An unreaped leader keeps its pid, so the group id cannot be reused yet.
+                unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+                let _ = self.0.wait();
+            }
+        }
+    }
+    // Files, not pipes: a chatty child cannot block on a full pipe while we poll.
+    let files = [(); 2].map(|_| tempfile::tempfile().unwrap());
+    let mut child = Reaped(
+        command
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(files[0].try_clone().unwrap())
+            .stderr(files[1].try_clone().unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{command:?} did not exit within {limit:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let [stdout, stderr] = files.map(|mut file| {
+        let mut bytes = Vec::new();
+        file.rewind().unwrap();
+        file.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }
+}

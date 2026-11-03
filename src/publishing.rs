@@ -109,6 +109,19 @@ impl Publisher {
             timeouts: Timeouts::default(),
         }
     }
+    /// `PUBLICATOR_WORKER`/`PUBLICATOR_SKILL`, else the checkout-relative development assets.
+    pub fn from_env() -> Self {
+        let path = |name, default| {
+            std::env::var_os(name).map_or_else(|| PathBuf::from(default), PathBuf::from)
+        };
+        Self::new(
+            path("PUBLICATOR_WORKER", "python/publicator-da-worker"),
+            path(
+                "PUBLICATOR_SKILL",
+                ".claude/skills/publish-deviantart/SKILL.md",
+            ),
+        )
+    }
     #[cfg(test)]
     fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = timeouts;

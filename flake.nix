@@ -91,9 +91,41 @@
       rustDesktop = wrapRustProgram {
         package = rustDesktopUnwrapped;
         binary = "publicator-ui";
-        runtime = rustRuntime;
+        # Calendar actual-URL links run xdg-open.
+        runtime = rustRuntime ++ [ pkgs.xdg-utils ];
         libraries = desktopRuntime;
       };
+      # Installed closures, not Cargo asset injection: run the wrappers from an unrelated
+      # directory with an empty environment, so dev-shell tools and checkout paths cannot help.
+      packageSmoke = pkgs.runCommand "publicator-package-smoke" { } ''
+        set -euo pipefail
+        work=$(mktemp -d)
+        cd "$work"
+        clean() { env -i PATH=${pkgs.coreutils}/bin "$@"; }
+        zeros=$(printf '0%.0s' $(seq 128))
+        printf '[{"uuid":"00000000-0000-4000-8000-000000000001","state":"PICKED","title":"","description":"","submissionTimestamp":1700000000,"files":[{"basename":"a.png","sha512sum":"%s"}],"apparitions":[]}]' \
+          "$zeros" > publications.json
+        clean ${rustCli}/bin/publicator validate --data-dir "$work" > validate.out
+        grep -qx Valid validate.out
+        clean ${rustCli}/bin/publicator check-steps > steps.out
+        grep -q 'steps in sync with the skill' steps.out
+        clean ${rustDesktop}/bin/publicator-ui --help > help.out
+        grep -q -- --data-dir help.out
+        # The desktop wrapper's own environment must supply a working URL opener; a fake
+        # $BROWSER records the request instead of opening a browser.
+        sed '$s/^exec .*/exec xdg-open "$@"/' ${rustDesktop}/bin/publicator-ui > opener
+        printf '#!${pkgs.runtimeShell}\nprintf "%%s\\n" "$1" > %s/opened\n' "$work" > browser
+        chmod +x opener browser
+        clean BROWSER="$work/browser" ./opener https://example.test/art/1
+        grep -qx https://example.test/art/1 opened
+        # Without the wrapper's injected worker/skill the bare binary must not find them here.
+        if clean ${rustCliUnwrapped}/bin/publicator check-steps 2> missing.out; then
+          echo "unwrapped check-steps succeeded without its runtime assets" >&2
+          exit 1
+        fi
+        grep -q 'No such file or directory' missing.out
+        touch $out
+      '';
       rustCommand = name: subcommand: extra: {
         type = "app";
         program = "${pkgs.writeShellApplication {
@@ -123,6 +155,7 @@
         }}/bin/login";
       };
     in {
+      checks.${system}.package-smoke = packageSmoke;
       packages.${system} = {
         inherit jscpd;
         publicator-core = rustCli;

@@ -110,16 +110,3 @@ publish-pending states, failed saves, retry and unresolved receipt cases.
 **Done when:** Actual native replay establishes focus, keyboard input, visible image identity,
 scroll/resize/jump behavior, persisted edits and safe close. Reuse ui_acceptance dependency injection
 and retain fake-call/state/PID evidence outside Git. Message-only tests remain useful but separate.
-
-## FIX-10 — Safe, repeatable data-root initialization
-
-**Evidence:** `scripts/dummy-data.sh` creates 18 real PNGs with varied dimensions, real hashes and
-multiple phases, but uses current time, has no prompt archive, no other formats/fault cases and does
-not configure/write the tags file required by publishing. An explicit destination is overwritten
-(VER-04). It is a manual demo, not a complete isolated end-to-end fixture.
-
-**Done when:** Use fresh roots and preserve saved state on reopen. Required JSON/TOML/tags/media/
-archive dependencies are complete for each scenario, clocks explicit, and endpoints/workers injected.
-Do not infer safety from fake images: production UI still selects real dependency endpoints.
-The acceptance example already uses create-new publication initialization; retain those preservation
-tests. Do not add broad production fake/test switches or copy real data/profile contents.
