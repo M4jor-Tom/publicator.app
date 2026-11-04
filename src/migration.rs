@@ -185,14 +185,14 @@ fn migrate_apparition(app: &mut Value, uuid: &str) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| Error::Validation(format!("{uuid}: apparition must be an object")))?;
     if let Some(old) = object
-        .remove(OLD_TITLE)
+        .shift_remove(OLD_TITLE)
         .and_then(|v| v.as_str().map(str::to_owned))
         .filter(|v| !v.trim().is_empty())
         && is_http_url(&old)
     {
         object.insert("url".into(), Value::String(old));
     }
-    object.remove(OLD_DATE);
+    object.shift_remove(OLD_DATE);
     Ok(())
 }
 

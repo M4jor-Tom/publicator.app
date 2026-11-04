@@ -278,7 +278,10 @@ fn recording_delivery_without_url_does_not_invent_one() {
 fn absent_apparitions_behave_like_an_empty_collection() {
     let absent = || {
         let mut publication = row(1, "DESCRIBED");
-        publication.as_object_mut().unwrap().remove("apparitions");
+        publication
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("apparitions");
         json!([publication, row(2, "DESCRIBED")])
     };
     let pending = json!([{"platformName":"deviantart","state":"unpublished"}]);

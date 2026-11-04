@@ -101,7 +101,7 @@ fn migration_requires_recovery_for_empty_legacy_title_and_accepts_verified_title
             row["apparitions"][0]
                 .as_object_mut()
                 .unwrap()
-                .remove("urlElsePublicationName");
+                .shift_remove("urlElsePublicationName");
         } else {
             row["apparitions"][0]["urlElsePublicationName"] = json!("");
         }

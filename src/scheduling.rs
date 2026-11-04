@@ -315,15 +315,17 @@ pub fn repack(rows: &mut Publications, config: &Config, now: i64) -> Result<()> 
             row["scheduleProfile"] = JsonValue::String(profile.name.clone());
         }
         row["scheduleIsManual"] = JsonValue::Bool(false);
-        row.as_object_mut()
-            .unwrap()
-            .remove("apparitionTimestampIfDifferentThanSubmission");
+        // Overwritten in place, not removed and re-added, so the key keeps its position.
         if let Some(ts) = available
             .iter()
             .find(|ts| occupancy.get(ts).copied().unwrap_or(0) < profile.per_slot)
         {
             row["apparitionTimestampIfDifferentThanSubmission"] = JsonValue::from(*ts);
             *occupancy.entry(*ts).or_insert(0) += 1;
+        } else {
+            row.as_object_mut()
+                .unwrap()
+                .shift_remove("apparitionTimestampIfDifferentThanSubmission");
         }
     }
     Ok(())

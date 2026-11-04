@@ -140,6 +140,29 @@ fn mutation_returns_callback_value_and_persists_successful_edit() {
 }
 
 #[test]
+fn unchanged_mutation_rewrites_the_file_byte_for_byte() {
+    let f = Fixture::new();
+    // Raw text, unsorted keys: Fixture::write would go through serde_json and hide a sorting writer.
+    let text = r#"[
+    {
+        "uuid": "00000000-0000-4000-8000-000000000001",
+        "state": "PICKED",
+        "title": "",
+        "description": "",
+        "submissionTimestamp": 1,
+        "files": [],
+        "apparitions": []
+    }
+]"#;
+    std::fs::write(&f.store.paths().json, text).unwrap();
+    f.store.mutate(|_| Ok(())).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&f.store.paths().json).unwrap(),
+        text
+    );
+}
+
+#[test]
 fn rejected_mutation_callback_preserves_original_bytes() {
     let f = Fixture::new();
     f.write(json!([row(1, "PICKED")]));

@@ -5,6 +5,7 @@ use crate::{
 };
 use fs2::FileExt;
 use jsonschema::Validator;
+use serde::Serialize;
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Write},
@@ -81,7 +82,12 @@ impl Store {
         let mut rows = self.read_unlocked()?;
         let output = f(&mut rows)?;
         validate_publications_with(&rows, &self.config, &self.validator)?;
-        write_atomic(&self.paths.json, &serde_json::to_vec_pretty(&rows)?)?;
+        // Four spaces, the indent of the data repository's history; non-ASCII stays raw UTF-8
+        // where Python wrote `\u` escapes.
+        let indent = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+        let mut json = serde_json::Serializer::with_formatter(Vec::new(), indent);
+        rows.serialize(&mut json)?;
+        write_atomic(&self.paths.json, &json.into_inner())?;
         Ok(output)
     }
 

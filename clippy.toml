@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "serde_json::map::Map::remove", reason = "under preserve_order it moves the last key into the hole; shift_remove keeps publications.json key order" },
+]

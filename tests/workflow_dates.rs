@@ -103,14 +103,14 @@ fn approval_requires_date_and_returning_keeps_missing_custom_date_absent() {
     publication
         .as_object_mut()
         .unwrap()
-        .remove("apparitionTimestampIfDifferentThanSubmission");
+        .shift_remove("apparitionTimestampIfDifferentThanSubmission");
     f.write(json!([publication]));
     assert!(approve_date(&f.store, &common::id(1), 1_800_000_000).is_err());
     let mut scheduled = row(1, "SCHEDULED");
     scheduled
         .as_object_mut()
         .unwrap()
-        .remove("apparitionTimestampIfDifferentThanSubmission");
+        .shift_remove("apparitionTimestampIfDifferentThanSubmission");
     f.write(json!([scheduled]));
     return_to_scheduling(&f.store, &common::id(1)).unwrap();
     let saved = &f.store.read().unwrap()[0];

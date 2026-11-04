@@ -107,7 +107,7 @@ fn calendar_falls_back_to_submission_time_and_handles_publications_without_files
     let mut p = row(1, "Fallback", 1700000000);
     p.as_object_mut()
         .unwrap()
-        .remove("apparitionTimestampIfDifferentThanSubmission");
+        .shift_remove("apparitionTimestampIfDifferentThanSubmission");
     p["files"] = json!([]);
     p["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
     let event = &timeline(&[p]).unwrap()[0];
@@ -139,7 +139,7 @@ fn calendar_keeps_equal_timestamp_apparitions_in_source_order() {
 #[test]
 fn calendar_treats_a_publication_without_apparitions_as_empty() {
     let mut p = row(1, "No delivery", 1700000000);
-    p.as_object_mut().unwrap().remove("apparitions");
+    p.as_object_mut().unwrap().shift_remove("apparitions");
     assert!(timeline(&[p]).unwrap().is_empty());
 }
 

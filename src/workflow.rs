@@ -307,14 +307,14 @@ fn apply_date_edit(row: &mut Value, edit: DateEdit, config: &Config) -> Result<(
             row["scheduleIsManual"] = json!(false);
             row.as_object_mut()
                 .unwrap()
-                .remove("apparitionTimestampIfDifferentThanSubmission");
+                .shift_remove("apparitionTimestampIfDifferentThanSubmission");
         }
         DateEdit::Suggested => {
             row["scheduleIsManual"] = json!(false);
             row.as_object_mut()
                 .unwrap()
-                .remove("apparitionTimestampIfDifferentThanSubmission");
-            row.as_object_mut().unwrap().remove("scheduleProfile");
+                .shift_remove("apparitionTimestampIfDifferentThanSubmission");
+            row.as_object_mut().unwrap().shift_remove("scheduleProfile");
         }
     }
     Ok(())
@@ -503,7 +503,7 @@ fn apply_options(app: &mut Value, options: PlatformOptions) {
         if let Some(price) = price {
             app["priceIfNotFree"] = json!(price);
         } else if let Some(object) = app.as_object_mut() {
-            object.remove("priceIfNotFree");
+            object.shift_remove("priceIfNotFree");
         }
     }
     if let Some(tiers) = options.tiers {

@@ -402,7 +402,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
         if invalid_field == "uuid" {
             invalid["uuid"] = json!("short");
         } else {
-            invalid.as_object_mut().unwrap().remove(invalid_field);
+            invalid.as_object_mut().unwrap().shift_remove(invalid_field);
         }
         f.write(json!([invalid]));
         let before_invalid = std::fs::read(&f.store.paths().json).unwrap();
@@ -831,7 +831,7 @@ async fn invalid_single_generation_source_runs_no_local_preflight() {
     incomplete
         .as_object_mut()
         .unwrap()
-        .remove("submissionTimestamp");
+        .shift_remove("submissionTimestamp");
     for source in [unscheduled, row(1, "SCHEDULED"), incomplete] {
         f.write(json!([source]));
         let before = std::fs::read(&f.store.paths().json).unwrap();
