@@ -223,6 +223,9 @@
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = [
+          (pkgs.writeShellScriptBin "ui-sandbox" ''
+            exec bash "$(git rev-parse --show-toplevel)/scripts/ui-sandbox.sh" "$@"
+          '')
           devPython pkgs.git pkgs.imagemagick pkgs.playwright-driver.browsers
           pkgs.ollama pkgs.llmfit pkgs.rustc pkgs.cargo pkgs.rustfmt pkgs.clippy
           pkgs.rust-code-analysis jscpd

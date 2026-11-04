@@ -9,6 +9,19 @@
 - **Decisions:** Native Iced controls replace the retired HTTP/HTML UI and keep its look (`src/ui/style.rs`: dark page, #111 header with tab counts, card grid, browser-grey buttons, bordered Publish table, month grids). App operations own state changes; no RAM-only queue or browser clock.
 - **Verify:** `nix develop -c cargo test --features desktop --test ui_workflow --test ui_publish_calendar --test calendar`
 
+## Development sandbox
+
+Run `nix develop -c ui-sandbox [SCENARIO]`, or `ui-sandbox [SCENARIO]` inside
+`nix develop`. The default scenario is `mixed`; alternatives include `gallery`,
+`calendar`, `empty`, `history`, `publish`, `prompt-search`,
+`prompt-search-missing-archive` and `reopen`.
+
+This dev-shell-only command builds/runs `examples/ui_acceptance.rs` in release
+mode with fake AI and publishing services. Each launch prints a fresh `/tmp`
+fixture directory, preserved after exit for inspection. It is not an exported
+Nix app/package or a dependency of production builds. By contrast, dummy data
+from `scripts/dummy-data.sh` does **not** replace real provider/publishing services.
+
 ## How it works
 
 Pick scans configured roots and supports a runtime subset. Candidate limits are Empty/0, 25, 50, 75, or 100; startup defaults to 25 and all configured `publicable` paths selected. The four workflow phases have distinct actions. UI actions call Rust application operations, which persist validated state. Refresh and restart reconstruct the workflow and history from disk.
