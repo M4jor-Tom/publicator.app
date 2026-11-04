@@ -18,17 +18,20 @@ nix develop -c cargo fmt --check
 nix develop -c cargo test --all-targets --features desktop
 nix develop -c env PYTHONPATH=python pytest tests/python -q
 nix run .#check-steps
+nix run .#quality
 nix flake check
 ```
 
-Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta`, `vision-models`, `validate`, `echo-first`, `prompt-audit`, `check-steps`, `login`, and `pw-daemon`. `login` opens real Firefox for human sign-in; `pw-daemon` is the explicit Python Playwright DOM prober. The GUI is Iced, not an HTTP server. Do not run the real login/publisher for tests.
+Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta`, `vision-models`, `validate`, `echo-first`, `prompt-audit`, `check-steps`, `login`, and `pw-daemon`. Dev-only apps: `quality` (the full gate; `.githooks/pre-push` runs it) and `native-acceptance` (on-demand Xvfb replay of the UI stories against `examples/ui_acceptance.rs` fakes; not in `nix flake check`). `login` opens real Firefox for human sign-in; `pw-daemon` is the explicit Python Playwright DOM prober. The GUI is Iced, not an HTTP server. Do not run the real login/publisher for tests.
 
 ## Code and data
 
-- `src/` owns Rust core (`config.rs`, `model.rs`, `store.rs`, `workflow.rs`, `application.rs`, `scheduling.rs`, `images.rs`, `prompts.rs`, `metadata/`, `publishing.rs`, `publish_journal.rs`), CLI (`bin/`) and native UI (`ui/`).
-- `python/publicator_da/` owns the browser worker and DOM prober; it does not read the publication database or `publicator.toml`.
+- `src/` owns Rust core (`config.rs`, `model.rs`, `store.rs`, `workflow.rs`, `application.rs`, `scheduling.rs`, `images.rs`, `artwork.rs`, `prompts.rs`, `metadata/`, `publishing.rs`, `publish_journal.rs`), CLI (`bin/`) and native UI (`ui/`).
+- `python/publicator_da/` owns the browser worker and DOM prober; it does not read the publication database or `publicator.toml`. `python/publicator-da-worker` is the checkout's default worker launcher (`PUBLICATOR_WORKER` overrides; Nix packages inject their own).
+- Publishing and AI generation read artwork only through `artwork::resolve`: the visible file whose bytes match the recorded SHA-512, used via a hash-verified private copy, never the mutable original.
+- `tests/common/{executable,git,http,image,process}.rs` are also mounted into the crate with `#[path]`; keep them free of `publicator::` paths.
 - `assets/publicationsSchema.json` is a code asset. Data paths resolve against `--data-dir`/CWD.
-- `publications.json` is authoritative. Store writes validate and atomically replace under persistent thread/file locks; never remove the sibling `.lock` while writers may exist.
+- `publications.json` is authoritative. Store writes validate and atomically replace under persistent thread/file locks (publishing receipts use the same `store::write_atomic`); `DurabilityUncertain` means the new bytes may already be committed. Never remove the sibling `.lock` while writers may exist.
 - `.publicator/` holds durable publishing receipts/intents and staged upload state; preserve it for recovery and reconcile unknown remote outcomes before retrying.
 - `.thumbs/` is a persistent data-dir cache. Add `.thumbs/`, `.publications.json.lock`, `.publicator/`, `.deviantart-login/`, and `.deviantart-session/` to the separate data repository's ignore rules as applicable. Do not edit that data repository without authorization.
 - Playwright publishing copies the named `.deviantart-login/` profile into a work profile; it must not mutate the original. Login is an out-of-band human action because DeviantArt's PerimeterX blocks Playwright login.
