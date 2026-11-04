@@ -1,7 +1,7 @@
 mod common;
 use common::{Fixture, id, row};
 use publicator::{
-    publish_journal::{PublishJournal, snapshot},
+    publish_journal::{PublishJournal, pending_approval},
     publish_protocol::{PublishJob, ScheduleParts, WorkerEvent},
 };
 use serde_json::json;
@@ -28,7 +28,7 @@ fn publish_fixture() -> Fixture {
     }
 }
 fn job_for(f: &Fixture) -> (PublishJob, publicator::publish_journal::ApprovedSnapshot) {
-    let approved = snapshot(&f.store, &id(1)).unwrap();
+    let (approved, _) = pending_approval(&f.store, &id(1)).unwrap().unwrap();
     let job = PublishJob {
         protocol: 1,
         attempt_id: uuid::Uuid::new_v4().to_string(),
@@ -81,7 +81,8 @@ fn snapshot_resolves_tag_file_under_data_dir_for_external_json() {
     std::fs::write(&json_path, json!([publication]).to_string()).unwrap();
     let paths = publicator::config::Paths::resolve(Some(f.root.path()), Some(&json_path)).unwrap();
     let store = publicator::store::Store::new(paths, config).unwrap();
-    assert_eq!(snapshot(&store, &id(1)).unwrap().tags, ["first", "second"]);
+    let (approved, _) = pending_approval(&store, &id(1)).unwrap().unwrap();
+    assert_eq!(approved.tags, ["first", "second"]);
 }
 
 #[test]

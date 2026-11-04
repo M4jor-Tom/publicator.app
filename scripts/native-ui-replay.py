@@ -422,10 +422,6 @@ class App:
             os.replace(temp, self.json_path)
 
 
-def uuid(n):
-    return f"00000000-0000-4000-8000-{n:012}"
-
-
 def schedule_of(row):
     return row.get("apparitionTimestampIfDifferentThanSubmission", row["submissionTimestamp"])
 
@@ -1120,7 +1116,7 @@ def publish_options_keyboard_drift_failure_retry_and_reconcile(ctx):
     app = ctx.launch("publish", settings=settings)
     name_of = {row["uuid"]: row["files"][0]["basename"] for row in app.rows()}
     palette = Palette.files(app.fixture.glob("art/*.png"))
-    first, second = uuid(20), uuid(21)
+    first, second = (f"00000000-0000-4000-8000-{n:012}" for n in (20, 21))
 
     def row(img, uuid_):
         return area(publish_row(img, palette, name_of[uuid_]))
@@ -1473,14 +1469,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--keep", action="store_true", help="keep artifacts after success")
-    parser.add_argument("--artifacts", default="/tmp", help="parent of the artifacts directory")
     parser.add_argument("stories", nargs="*", help="story names (default: all)")
     args = parser.parse_args()
     selected = [s for s in STORIES if not args.stories or s.__name__ in args.stories]
     check(selected, f"unknown stories {args.stories}; known: {[s.__name__ for s in STORIES]}")
     repo = Path(__file__).resolve().parent.parent
     binary = (args.binary or build(repo)).resolve()
-    root = Path(tempfile.mkdtemp(prefix="publicator-native-replay.", dir=args.artifacts))
+    root = Path(tempfile.mkdtemp(prefix="publicator-native-replay.", dir="/tmp"))
     print(f"artifacts: {root}", flush=True)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGALRM, alarm)

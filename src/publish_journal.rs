@@ -132,15 +132,9 @@ pub fn publisher_lock(data_dir: &Path) -> Result<PublisherLock> {
     Ok(PublisherLock { _lock: Flock(file) })
 }
 
-pub fn snapshot(store: &Store, uuid: &str) -> Result<ApprovedSnapshot> {
-    let rows = store.read()?;
-    let row = find(&rows, uuid)?;
-    snapshot_row(store, row)
-}
-
 /// Fresh approval of a DeviantArt target that is still pending, with the verified artwork it
-/// was derived from; `None` once the delivery is recorded. Recovery uses `snapshot`, which also
-/// accepts an already-applied delivery.
+/// was derived from; `None` once the delivery is recorded. Recovery uses `snapshot_row`, which
+/// also accepts an already-applied delivery.
 pub fn pending_approval(store: &Store, uuid: &str) -> Result<Option<(ApprovedSnapshot, Artwork)>> {
     let rows = store.read()?;
     let row = find(&rows, uuid)?;
@@ -1106,14 +1100,7 @@ mod durability_tests {
         let root = tempfile::tempdir().unwrap();
         let data = root.path();
         let image = data.join("art.png");
-        assert!(
-            std::process::Command::new("magick")
-                .args(["-size", "3x2", "xc:white"])
-                .arg(&image)
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::image_fixture::solid_image(&image, "white", 3, 2);
         std::fs::write(data.join("tags.txt"), "tag\\n").unwrap();
         let publication = json!({"uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description", "submissionTimestamp":1700002800, "apparitionTimestampIfDifferentThanSubmission":1700002800, "files":[{"basename":"art.png","sha512sum":crate::images::file_sha512(&image).unwrap()}], "apparitions":[{"platformName":"deviantart","state":"unpublished"}]});
         std::fs::write(
@@ -1130,7 +1117,9 @@ mod durability_tests {
             },
         )
         .unwrap();
-        let approved = snapshot(&store, "00000000-0000-4000-8000-000000000001").unwrap();
+        let (approved, _) = pending_approval(&store, "00000000-0000-4000-8000-000000000001")
+            .unwrap()
+            .expect("pending DeviantArt target");
         let job = PublishJob {
             protocol: 1,
             attempt_id: "00000000-0000-4000-8000-000000000002".into(),

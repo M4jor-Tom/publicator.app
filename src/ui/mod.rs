@@ -842,17 +842,13 @@ impl App {
         } else if self.any_dirty() || self.publish_options.values().any(|options| options.dirty) {
             self.result = Some("Save or explicitly discard drafts before refresh.".into());
         } else {
-            self.forget_refreshable_state();
+            // Refresh re-derives what ordinary reloads keep: prompt labels (resolved again from
+            // the invalidated archive once the reload lands) and unsaved custom date inputs.
+            self.prompt_matches.clear();
+            self.custom_dates.clear();
             return self.reload_invalidating(self.prompt_archive.clone());
         }
         Task::none()
-    }
-
-    /// Refresh re-derives what ordinary reloads keep: prompt labels (resolved again from the
-    /// invalidated archive once the reload lands) and unsaved custom date inputs.
-    fn forget_refreshable_state(&mut self) {
-        self.prompt_matches.clear();
-        self.custom_dates.clear();
     }
 
     /// Every close continuation exits here: an active publisher keeps the window open, with its
@@ -2029,20 +2025,14 @@ impl App {
         self.active_tab = tab;
         // The new tab's placeholders report themselves; the old tab's never report hiding.
         self.shown_previews.clear();
-        self.revealed_publication = reveal.clone();
-        let mut tasks = vec![match tab {
-            Tab::Calendar => calendar::prepare_task(self),
+        self.revealed_publication = reveal;
+        match (tab, self.revealed_publication.is_some()) {
+            (Tab::Calendar, _) => calendar::prepare_task(self),
+            (Tab::Schedule, true) => schedule::scroll_to_target(),
+            (Tab::Describe, true) => describe::scroll_to_target(),
+            (Tab::Publish, true) => publish::scroll_to_target(),
             _ => Task::none(),
-        }];
-        if reveal.is_some() {
-            tasks.push(match tab {
-                Tab::Schedule => schedule::scroll_to_target(),
-                Tab::Describe => describe::scroll_to_target(),
-                Tab::Publish => publish::scroll_to_target(),
-                _ => Task::none(),
-            });
         }
-        Task::batch(tasks)
     }
 
     fn jump_to_publication(&mut self, uuid: String) -> Task<Message> {
@@ -3583,14 +3573,7 @@ done
     /// A SCHEDULED row whose `{n}.png` exists in `root` with its real hash, as generation needs.
     fn art_row(root: &Path, n: u64) -> Value {
         let image = root.join(format!("{n}.png"));
-        assert!(
-            std::process::Command::new("magick")
-                .args(["-size", "4x3", "xc:white"])
-                .arg(&image)
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::image_fixture::solid_image(&image, "white", 4, 3);
         serde_json::json!({
             "uuid": uuid(n), "state": "SCHEDULED", "title": "Title", "description": "Description",
             "submissionTimestamp": 1_700_002_800,

@@ -369,22 +369,18 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
 }
 /// Operator guidance for attempts whose remote outcome is unknown; mirrors the skill's recovery prose.
 fn print_unresolved(data_dir: &Path, store: &Store, result: &Result<PublishReport>) {
-    let unresolved = match result {
-        Ok(report) => report.unknown > 0,
-        Err(error) => matches!(error, Error::ReconciliationRequired(_)),
-    };
-    if !unresolved {
+    if !matches!(
+        result,
+        Ok(PublishReport { unknown: 1.., .. }) | Err(Error::ReconciliationRequired(_))
+    ) {
         return;
     }
     let blocked = publish_journal::publisher_lock(data_dir)
-        .and_then(|_lock| PublishJournal::new(data_dir)?.blocked_attempts_locked(store));
-    let blocked = match blocked {
-        Ok(blocked) => blocked,
-        Err(error) => {
+        .and_then(|_lock| PublishJournal::new(data_dir)?.blocked_attempts_locked(store))
+        .unwrap_or_else(|error| {
             eprintln!("could not list unresolved attempts: {error}");
-            return;
-        }
-    };
+            Vec::new()
+        });
     if blocked.is_empty() {
         return;
     }

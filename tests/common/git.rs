@@ -23,9 +23,11 @@ pub fn git_command(dir: &Path) -> Command {
     git
 }
 
-/// Runs `git args` in `dir` (see [`git_command`]), failing the test with Git's stderr.
-pub fn git(dir: &Path, args: &[&str]) {
+/// Runs `git args` in `dir` (see [`git_command`]), failing the test with Git's stderr; returns
+/// its stdout.
+pub fn git(dir: &Path, args: &[&str]) -> String {
     let output = git_command(dir).args(args).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "git {args:?}: {stderr}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }

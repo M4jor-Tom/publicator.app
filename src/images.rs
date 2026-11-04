@@ -420,10 +420,7 @@ pub fn prepare_ai_image(
         None => file_sha512(path)?,
     };
     let (prepared, reused_mime) = ensure_thumb_with_hook(path, cache, &sha, || {})?;
-    let mime = match reused_mime {
-        Some(mime) => mime,
-        None => actual_mime(&prepared)?,
-    };
+    let mime = reused_mime.map_or_else(|| actual_mime(&prepared), Ok)?;
     if !mime.starts_with("image/") {
         return Err(Error::InvalidState(format!(
             "AI input is not an image: {mime}"
@@ -770,6 +767,7 @@ pub(crate) fn visit_visible_files(dir: &Path, visit: &mut impl FnMut(&fs::DirEnt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_fixture::{identify, solid_image};
     use std::{sync::mpsc, thread};
 
     fn art_store() -> (tempfile::TempDir, Store) {
@@ -860,12 +858,7 @@ mod tests {
     fn simultaneous_thumbnail_creators_leave_one_complete_entry() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("large.png");
-        let made = Command::new("magick")
-            .args(["-size", "600x400", "xc:white"])
-            .arg(&source)
-            .status()
-            .unwrap();
-        assert!(made.success());
+        solid_image(&source, "white", 600, 400);
         let sha = file_sha512(&source).unwrap();
         let cache = root.path().join(".thumbs");
         let entry = cache.join(thumb_name(&source, &sha).unwrap());
@@ -892,11 +885,6 @@ mod tests {
             .map(|item| item.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(names, [entry.file_name().unwrap()], "no temp leftovers");
-        let decoded = Command::new("identify")
-            .args(["-format", "%m %wx%h"])
-            .arg(&entry)
-            .output()
-            .unwrap();
-        assert_eq!(decoded.stdout, b"PNG 300x200");
+        assert_eq!(identify(&entry, "%m %wx%h"), "PNG 300x200");
     }
 }

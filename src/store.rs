@@ -125,28 +125,14 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     temp.as_file().sync_all()?;
     #[cfg(test)]
     injected_failure_for_test(target, CommitFailureForTest::FileSync)?;
-    commit(temp, target, parent, |parent| {
-        File::open(parent)?.sync_all()
-    })
-}
-
-fn commit(
-    temp: NamedTempFile,
-    target: &Path,
-    parent: &Path,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
     #[cfg(test)]
     injected_failure_for_test(target, CommitFailureForTest::BeforeRename)?;
     temp.persist(target).map_err(|e| Error::Io(e.error))?;
+    let synced = File::open(parent).and_then(|dir| dir.sync_all());
+    // The injected failure takes the same mapping as a real directory sync failure.
     #[cfg(test)]
-    if let Err(source) = injected_failure_for_test(target, CommitFailureForTest::AfterRename) {
-        return Err(Error::DurabilityUncertain {
-            path: target.to_owned(),
-            source,
-        });
-    }
-    sync_parent(parent).map_err(|source| Error::DurabilityUncertain {
+    let synced = injected_failure_for_test(target, CommitFailureForTest::AfterRename).and(synced);
+    synced.map_err(|source| Error::DurabilityUncertain {
         path: target.to_owned(),
         source,
     })
@@ -218,34 +204,13 @@ mod commit_tests {
     use super::*;
 
     #[test]
-    fn directory_sync_failure_reports_uncertain_commit_and_keeps_new_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("publications.json");
-        let mut temp = NamedTempFile::new_in(dir.path()).unwrap();
-        temp.write_all(b"new committed bytes").unwrap();
-        let result = commit(temp, &target, dir.path(), |_| {
-            Err(std::io::Error::other("injected directory sync failure"))
-        });
-        match result {
-            Err(Error::DurabilityUncertain { path, source }) => {
-                assert_eq!(path, target);
-                assert_eq!(source.to_string(), "injected directory sync failure");
-            }
-            other => panic!("expected durability-uncertain result, got {other:?}"),
-        }
-        assert_eq!(fs::read(target).unwrap(), b"new committed bytes");
-    }
-
-    #[test]
     fn real_rename_failure_surfaces_io_error_and_removes_staged_file() {
         // A file cannot replace a directory for any user, unlike chmod-based failures.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("publications.json");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("original"), b"original bytes").unwrap();
-        let mut temp = NamedTempFile::new_in(dir.path()).unwrap();
-        temp.write_all(b"replacement bytes").unwrap();
-        let result = commit(temp, &target, dir.path(), |_| Ok(()));
+        let result = write_atomic(&target, b"replacement bytes");
         assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
         assert_eq!(
             fs::read(target.join("original")).unwrap(),

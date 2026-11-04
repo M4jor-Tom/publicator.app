@@ -24,6 +24,9 @@ mod executable_fixture;
 #[path = "../tests/common/git.rs"]
 mod git_fixture;
 #[cfg(test)]
+#[path = "../tests/common/image.rs"]
+mod image_fixture;
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/common/process.rs"]
 mod process_fixture;

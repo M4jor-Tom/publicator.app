@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 pub mod git;
 pub mod http;
+pub mod image;
 pub mod process;
+pub use self::image::*;
 pub use process::*;
 
 use publicator::{
@@ -177,29 +179,6 @@ pub fn only_attempt(root: &std::path::Path) -> String {
         .collect::<Vec<_>>();
     assert_eq!(attempts.len(), 1, "{attempts:?}");
     attempts.pop().unwrap()
-}
-
-/// Writes a decodable solid-colour image; the format follows the path suffix.
-pub fn solid_image(path: &std::path::Path, color: &str, width: u32, height: u32) {
-    let status = std::process::Command::new("magick")
-        .arg("-size")
-        .arg(format!("{width}x{height}"))
-        .arg(format!("xc:{color}"))
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "magick failed for {}", path.display());
-}
-
-/// Decodes `path` with ImageMagick's `identify -format`, failing the test if it cannot.
-pub fn identify(path: &std::path::Path, format: &str) -> String {
-    let output = std::process::Command::new("identify")
-        .args(["-format", format])
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "identify {}", path.display());
-    String::from_utf8(output.stdout).unwrap()
 }
 
 /// Drives Iced tasks the way the runtime would, keeping lifecycle effects observable:

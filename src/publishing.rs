@@ -466,7 +466,9 @@ fn prepare_batch(
         // Snapshot and upload derive from one fresh resolution.
         let (approved, artwork) = publish_journal::pending_approval(store, uuid)?
             .ok_or_else(|| Error::InvalidState("delivery target is no longer pending".into()))?;
-        let (staging, upload) = stage_upload(store, &artwork)?;
+        // The worker opens only this verified per-attempt copy, never the mutable original.
+        let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
+        let upload = prepare_upload(&artwork.stage(staging.path())?, staging.path())?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let job = make_job(&approved, attempt_id, upload, zone)?;
         staged_uploads.push(staging);
@@ -477,13 +479,6 @@ fn prepare_batch(
         jobs: batch,
         _staged_uploads: staged_uploads,
     })
-}
-
-/// The worker opens only this verified per-attempt copy, never the mutable original.
-fn stage_upload(store: &Store, artwork: &crate::artwork::Artwork) -> Result<(TempDir, PathBuf)> {
-    let staging = tempfile::tempdir_in(store.paths().data_dir.join(".publicator"))?;
-    let upload = prepare_upload(&artwork.stage(staging.path())?, staging.path())?;
-    Ok((staging, upload))
 }
 
 fn selected_targets<'a>(
@@ -750,7 +745,6 @@ struct OwnedProcess {
 
 impl OwnedProcess {
     fn spawn(command: &mut Command) -> Result<Self> {
-        #[cfg(unix)]
         command.process_group(0);
         let child = command.kill_on_drop(true).spawn()?;
         Ok(Self {
@@ -769,7 +763,6 @@ impl OwnedProcess {
     ) -> Option<std::io::Result<std::process::ExitStatus>> {
         let child = &mut self.child;
         let exited = tokio::time::timeout(grace, child.wait()).await.ok();
-        #[cfg(unix)]
         if let Some(pid) = self.group {
             // The child is the process-group leader; signal the group so browser descendants
             // receive the same bounded graceful-then-forced cleanup.
@@ -778,11 +771,6 @@ impl OwnedProcess {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             let _ = child.wait().await;
             self.group = None;
-            return exited;
-        }
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(cleanup_timeout, child.wait()).await;
         }
         exited
     }
@@ -791,7 +779,6 @@ impl OwnedProcess {
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
         // Unawaited drops happen only while the leader is unreaped, so its group ID is not reused.
-        #[cfg(unix)]
         if let Some(pid) = self.group.take() {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
@@ -873,14 +860,7 @@ mod approved_bytes_tests {
         let store = app.store();
         let selected = store.read().unwrap();
         let replacement = root.path().join("b.png");
-        assert!(
-            std::process::Command::new("magick")
-                .args(["-size", "2x2", "xc:blue"])
-                .arg(&replacement)
-                .status()
-                .unwrap()
-                .success()
-        );
+        crate::image_fixture::solid_image(&replacement, "blue", 2, 2);
         let hash = file_sha512(&replacement).unwrap();
         store
             .mutate(|rows| {
@@ -947,14 +927,7 @@ pub(crate) mod timeout_tests {
         for n in 1..=count {
             let basename = format!("{n}.png");
             let image = root.path().join(&basename);
-            assert!(
-                std::process::Command::new("magick")
-                    .args(["-size", "4x3", "xc:white"])
-                    .arg(&image)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            crate::image_fixture::solid_image(&image, "white", 4, 3);
             let hash = crate::images::file_sha512(&image).unwrap();
             rows.push(json!({
                 "uuid": format!("00000000-0000-4000-8000-{n:012}"),

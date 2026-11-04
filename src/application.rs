@@ -460,12 +460,7 @@ mod persistence_tests {
             .iter()
             .map(|n| {
                 let image = root.path().join(format!("{n}.png"));
-                let status = std::process::Command::new("magick")
-                    .args(["-size", "2x2", &format!("xc:rgb({n},0,0)")])
-                    .arg(&image)
-                    .status()
-                    .unwrap();
-                assert!(status.success());
+                crate::image_fixture::solid_image(&image, &format!("rgb({n},0,0)"), 2, 2);
                 json!({"uuid": id(*n), "state": "SCHEDULED", "title": text("Title"),
                     "description": text("Description"), "submissionTimestamp": 1_700_000_000,
                     "files": [{"basename": format!("{n}.png"),

@@ -167,7 +167,7 @@ fn fixture_rows(scenario: &str, dir: &Path) -> Vec<Value> {
 fn initialize_prompt_archive(archive: &Path) {
     git(archive, &["init", "-q"]);
     git(archive, &["add", "--all"]);
-    commit_prompt_archive_if_changed(archive).expect("commit disposable prompt archive");
+    commit_prompt_archive_if_changed(archive);
 }
 
 fn prompt_search_fixture(dir: &Path) -> (Vec<Value>, Config) {
@@ -286,25 +286,22 @@ fn gallery_fixture(dir: &Path) -> (Vec<Value>, Config) {
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    let mut config = Config {
+    let config = Config {
         publicable: vec!["art".into(), "more".into()],
         prompts: Some(prompts),
+        schedule: toml::toml! {
+            [[profiles]]
+            name = "Weekday evening"
+            day = "wednesday"
+            hour = 18
+
+            [[profiles]]
+            name = "Weekend morning"
+            day = "saturday"
+            hour = 9
+        },
         ..Config::default()
     };
-    let profile = |name: &str, day: &str, hour: i64| {
-        toml::Value::Table(toml::Table::from_iter([
-            ("name".to_owned(), name.into()),
-            ("day".to_owned(), day.into()),
-            ("hour".to_owned(), hour.into()),
-        ]))
-    };
-    config.schedule.insert(
-        "profiles".into(),
-        toml::Value::Array(vec![
-            profile("Weekday evening", "wednesday", 18),
-            profile("Weekend morning", "saturday", 9),
-        ]),
-    );
     (rows, config)
 }
 
@@ -589,32 +586,24 @@ fn calendar_publication(
     })
 }
 
-fn commit_prompt_archive_if_changed(archive: &Path) -> Result<(), String> {
+/// Commits what is staged, if anything; a Git error is never taken for "no changes".
+fn commit_prompt_archive_if_changed(archive: &Path) {
     let diff = git_command(archive)
         .args(["diff", "--cached", "--quiet", "--exit-code"])
         .output()
-        .map_err(|error| format!("check staged prompt archive changes: {error}"))?;
+        .expect("check staged prompt archive changes");
     match diff.status.code() {
-        Some(0) => Ok(()),
+        Some(0) => {}
         Some(1) => {
-            let commit = git_command(archive)
-                .args(["commit", "-qm", "archive disposable calendar prompts"])
-                .output()
-                .map_err(|error| format!("commit prompt archive changes: {error}"))?;
-            if commit.status.success() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "commit prompt archive changes failed: {}",
-                    String::from_utf8_lossy(&commit.stderr)
-                ))
-            }
+            git(
+                archive,
+                &["commit", "-qm", "archive disposable calendar prompts"],
+            );
         }
-        code => Err(format!(
-            "check staged prompt archive changes exited {:?}: {}",
-            code,
+        code => panic!(
+            "check staged prompt archive changes exited {code:?}: {}",
             String::from_utf8_lossy(&diff.stderr)
-        )),
+        ),
     }
 }
 
@@ -1255,17 +1244,8 @@ mod tests {
         fs::write(&publications, serde_json::to_vec(&saved).unwrap()).unwrap();
         let manifest = fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap();
         let archive = dir.path().join("prompt-archive");
-        let head = git_command(&archive)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        assert!(head.status.success());
-        let archive_status = git_command(&archive)
-            .args(["status", "--porcelain"])
-            .output()
-            .unwrap();
-        assert!(archive_status.status.success());
-        assert!(archive_status.stdout.is_empty());
+        let head = git(&archive, &["rev-parse", "HEAD"]);
+        assert_eq!(git(&archive, &["status", "--porcelain"]), "");
 
         let (second_rows, _) = calendar_fixture(dir.path());
         initialize_publications_if_absent(&publications, &second_rows).unwrap();
@@ -1277,24 +1257,15 @@ mod tests {
             fs::read(dir.path().join("calendar-fixture-manifest.json")).unwrap(),
             manifest
         );
-        let second_head = git_command(&archive)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        assert!(second_head.status.success());
-        assert_eq!(second_head.stdout, head.stdout);
-        let second_status = git_command(&archive)
-            .args(["status", "--porcelain"])
-            .output()
-            .unwrap();
-        assert!(second_status.status.success());
-        assert_eq!(second_status.stdout, archive_status.stdout);
+        assert_eq!(git(&archive, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&archive, &["status", "--porcelain"]), "");
     }
 
     #[test]
+    #[should_panic(expected = "check staged prompt archive changes exited")]
     fn prompt_archive_setup_reports_git_errors_instead_of_treating_them_as_no_changes() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(commit_prompt_archive_if_changed(dir.path()).is_err());
+        commit_prompt_archive_if_changed(dir.path());
     }
 
     #[test]
@@ -1452,27 +1423,18 @@ fn main() -> iced::Result {
     let settings_path = dir.join("native-fixture.json");
     let settings = load_fixture_settings(&dir);
     fs::write(dir.join("tags.txt"), "fixture-tag\n").unwrap();
-    let (rows, mut config) = if scenario == "calendar" {
-        calendar_fixture(&dir)
-    } else if scenario == "prompt-search" {
-        prompt_search_fixture(&dir)
-    } else if scenario == "prompt-search-missing-archive" {
-        prompt_search_missing_archive_fixture(&dir)
-    } else if scenario == "gallery" {
-        gallery_fixture(&dir)
-    } else {
-        let seed_scenario = if scenario == "reopen" {
-            "mixed"
-        } else {
-            &scenario
-        };
-        (
-            fixture_rows(seed_scenario, &art),
+    let (rows, mut config) = match scenario.as_str() {
+        "calendar" => calendar_fixture(&dir),
+        "prompt-search" => prompt_search_fixture(&dir),
+        "prompt-search-missing-archive" => prompt_search_missing_archive_fixture(&dir),
+        "gallery" => gallery_fixture(&dir),
+        seed => (
+            fixture_rows(if seed == "reopen" { "mixed" } else { seed }, &art),
             Config {
                 publicable: vec!["art".into()],
                 ..Config::default()
             },
-        )
+        ),
     };
     config.tags = Some("tags.txt".into());
     config.tiers = settings.tiers.clone();

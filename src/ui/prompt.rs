@@ -46,15 +46,13 @@ fn nearest_text(candidates: &[Lineage]) -> Vec<String> {
     for lineage in candidates {
         for version in &lineage.versions {
             lines.push(format!(
-                "{NOT_AUTHORITATIVE} {} — {}",
+                "Candidate only, not authoritative: {} — {}",
                 lineage.path, version.text
             ));
         }
     }
     lines
 }
-
-const NOT_AUTHORITATIVE: &str = "Candidate only, not authoritative:";
 
 #[cfg(test)]
 mod tests {
