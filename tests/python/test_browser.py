@@ -1,5 +1,5 @@
 import sqlite3
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -339,7 +339,13 @@ def test_steps_parser_detects_skill_drift(tmp_path):
     assert not browser.check_steps(skill, ["Connect to site"])
 
 
-FORM = "https://www.deviantart.com/submit"
+DEVIATION = "https://www.deviantart.com/artist/art/Title-1"
+
+
+def reply(url=browser.COMMIT_URL, method="POST", body={"status": "success", "url": DEVIATION}):
+    return SimpleNamespace(url=url, request=SimpleNamespace(method=method), json=lambda: body)
+
+
 JOB = {"attempt_id": "attempt", "uuid": "artwork", "image_path": "art.png", "title": "Title",
        "description": "Description", "tags": ["new"], "schedule": {}, "tiers": [], "galleries": []}
 
@@ -394,18 +400,17 @@ class FormLocator:
 
 
 class FormPage(CheckboxPage):
-    """One stateful submit form whose Schedule click lands on `lands` (an exception is raised instead)."""
+    """One stateful submit form whose Schedule click is answered by `answer` (None: no reply; an exception is raised)."""
 
-    def __init__(self, lands="https://www.deviantart.com/deviation/1", sticks_after=1, chips=0, chip_click="removes",
-                 galleries=(), sticky=True):
+    def __init__(self, answer=reply(), sticks_after=1, chips=0, chip_click="removes", galleries=(), sticky=True):
         super().__init__(sticks_after)
-        self.url, self.lands = "about:blank", lands
+        self.answer = answer
         self.chips, self.chip_click = chips, chip_click
         self.selected, self.sticky, self.open_combo = {"tiers": [], "gallery": list(galleries)}, sticky, None
         self.typed, self.asked, self.picks, self.commits = [], [], [], 0
         self.keyboard = SimpleNamespace(press=lambda key: None)
 
-    def goto(self, url, **kwargs): self.url = url
+    def goto(self, url, **kwargs): pass
     def wait_for_load_state(self, *args, **kwargs): pass
     def expect_file_chooser(self, **kwargs): return nullcontext(SimpleNamespace(value=FormLocator(self, "file")))
     def get_by_role(self, role, **kwargs): return FormLocator(self, "link")
@@ -421,7 +426,7 @@ class FormPage(CheckboxPage):
 
     def clicked(self, locator):
         if locator.kind == "link":
-            self.url = FORM
+            pass
         elif locator.kind == "chips":
             if self.chip_click == "raises":
                 raise RuntimeError("chip click timed out")
@@ -443,12 +448,15 @@ class FormPage(CheckboxPage):
             else:
                 labels.append(label)
 
-    def wait_for_url(self, accepted, wait_until, timeout):
-        if isinstance(self.lands, Exception):
-            raise self.lands
-        if not (wait_until == "commit" and timeout == browser.COMMIT_EVIDENCE_MS and accepted(self.lands)):
-            raise TimeoutError(f"Timeout {timeout}ms exceeded waiting for navigation")
-        self.url = self.lands
+    @contextmanager
+    def expect_response(self, accepted, timeout):
+        info = SimpleNamespace()
+        yield info
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        if not (self.commits and timeout == browser.COMMIT_EVIDENCE_MS and self.answer and accepted(self.answer)):
+            raise TimeoutError(f'Timeout {timeout}ms exceeded while waiting for event "response"')
+        info.value = self.answer
 
 
 def submit(monkeypatch, page, pick_schedule=lambda *args: None, **changes):
@@ -456,18 +464,20 @@ def submit(monkeypatch, page, pick_schedule=lambda *args: None, **changes):
     return browser.BrowserSession.submit(SimpleNamespace(page=page), {**JOB, **changes})
 
 
-@pytest.mark.parametrize("lands, outcome", [
-    ("https://www.deviantart.com/deviation/1", "scheduled"),
-    (FORM, "unknown"),  # validation rejected the form: no navigation
-    (FORM + "?step=review", "unknown"),
-    ("https://www.deviantart.com/users/login?referer=submit", "unknown"),  # challenge or signed out
-    ("https://elsewhere.example/deviation/1", "unknown"),
-    (RuntimeError("page crashed"), "unknown"),  # exception after the Schedule click
+@pytest.mark.parametrize("answer, outcome, url", [
+    (reply(), "scheduled", DEVIATION),
+    (reply(url=browser.COMMIT_URL + "?csrf=1"), "scheduled", DEVIATION),
+    (reply(body={"status": "success"}), "scheduled", None),
+    (None, "unknown", None),  # validation rejected the form: nothing was sent
+    (reply(body={"status": "error"}), "unknown", None),
+    (reply(method="GET"), "unknown", None),
+    (reply(url="https://elsewhere.example/_napi/shared_api/deviation/update"), "unknown", None),
+    (RuntimeError("page crashed"), "unknown", None),  # exception after the Schedule click
 ])
-def test_only_bounded_navigation_away_from_the_form_is_scheduled(monkeypatch, lands, outcome):
-    page = FormPage(lands=lands)
+def test_only_a_confirmed_commit_reply_is_scheduled(monkeypatch, answer, outcome, url):
+    page = FormPage(answer=answer)
     event = submit(monkeypatch, page)
-    assert (event["type"], page.commits) == (outcome, 1)
+    assert (event["type"], event.get("url"), page.commits) == (outcome, url, 1)
     assert ("error" in event) == (outcome == "unknown")
 
 

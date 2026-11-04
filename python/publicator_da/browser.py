@@ -2,12 +2,12 @@ import logging
 import shutil
 import sqlite3
 from pathlib import Path
-from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
-# ponytail: leaving the form is the only success evidence; a slower or same-URL acknowledgement
-# reports unknown (manual reconciliation) until a live confirmation selector is known.
+# The studio stays on its URL after Schedule (seen live 2026-11-04): the only success evidence is the
+# deviation/update reply to that click. No reply, or one without status "success", reports unknown.
 COMMIT_EVIDENCE_MS = 30000
+COMMIT_URL = "https://www.deviantart.com/_napi/shared_api/deviation/update"
 
 
 def validate_profiles(data_root: Path, source: Path, work: Path) -> tuple[Path, Path]:
@@ -72,8 +72,10 @@ class BrowserSession:
     def submit(self, job):
         state = {"commit_attempted": False}
         try:
-            _submit_entry(self.page, job, lambda: state.__setitem__("commit_attempted", True))
+            url = _submit_entry(self.page, job, lambda: state.__setitem__("commit_attempted", True))
             event = {"protocol": 1, "type": "scheduled", "attempt_id": job["attempt_id"], "uuid": job["uuid"]}
+            if isinstance(url, str):
+                event["url"] = url
         except Exception as exc:
             event = {"protocol": 1, "type": "unknown" if state["commit_attempted"] else "failed", "attempt_id": job["attempt_id"], "uuid": job["uuid"], "error": str(exc)}
         return event
@@ -140,9 +142,8 @@ def _pick_combo(page, combo, text):
     combo.click(); page.wait_for_timeout(200)
 
 
-def _left_form(form_url, url):
-    form, now = urlsplit(form_url), urlsplit(url)
-    return now.netloc == form.netloc and now.path != form.path and not now.path.startswith("/users/login")
+def _commit_reply(response):
+    return response.request.method == "POST" and response.url.split("?")[0] == COMMIT_URL
 
 
 def _combo_labels(combo):
@@ -197,10 +198,13 @@ def _submit_entry(page, job, before_commit):
             raise RuntimeError(f"galleries did not stay selected: {missing}")
     _pick_schedule(page, job["schedule"])
     set_checkbox(page, "matureContent", True)
-    form_url = page.url
     before_commit()
-    page.get_by_text("Schedule", exact=True).last.click()
-    page.wait_for_url(lambda url: _left_form(form_url, url), wait_until="commit", timeout=COMMIT_EVIDENCE_MS)
+    with page.expect_response(_commit_reply, timeout=COMMIT_EVIDENCE_MS) as reply:
+        page.get_by_text("Schedule", exact=True).last.click()
+    body = reply.value.json()
+    if body.get("status") != "success":
+        raise RuntimeError(f"DeviantArt did not confirm the schedule: {body}")
+    return body.get("url")
 
 
 def _noop_optional(page, job):

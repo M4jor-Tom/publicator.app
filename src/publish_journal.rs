@@ -275,7 +275,12 @@ impl PublishJournal {
                 "terminal event identity does not match intent".into(),
             ));
         }
-        if !receipt.record_terminal(event)? {
+        // The worker's URL lands in the Store: drop an invalid one rather than wedge a confirmed schedule.
+        let mut event = event.clone();
+        if let WorkerEvent::Scheduled { url, .. } = &mut event {
+            url.take_if(|url| validate_actual_url(url).is_err());
+        }
+        if !receipt.record_terminal(&event)? {
             return Ok(());
         }
         self.save_receipt(attempt_id, &receipt)

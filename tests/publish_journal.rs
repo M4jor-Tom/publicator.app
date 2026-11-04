@@ -113,6 +113,26 @@ fn success_receipt_replay_does_not_need_a_browser() {
 }
 
 #[test]
+fn worker_url_reaches_the_store_only_when_valid_and_never_blocks_the_schedule() {
+    let deviation = "https://www.deviantart.com/artist/art/Title-1";
+    for (sent, stored) in [(deviation, Some(deviation)), ("javascript:alert(1)", None)] {
+        let f = publish_fixture();
+        let (job, snap) = job_for(&f);
+        let j = PublishJournal::new(f.root.path()).unwrap();
+        j.begin(&job, &snap).unwrap();
+        let mut event = scheduled(&job);
+        if let WorkerEvent::Scheduled { url, .. } = &mut event {
+            *url = Some(sent.into());
+        }
+        j.terminal(&event).unwrap();
+        j.apply_scheduled(&f.store, &job.attempt_id).unwrap();
+        let apparition = &f.read()[0]["apparitions"][0];
+        assert_eq!(apparition["state"], "published_or_scheduled");
+        assert_eq!(apparition.get("url").and_then(|url| url.as_str()), stored);
+    }
+}
+
+#[test]
 fn locked_attempt_snapshot_is_read_only_and_only_unresolved_attempts_block() {
     use publicator::publish_journal::publisher_lock;
     let f = publish_fixture();

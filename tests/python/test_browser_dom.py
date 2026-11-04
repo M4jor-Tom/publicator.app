@@ -14,16 +14,21 @@ from publicator_da import browser
 sync_api = pytest.importorskip("playwright.sync_api")
 FORM_HTML = Path(__file__).with_name("submit_form.html").read_text(encoding="utf-8")
 PARIS_2027 = {"epoch": 1800039600, "timezone": "Europe/Paris", "year": 2027, "month": 1, "day": 15, "hour": 20, "minute": 0}
+DEVIATION = "https://www.deviantart.com/artist/art/Title-1"
 JOB = {"attempt_id": "attempt", "uuid": "artwork", "title": "Title", "description": "Description",
        "tags": ["fresh"], "tiers": [], "galleries": ["Art", "Featured"], "schedule": PARIS_2027}
 
 
 def serve_offline(route):
     # Only the stand-in origin is answered, from memory; every other request is refused.
-    if urlsplit(route.request.url).hostname == "www.deviantart.com":
-        route.fulfill(status=200, content_type="text/html", body=FORM_HTML)
-    else:
+    url = urlsplit(route.request.url)
+    if url.hostname != "www.deviantart.com":
         route.abort()
+    elif url.path == urlsplit(browser.COMMIT_URL).path:
+        refused = route.request.post_data_json["outcome"] == "refused"
+        route.fulfill(json={"status": "error"} if refused else {"status": "success", "url": DEVIATION})
+    else:
+        route.fulfill(status=200, content_type="text/html", body=FORM_HTML)
 
 
 @pytest.fixture(scope="module")
@@ -67,13 +72,14 @@ def submit(page, tmp_path):
 
 
 @pytest.mark.parametrize("outcome, expected", [
-    ("land", "scheduled"), ("delayed", "scheduled"), ("reject", "unknown"), ("login", "unknown")])
-def test_submit_is_scheduled_only_after_leaving_the_form(open_form, tmp_path, monkeypatch, outcome, expected):
+    ("land", "scheduled"), ("delayed", "scheduled"), ("reject", "unknown"), ("refused", "unknown")])
+def test_submit_is_scheduled_only_on_a_confirmed_commit_reply(open_form, tmp_path, monkeypatch, outcome, expected):
     monkeypatch.setattr(browser, "COMMIT_EVIDENCE_MS", 3000)
     # Selected "Artwork" must not satisfy "Art"; selected "Featured" must not be toggled off.
     page = open_form(start=[2026, 11], tags=["stale", "old"], selected=["Artwork", "Featured"],
                      offered=["Art", "Artwork", "Featured"], outcome=outcome)
-    assert submit(page, tmp_path)["type"] == expected
+    event = submit(page, tmp_path)
+    assert (event["type"], event.get("url")) == (expected, DEVIATION if expected == "scheduled" else None)
     state = storage(page)
     assert state["commits"] == 1
     if expected == "scheduled":
