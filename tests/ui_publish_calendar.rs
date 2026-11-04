@@ -1,31 +1,35 @@
-#[cfg(feature = "desktop")]
+#![cfg(feature = "desktop")]
+
 mod common;
 
-#[cfg(feature = "desktop")]
-fn default_application(
-    store: std::sync::Arc<publicator::store::Store>,
-) -> publicator::application::Application {
-    use publicator::{
-        application::Application,
-        metadata::{Endpoints, MetadataClient},
-    };
-    Application::new(
-        store,
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    )
-}
+use chrono::NaiveDate;
+use chrono_tz::Pacific::Honolulu;
+use iced_runtime::{Action, futures::futures::StreamExt};
+use publicator::{
+    calendar::{months, timeline},
+    config::{Config, Paths, PromptConfig, PromptGrammar},
+    prompts::{Lineage, PromptMatch, PromptVersion},
+    publish_journal::ReconcileOutcome,
+    publishing::{PublishCellState, Publisher},
+    scheduling,
+    store::Store,
+    ui::{
+        App, Message, Tab, UiOptions,
+        drafts::Field,
+        prompt,
+        publish::{SelectionState, selection_state},
+    },
+};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-#[cfg(feature = "desktop")]
-fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> publicator::ui::App {
-    use publicator::ui::{App, Message, UiOptions};
-    use std::{sync::Arc, time::Duration};
+fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> App {
     f.write(serde_json::json!([row.clone()]));
     let (mut app, _) = App::from_application(
-        Arc::new(default_application(Arc::new(f.store.clone()))),
+        Arc::new(common::offline_app(Arc::new(f.store.clone()))),
         UiOptions {
             openrouter_model: None,
             ai_timeout: Duration::from_secs(1),
@@ -35,21 +39,14 @@ fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> publicator
     app
 }
 
-#[cfg(feature = "desktop")]
 #[test]
 fn selection_is_partial_when_only_one_pending_cell_is_checked() {
-    use publicator::ui::publish::{SelectionState, selection_state};
-
     assert_eq!(selection_state(&[true, false]), SelectionState::Partial);
     assert_eq!(selection_state(&[]), SelectionState::None);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_checkbox_persists_registered_target_through_ui_task() {
-    use publicator::ui::Message;
-    use std::sync::Arc;
-
     let f = common::Fixture::new();
     let store = Arc::new(f.store.clone());
     let row = serde_json::json!({
@@ -73,19 +70,11 @@ async fn publish_checkbox_persists_registered_target_through_ui_task() {
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
-    use publicator::{
-        config::{Config, Paths},
-        publishing::Publisher,
-        ui::{App, Message, UiOptions},
-    };
-    use std::{sync::Arc, time::Duration};
-
     let root = tempfile::tempdir().unwrap();
     let paths = Paths::resolve(Some(root.path()), None).unwrap();
-    let store = Arc::new(publicator::store::Store::new(paths, Config::default()).unwrap());
+    let store = Arc::new(Store::new(paths, Config::default()).unwrap());
     let mut row = serde_json::json!({
         "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED",
         "title":"Title", "description":"Description", "submissionTimestamp":1700000000,
@@ -98,7 +87,7 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
     )
     .unwrap();
     let application = Arc::new(
-        default_application(store.clone()).with_publisher(Publisher::new(
+        common::offline_app(store.clone()).with_publisher(Publisher::new(
             root.path().join("no-worker"),
             root.path().join("no-skill"),
         )),
@@ -140,7 +129,6 @@ async fn publish_dispatch_rejects_a_stale_saved_cell_set_before_worker_start() {
     assert!(!root.path().join("no-worker").exists());
 }
 
-#[cfg(feature = "desktop")]
 #[test]
 fn calendar_timeline_keeps_each_apparition_and_its_actual_url() {
     let rows = vec![serde_json::json!({
@@ -152,15 +140,13 @@ fn calendar_timeline_keeps_each_apparition_and_its_actual_url() {
             {"platformName":"historic","state":"published_or_scheduled","url":"https://example.test/item"}
         ]
     })];
-    let events = publicator::calendar::timeline(&rows).unwrap();
+    let events = timeline(&rows).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].url.as_deref(), Some("https://example.test/item"));
     assert!(events.iter().all(|event| event.title == "<literal>"));
 }
 
-#[cfg(feature = "desktop")]
 fn publishing_fixture() -> common::Fixture {
-    use publicator::config::Config;
     let f = common::Fixture::with_config(Config {
         tags: Some("tags.txt".into()),
         ..Config::default()
@@ -169,7 +155,6 @@ fn publishing_fixture() -> common::Fixture {
     f
 }
 
-#[cfg(feature = "desktop")]
 fn pending_publication(f: &common::Fixture, n: u64) -> serde_json::Value {
     let image = f.image(&format!("{n}.png"), 4, 3);
     let mut row = common::row(n, "DESCRIBED");
@@ -182,20 +167,7 @@ fn pending_publication(f: &common::Fixture, n: u64) -> serde_json::Value {
     row
 }
 
-#[cfg(feature = "desktop")]
-fn publishing_ui_app(
-    f: &common::Fixture,
-    worker: &std::path::Path,
-) -> (
-    publicator::ui::App,
-    std::sync::Arc<publicator::store::Store>,
-    iced::Task<publicator::ui::Message>,
-) {
-    use publicator::{
-        publishing::Publisher,
-        ui::{App, UiOptions},
-    };
-    use std::{sync::Arc, time::Duration};
+fn publishing_ui_app(f: &common::Fixture, worker: &Path) -> (App, Arc<Store>, iced::Task<Message>) {
     let store = Arc::new(f.store.clone());
     let application = Arc::new(
         common::offline_app(store.clone())
@@ -211,8 +183,7 @@ fn publishing_ui_app(
     (app, store, init)
 }
 
-#[cfg(feature = "desktop")]
-fn fake_publisher_worker(f: &common::Fixture, body: &str) -> std::path::PathBuf {
+fn fake_publisher_worker(f: &common::Fixture, body: &str) -> PathBuf {
     let worker = f.path("worker.sh");
     common::executable::write_executable(
         &worker,
@@ -226,14 +197,7 @@ fn fake_publisher_worker(f: &common::Fixture, body: &str) -> std::path::PathBuf 
     worker
 }
 
-#[cfg(feature = "desktop")]
-fn options_app() -> (
-    publicator::ui::App,
-    std::sync::Arc<publicator::store::Store>,
-    tempfile::TempDir,
-) {
-    use publicator::config::Config;
-    use std::sync::Arc;
+fn options_app() -> (App, Arc<Store>, tempfile::TempDir) {
     let config = Config {
         tiers: vec!["Gold".into(), "Silver".into()],
         galleries: vec!["Art".into(), "Featured".into()],
@@ -246,19 +210,13 @@ fn options_app() -> (
     row["apparitions"] = serde_json::json!([{"platformName":"deviantart","state":"unpublished",
         "priceIfNotFree":2.5,"tiers":["Gold"],"galleries":["Art"]}]);
     let mut app = loaded_default_app(&f, row);
-    let _ = app.update(publicator::ui::Message::PublishLocksFinished(Ok(
+    let _ = app.update(Message::PublishLocksFinished(Ok(
         std::collections::HashSet::new(),
     )));
     (app, store, f.root)
 }
 
-#[cfg(feature = "desktop")]
-fn scheduled_jump_app() -> (
-    publicator::ui::App,
-    std::sync::Arc<publicator::store::Store>,
-    tempfile::TempDir,
-) {
-    use publicator::ui::Message;
+fn scheduled_jump_app() -> (App, Arc<Store>, tempfile::TempDir) {
     let (mut app, store, root) = options_app();
     store
         .mutate(|rows| {
@@ -272,13 +230,12 @@ fn scheduled_jump_app() -> (
 
 /// Holds the first submit in a recorded same-group child until `release` exists or the test
 /// process is gone: a killed test runner runs no destructor, so the hold bounds itself.
-#[cfg(feature = "desktop")]
 fn held_publisher_worker(
     f: &common::Fixture,
-    calls: &std::path::Path,
-    started: &std::path::Path,
-    release: &std::path::Path,
-) -> std::path::PathBuf {
+    calls: &Path,
+    started: &Path,
+    release: &Path,
+) -> PathBuf {
     let body = format!(
         r#"while IFS= read -r line; do
 kind=$(printf '%s' "$line" | jq -r .type)
@@ -303,12 +260,10 @@ done"#,
     fake_publisher_worker(f, &body)
 }
 
-#[cfg(feature = "desktop")]
-async fn wait_for_worker_gate<S>(actions: &mut S, started: &std::path::Path)
+async fn wait_for_worker_gate<S>(actions: &mut S, started: &Path)
 where
-    S: iced::futures::Stream<Item = iced_runtime::Action<publicator::ui::Message>> + Unpin,
+    S: iced::futures::Stream<Item = iced_runtime::Action<Message>> + Unpin,
 {
-    use iced_runtime::{Action, futures::futures::StreamExt};
     loop {
         tokio::select! {
             _ = async {
@@ -327,18 +282,16 @@ where
 
 /// A publish whose first delivery is held inside the fake worker until `release_publish`.
 /// `started` records "<worker pid = group> <hold pid>"; dropping kills that group's survivors.
-#[cfg(feature = "desktop")]
 struct HeldPublish {
     fixture: common::Fixture,
-    app: publicator::ui::App,
-    store: std::sync::Arc<publicator::store::Store>,
-    actions: iced_runtime::futures::BoxStream<iced_runtime::Action<publicator::ui::Message>>,
-    calls: std::path::PathBuf,
-    started: std::path::PathBuf,
-    release: std::path::PathBuf,
+    app: App,
+    store: Arc<Store>,
+    actions: iced_runtime::futures::BoxStream<iced_runtime::Action<Message>>,
+    calls: PathBuf,
+    started: PathBuf,
+    release: PathBuf,
 }
 
-#[cfg(feature = "desktop")]
 impl Drop for HeldPublish {
     fn drop(&mut self) {
         drop(common::GroupWatchdog(&self.started));
@@ -346,7 +299,6 @@ impl Drop for HeldPublish {
 }
 
 /// Publishes the pending publications `numbers`, beside the `extra` rows, and holds delivery.
-#[cfg(feature = "desktop")]
 async fn held_publish(numbers: &[u64], extra: &[serde_json::Value]) -> HeldPublish {
     let f = publishing_fixture();
     let mut rows: Vec<_> = numbers
@@ -363,10 +315,10 @@ async fn held_publish(numbers: &[u64], extra: &[serde_json::Value]) -> HeldPubli
     let worker = held_publisher_worker(&f, &calls, &started, &release);
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     common::ui::settle(&mut app, init).await;
-    let task = app.update(publicator::ui::Message::PublishSelected);
+    let task = app.update(Message::PublishSelected);
     let mut actions = iced_runtime::task::into_stream(task).expect("publish task started");
     tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        Duration::from_secs(5),
         wait_for_worker_gate(&mut actions, &started),
     )
     .await
@@ -383,22 +335,18 @@ async fn held_publish(numbers: &[u64], extra: &[serde_json::Value]) -> HeldPubli
 }
 
 /// Releases the held delivery; the publisher answers only after its durable receipt and cleanup.
-#[cfg(feature = "desktop")]
-async fn release_publish(held: &mut HeldPublish) -> publicator::ui::Message {
+async fn release_publish(held: &mut HeldPublish) -> Message {
     std::fs::write(&held.release, "continue").unwrap();
     let completion = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        Duration::from_secs(5),
         common::ui::next_output(&mut held.actions),
     )
     .await
     .expect("publisher returns its durable result after worker cleanup");
-    assert!(matches!(
-        completion,
-        publicator::ui::Message::PublishFinished(..)
-    ));
+    assert!(matches!(completion, Message::PublishFinished(..)));
     let (group, _) = common::gate_pids(&held.started).expect("worker gate");
     assert!(
-        common::eventually(std::time::Duration::from_secs(5), || {
+        common::eventually(Duration::from_secs(5), || {
             common::live_process_group_members(group).is_empty()
         }),
         "worker group survived its publish: {:?}",
@@ -407,7 +355,6 @@ async fn release_publish(held: &mut HeldPublish) -> publicator::ui::Message {
     completion
 }
 
-#[cfg(feature = "desktop")]
 fn sent_uuids(held: &HeldPublish) -> Vec<String> {
     std::fs::read_to_string(&held.calls)
         .unwrap()
@@ -416,51 +363,37 @@ fn sent_uuids(held: &HeldPublish) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "desktop")]
 fn deviantart_state(held: &HeldPublish, index: usize) -> serde_json::Value {
     held.store.read().unwrap()[index]["apparitions"][0]["state"].clone()
 }
 
-#[cfg(feature = "desktop")]
-fn held_outcome(held: &HeldPublish, n: u64) -> publicator::publishing::PublishCellState {
+fn held_outcome(held: &HeldPublish, n: u64) -> PublishCellState {
     held.app.publish_cell_outcome(&common::id(n)).unwrap().state
 }
 
-#[cfg(feature = "desktop")]
 fn receipt_count(held: &HeldPublish) -> usize {
     std::fs::read_dir(held.fixture.path(".publicator/publish"))
         .unwrap()
         .count()
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn close_cancel_stops_after_current_receipt_without_dropping_publisher_task() {
-    use publicator::ui::Message;
-
     let mut held = held_publish(&[32, 33], &[]).await;
     let close = common::ui::run(held.app.update(Message::CloseRequested)).await;
     assert_eq!(close.exits, 0, "close must wait for the active delivery");
     let _ = held.app.update(Message::CloseCancelPublish);
     let completion = release_publish(&mut held).await;
     let followup = common::ui::send(&mut held.app, completion).await;
-    assert!(
-        followup
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
-    );
+    assert!(followup.any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_)))));
     assert_eq!(followup.exits, 1, "close completes after cleanup");
     assert_eq!(sent_uuids(&held), [common::id(32)]);
     assert_eq!(deviantart_state(&held, 0), "published_or_scheduled");
     assert_eq!(deviantart_state(&held, 1), "unpublished");
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn duplicate_publish_request_and_completion_change_nothing_through_the_reducer() {
-    use publicator::ui::Message;
-
     let mut held = held_publish(&[32, 33], &[]).await;
     let refused = common::ui::run(held.app.update(Message::PublishSelected)).await;
     assert_eq!(
@@ -512,10 +445,8 @@ async fn duplicate_publish_request_and_completion_change_nothing_through_the_red
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let before = std::fs::read(&store.paths().json).unwrap();
@@ -527,7 +458,7 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
         std::collections::HashSet::from([uuid.clone()]),
     )));
     let refused = common::ui::send(&mut app, Message::CloseRequested).await;
-    assert!(refused.messages.iter().any(|message| matches!(
+    assert!(refused.any(|message| matches!(
         message,
         Message::OptionsSaved { result: Err(error), .. } if error.contains("Unresolved publish attempt")
     )));
@@ -541,7 +472,7 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
         value: "NaN".into(),
     });
     let failed = common::ui::send(&mut app, Message::CloseRequested).await;
-    assert!(failed.messages.iter().any(|message| matches!(
+    assert!(failed.any(|message| matches!(
         message,
         Message::OptionsSaved { result: Err(error), .. } if error.contains("finite nonnegative")
     )));
@@ -552,32 +483,21 @@ async fn close_saves_option_drafts_and_invalid_option_blocks_close() {
         value: "0".into(),
     });
     let saved = common::ui::send(&mut app, Message::CloseRequested).await;
-    assert!(
-        saved
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. }))
-    );
+    assert!(saved.any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. })));
     let persisted: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&store.paths().json).unwrap()).unwrap();
     assert_eq!(persisted[0]["apparitions"][0]["priceIfNotFree"], 0.0);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn close_during_delayed_publish_waits_for_durable_receipt_and_cleanup() {
-    use publicator::ui::Message;
-
     let mut held = held_publish(&[31], &[]).await;
     let close = common::ui::run(held.app.update(Message::CloseRequested)).await;
     assert_eq!((close.messages.len(), close.exits), (0, 0));
     let completion = release_publish(&mut held).await;
     let followup = common::ui::send(&mut held.app, completion).await;
     assert!(
-        followup
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_)))),
+        followup.any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_)))),
         "publisher status refresh failed after cleanup: {followup:?}"
     );
     assert_eq!(
@@ -589,10 +509,7 @@ async fn close_during_delayed_publish_waits_for_durable_receipt_and_cleanup() {
 
 /// Discard-and-close, or close then Refresh, during a held delivery: no exit and no
 /// reload (the publisher lock is held) until the durable outcome; then exactly one exit.
-#[cfg(feature = "desktop")]
-async fn close_route_waits_for_publisher(close: publicator::ui::Message, dirty: bool) {
-    use publicator::ui::{Message, drafts::Field};
-
+async fn close_route_waits_for_publisher(close: Message, dirty: bool) {
     let scheduled = common::id(5);
     let mut held = held_publish(&[31], &[common::row(5, "SCHEDULED")]).await;
     if dirty {
@@ -607,7 +524,7 @@ async fn close_route_waits_for_publisher(close: publicator::ui::Message, dirty: 
         let effects = common::ui::send(&mut held.app, message).await;
         assert_eq!(effects.exits, 0, "exited during publish: {effects:?}");
         assert!(
-            !effects.messages.iter().any(|message| matches!(
+            !effects.any(|message| matches!(
                 message,
                 Message::LoadFinished(..) | Message::PublishStatusesFinished(..)
             )),
@@ -632,21 +549,16 @@ async fn close_route_waits_for_publisher(close: publicator::ui::Message, dirty: 
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn discard_or_refresh_during_publish_never_exits_before_the_durable_outcome() {
-    use publicator::ui::Message;
     for dirty in [false, true] {
         close_route_waits_for_publisher(Message::ConfirmDiscard, dirty).await;
         close_route_waits_for_publisher(Message::CloseRequested, dirty).await;
     }
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn close_exits_once_only_after_the_final_draft_flush_succeeds() {
-    use publicator::ui::{Message, drafts::Field};
-
     assert_eq!(
         common::ui::run(iced::exit()).await.exits,
         1,
@@ -673,10 +585,8 @@ async fn close_exits_once_only_after_the_final_draft_flush_succeeds() {
     assert_eq!(store.read().unwrap()[0]["title"], "Saved before close");
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let _ = app.update(Message::OptionPriceChanged {
@@ -696,20 +606,11 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
     let first_save_messages = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
     assert!(
         first_save_messages
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. }))
     );
+    assert!(first_save_messages.any(|message| matches!(message, Message::LoadFinished(_, Ok(_)))));
     assert!(
         first_save_messages
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::LoadFinished(_, Ok(_))))
-    );
-    assert!(
-        first_save_messages
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::PublishStatusesFinished(Ok(_))))
     );
     let saved: serde_json::Value =
@@ -731,8 +632,6 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
     let clear_messages = common::ui::send(&mut app, Message::SaveOptions(uuid)).await;
     assert!(
         clear_messages
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::OptionsSaved { result: Ok(()), .. })),
         "cleared option edit was not admitted; task messages: {clear_messages:?}"
     );
@@ -746,10 +645,8 @@ async fn publish_options_ui_persists_plural_allow_lists_zero_and_clear() {
     let _: iced::Element<'_, Message> = publicator::ui::publish::view(&app);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_flushes_valid_option_edits_before_admission() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let _ = app.update(Message::OptionPriceChanged {
@@ -761,7 +658,6 @@ async fn publish_flushes_valid_option_edits_before_admission() {
     let refused = Err("invalid state: publisher is not configured".to_owned());
     assert!(
         messages
-            .messages.iter()
             .any(|message| matches!(message, Message::PublishFinished(_, completion) if completion.result == refused)),
         "{messages:?}"
     );
@@ -777,24 +673,14 @@ async fn publish_flushes_valid_option_edits_before_admission() {
     let before = std::fs::read(&store.paths().json).unwrap();
     let messages = common::ui::send(&mut app, Message::PublishSelected).await;
     assert!(
-        messages
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
+        messages.any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
-    assert!(
-        !messages
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::PublishFinished(..)))
-    );
+    assert!(!messages.any(|message| matches!(message, Message::PublishFinished(..))));
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn option_edits_flush_before_navigation() {
-    use publicator::ui::{Message, Tab};
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let _ = app.update(Message::OptionTierChanged {
@@ -812,10 +698,8 @@ async fn option_edits_flush_before_navigation() {
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn successful_cell_options_are_locked_and_unconfigured_values_do_not_write() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let before = std::fs::read(&store.paths().json).unwrap();
@@ -840,18 +724,13 @@ async fn successful_cell_options_are_locked_and_unconfigured_values_do_not_write
     });
     let messages = common::ui::send(&mut app, Message::SaveOptions(uuid)).await;
     assert!(
-        messages
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
+        messages.any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), saved_success);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn unresolved_or_busy_publish_options_cannot_be_saved() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
     let before = std::fs::read(&store.paths().json).unwrap();
@@ -863,12 +742,7 @@ async fn unresolved_or_busy_publish_options_cannot_be_saved() {
         std::collections::HashSet::from([uuid.clone()]),
     )));
     let blocked = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
-    assert!(
-        blocked
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
-    );
+    assert!(blocked.any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. })));
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
 
     let publish_task = app.update(Message::PublishSelected);
@@ -882,10 +756,8 @@ async fn unresolved_or_busy_publish_options_cannot_be_saved() {
     }
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn active_publish_locks_option_edits() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let before = std::fs::read(&store.paths().json).unwrap();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
@@ -897,10 +769,7 @@ async fn active_publish_locks_option_edits() {
     let options = app.update(Message::SaveOptions(uuid));
     let rejected = common::ui::run(options).await;
     assert!(
-        rejected
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
+        rejected.any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
     );
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
     for message in common::ui::run(publish).await.messages {
@@ -908,10 +777,8 @@ async fn active_publish_locks_option_edits() {
     }
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn invalid_publish_option_input_keeps_saved_bytes_unchanged() {
-    use publicator::ui::Message;
     let (mut app, store, _root) = options_app();
     let before = std::fs::read(&store.paths().json).unwrap();
     let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
@@ -922,19 +789,14 @@ async fn invalid_publish_option_input_keeps_saved_bytes_unchanged() {
         });
         let messages = common::ui::send(&mut app, Message::SaveOptions(uuid.clone())).await;
         assert!(
-            messages
-                .messages
-                .iter()
-                .any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
+            messages.any(|message| matches!(message, Message::OptionsSaved { result: Err(_), .. }))
         );
         assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
     }
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publish_failure_retry_after_restart_shows_real_cell_outcomes_and_skips_saved_success() {
-    use publicator::{publishing::PublishCellState, ui::Message};
     let f = publishing_fixture();
     let mut first = pending_publication(&f, 1);
     first["apparitions"] = serde_json::json!([
@@ -1072,12 +934,8 @@ done"#,
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn unresolved_unknown_blocks_resend_until_confirmed_not_submitted() {
-    use publicator::{
-        publish_journal::ReconcileOutcome, publishing::PublishCellState, ui::Message,
-    };
     let f = publishing_fixture();
     f.write(serde_json::json!([
         pending_publication(&f, 1),
@@ -1110,7 +968,7 @@ done"#,
     let (mut app, store, init) = publishing_ui_app(&f, &worker);
     common::ui::settle(&mut app, init).await;
     let messages = common::ui::send(&mut app, Message::PublishSelected).await;
-    assert!(messages.messages.iter().any(|message| matches!(message,
+    assert!(messages.any(|message| matches!(message,
         Message::PublishFinished(_, completion)
             if completion.result.as_ref().is_ok_and(|report|
                 report.outcomes[0].state == PublishCellState::Unknown
@@ -1132,12 +990,7 @@ done"#,
     );
     let before_resend = std::fs::read_to_string(&calls).unwrap();
     let blocked = common::ui::send(&mut app, Message::PublishSelected).await;
-    assert!(
-        !blocked
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::PublishFinished(..)))
-    );
+    assert!(!blocked.any(|message| matches!(message, Message::PublishFinished(..))));
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), before_resend);
 
     let before_invalid = std::fs::read(store.paths().json.as_path()).unwrap();
@@ -1149,19 +1002,9 @@ done"#,
         },
     )
     .await;
-    assert!(
-        !deselected
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::WorkflowFinished { .. }))
-    );
+    assert!(!deselected.any(|message| matches!(message, Message::WorkflowFinished { .. })));
     let deselect_all = common::ui::send(&mut app, Message::SelectAll(false)).await;
-    assert!(
-        !deselect_all
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::WorkflowFinished { .. }))
-    );
+    assert!(!deselect_all.any(|message| matches!(message, Message::WorkflowFinished { .. })));
     assert_eq!(
         std::fs::read(store.paths().json.as_path()).unwrap(),
         before_invalid
@@ -1183,8 +1026,6 @@ done"#,
     .await;
     assert!(
         !invalid
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
     assert_eq!(std::fs::read(&receipt).unwrap(), receipt_before);
@@ -1203,8 +1044,6 @@ done"#,
     .await;
     assert!(
         reconciled
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
     assert_eq!(
@@ -1217,7 +1056,7 @@ done"#,
             .retryable()
     );
     let retried = common::ui::send(&mut app, Message::PublishSelected).await;
-    assert!(retried.messages.iter().any(|message| matches!(message,
+    assert!(retried.any(|message| matches!(message,
         Message::PublishFinished(_, completion)
             if completion.result.as_ref().is_ok_and(|report| report.published == 2))));
     assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
@@ -1227,8 +1066,7 @@ done"#,
     );
 }
 
-#[cfg(feature = "desktop")]
-fn unknown_publisher_worker(f: &common::Fixture) -> std::path::PathBuf {
+fn unknown_publisher_worker(f: &common::Fixture) -> PathBuf {
     fake_publisher_worker(
         f,
         r#"while IFS= read -r line; do
@@ -1246,12 +1084,8 @@ done"#,
     )
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_fields_and_receipt() {
-    use publicator::{
-        publish_journal::ReconcileOutcome, publishing::PublishCellState, ui::Message,
-    };
     let f = publishing_fixture();
     f.write(serde_json::json!([pending_publication(&f, 1)]));
     let worker = unknown_publisher_worker(&f);
@@ -1292,7 +1126,7 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
         },
     )
     .await;
-    assert!(messages.messages.iter().any(|message| matches!(message,
+    assert!(messages.any(|message| matches!(message,
         Message::ReconcileFinished { result: Err(error), .. } if error.contains("approved content/options changed"))));
     assert_eq!(std::fs::read(&receipt).unwrap(), receipt_before);
     assert_eq!(
@@ -1310,12 +1144,8 @@ async fn scheduled_reconciliation_refuses_changed_metadata_and_keeps_newer_field
     );
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
-    use publicator::{
-        publish_journal::ReconcileOutcome, publishing::PublishCellState, ui::Message,
-    };
     let f = publishing_fixture();
     f.write(serde_json::json!([
         pending_publication(&f, 1),
@@ -1341,7 +1171,7 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
         },
     )
     .await;
-    assert!(invalid.messages.iter().any(|message| matches!(message,
+    assert!(invalid.any(|message| matches!(message,
         Message::ReconcileFinished { result: Err(error), .. } if error.contains("valid HTTP(S) URL"))));
     assert_eq!(std::fs::read(&receipt).unwrap(), before);
     let valid = common::ui::send(
@@ -1355,10 +1185,7 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     )
     .await;
     assert!(
-        valid
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
+        valid.any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
     assert_eq!(
         store.read().unwrap()[0]["apparitions"][0]["state"],
@@ -1390,8 +1217,6 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     .await;
     assert!(
         without_url
-            .messages
-            .iter()
             .any(|message| matches!(message, Message::ReconcileFinished { result: Ok(()), .. }))
     );
     let saved = store.read().unwrap();
@@ -1402,17 +1227,8 @@ async fn verified_scheduled_reconciliation_accepts_optional_actual_http_url() {
     assert!(saved[1]["apparitions"][0].get("url").is_none());
 }
 
-#[cfg(feature = "desktop")]
 #[test]
 fn calendar_projection_keeps_every_apparition_and_includes_current_configured_zone_month() {
-    use chrono::NaiveDate;
-    use chrono_tz::Pacific::Honolulu;
-    use publicator::{
-        calendar::{months, timeline},
-        config::Config,
-        scheduling,
-    };
-
     let rows = vec![serde_json::json!({
         "uuid": common::id(1), "state":"APPEARED", "title":"Shared title",
         "description":"Description", "submissionTimestamp":common::epoch("2024-02-01T01:30:00Z"),
@@ -1444,14 +1260,8 @@ fn calendar_projection_keeps_every_apparition_and_includes_current_configured_zo
     );
 }
 
-#[cfg(feature = "desktop")]
 #[test]
 fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() {
-    use publicator::{
-        prompts::{Lineage, PromptMatch, PromptVersion},
-        ui::prompt,
-    };
-
     let literal = "<literal> [[PUBLICATOR:TODO_GENERATE]]\n雪";
     let exact = PromptMatch::Exact(PromptVersion {
         digest: "exact-digest".into(),
@@ -1494,20 +1304,15 @@ fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() 
         prompt::plain_text(&PromptMatch::Unknown("no grammar match <x>".into())),
         vec!["Prompt unknown: no grammar match <x>"]
     );
-    let _: iced::Element<'_, publicator::ui::Message> = prompt::view(&exact);
+    let _: iced::Element<'_, Message> = prompt::view(&exact);
 }
 
-#[cfg(feature = "desktop")]
 fn capture_url_without_opening(url: &str) -> Result<(), String> {
     Err(format!("captured without browser: {url}"))
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_url() {
-    use publicator::ui::{App, Message, UiOptions};
-    use std::{sync::Arc, time::Duration};
-
     let f = common::Fixture::new();
     let store = Arc::new(f.store.clone());
     let mut row = common::row(1, "APPEARED");
@@ -1516,7 +1321,7 @@ async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_u
         "url":"https://example.test/actual?x=1"
     }]);
     std::fs::write(&store.paths().json, serde_json::to_vec(&vec![row]).unwrap()).unwrap();
-    let application = Arc::new(default_application(store));
+    let application = Arc::new(common::offline_app(store));
     let (mut app, init) = App::from_application_with_url_opener(
         application,
         UiOptions {
@@ -1530,29 +1335,21 @@ async fn actual_url_message_dispatches_valid_http_url_and_refuses_invalid_full_u
         "https://example.test/actual?x=1".into(),
     )))
     .await;
-    assert!(valid.messages.iter().any(|message| matches!(message,
+    assert!(valid.any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error == "captured without browser: https://example.test/actual?x=1")));
     let unrecorded =
         common::ui::run(app.update(Message::OpenActualUrl("https://unrecorded.test/".into())))
             .await;
-    assert!(unrecorded.messages.iter().any(|message| matches!(message,
+    assert!(unrecorded.any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error == "URL is not stored on an apparition")));
     let invalid = common::ui::run(app.update(Message::OpenActualUrl("https://".into()))).await;
-    assert!(invalid.messages.iter().any(|message| matches!(message,
+    assert!(invalid.any(|message| matches!(message,
         Message::UrlOpened { result: Err(error), .. } if error.contains("valid HTTP(S) URL"))));
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_missing_art_is_recorded()
  {
-    use publicator::{
-        config::{Config, PromptConfig, PromptGrammar},
-        prompts::PromptMatch,
-        ui::{App, Message, Tab, UiOptions},
-    };
-    use std::{sync::Arc, time::Duration};
-
     let config = PromptConfig {
         repo: "prompt-archive".into(),
         filename: r"(?P<lineage>[^_]+)_(?P<version>[0-9a-f]{40})\.png".into(),
@@ -1591,8 +1388,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
          "files":[{"basename":"missing.png","sha512sum":"0".repeat(128)}],
          "apparitions":[{"platformName":"old-platform","state":"unpublished"}]}
     ]));
-    let store = Arc::new(f.store.clone());
-    let application = Arc::new(default_application(store));
+    let application = Arc::new(common::offline_app(Arc::new(f.store.clone())));
     let (mut app, init) = App::from_application(
         application,
         UiOptions {
@@ -1638,7 +1434,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     .await;
 
     let calendar_messages = common::ui::send(&mut app, Message::Navigate(Tab::Calendar)).await;
-    assert!(calendar_messages.messages.iter().any(|message| matches!(message,
+    assert!(calendar_messages.any(|message| matches!(message,
         Message::CalendarPrepared(_, Ok(prepared))
             if prepared.artwork.get("missing.png").is_some_and(Option::is_none)
                 && prepared.prompts.iter().any(|(path, prompt)| path == &exact_path
@@ -1656,17 +1452,14 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
     let _: iced::Element<'_, Message> = publicator::ui::calendar::view(&app);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_action() {
-    use publicator::ui::{Message, Tab};
-
     let (mut app, store, _root) = scheduled_jump_app();
     let uuid = common::id(9);
     let before = app.current_tab();
     let _ = app.update(Message::Edited {
         uuid: uuid.clone(),
-        field: publicator::ui::drafts::Field::Title,
+        field: Field::Title,
         text: "Saved before jump".into(),
     });
     let task = app.update(Message::JumpToPublication(uuid.clone()));
@@ -1690,10 +1483,8 @@ async fn publication_jump_flushes_draft_then_reveals_target_phase_and_scroll_act
     let _: iced::Element<'_, Message> = publicator::ui::describe::view(&app);
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn publication_jump_maps_all_phases_to_the_next_action() {
-    use publicator::ui::{Message, Tab};
     let (mut app, store, _root) = options_app();
     for (phase, expected) in [
         ("PICKED", Tab::Schedule),
@@ -1721,24 +1512,19 @@ async fn publication_jump_maps_all_phases_to_the_next_action() {
     }
 }
 
-#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn failed_jump_flush_keeps_phase_and_draft_without_revealing_or_exiting() {
-    use publicator::ui::{Message, Tab};
     let (mut app, store, _root) = scheduled_jump_app();
     let uuid = common::id(9);
     let before = std::fs::read(&store.paths().json).unwrap();
     let _ = app.update(Message::Edited {
         uuid: uuid.clone(),
-        field: publicator::ui::drafts::Field::Title,
+        field: Field::Title,
         text: "x".repeat(51),
     });
     let messages = common::ui::send(&mut app, Message::JumpToPublication(uuid)).await;
     assert!(
-        messages
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. })),
+        messages.any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. })),
         "messages: {messages:?}"
     );
     assert_eq!((messages.exits, messages.widgets), (0, 0));
@@ -1746,11 +1532,6 @@ async fn failed_jump_flush_keeps_phase_and_draft_without_revealing_or_exiting() 
     assert_eq!(app.revealed_publication(), None);
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
     let retry = common::ui::send(&mut app, Message::RetrySave).await;
-    assert!(
-        retry
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. }))
-    );
+    assert!(retry.any(|message| matches!(message, Message::SaveFinished { result: Err(_), .. })));
     assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
 }

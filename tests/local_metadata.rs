@@ -18,7 +18,7 @@ use std::{
 
 mod common;
 use common::http::{Reply, Server};
-use common::{Fixture, connections, id};
+use common::{Fixture, connections, id, silent};
 
 fn model_option() -> ModelOption {
     VISION_MODELS[0].clone()
@@ -57,13 +57,6 @@ fn fitting_client(openrouter: &str, ollama: &str) -> (MetadataClient, tempfile::
 }
 fn local_client_for_test(server: &Server) -> (MetadataClient, tempfile::TempDir) {
     fitting_client(CLOSED, server.url())
-}
-/// Listens but never accepts or answers: a request connects into the backlog and waits for
-/// headers that never come. `connections` drains that backlog afterwards.
-fn silent() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (listener, url)
 }
 fn chat(content: &str) -> Reply {
     Reply::new("/api/chat", 200, json!({"message":{"content":content}}))
@@ -352,10 +345,7 @@ async fn withheld_chat_body_ends_at_the_shared_local_deadline() {
 #[tokio::test]
 async fn tags_without_models_is_a_protocol_error_that_leaves_publications_intact() {
     let f = Fixture::new();
-    let mut publication = f.art_row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
+    f.write(json!([f.marked_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     for batch in [false, true] {
         let server = Server::start(vec![Reply::new("/api/tags", 200, json!({"status":"ok"}))]);
@@ -382,14 +372,12 @@ async fn tags_without_models_is_a_protocol_error_that_leaves_publications_intact
 
 /// Polls the runtime (whose reaper collects killed children) until `pid` no longer exists.
 async fn gone_within(pid: libc::pid_t, limit: Duration) -> bool {
-    let until = Instant::now() + limit;
-    while unsafe { libc::kill(pid, 0) } == 0 {
-        if Instant::now() >= until {
-            return false;
+    let gone = async {
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    true
+    };
+    tokio::time::timeout(limit, gone).await.is_ok()
 }
 
 #[tokio::test]

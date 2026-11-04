@@ -92,6 +92,14 @@ impl Fixture {
     }
 }
 
+/// A fixture whose only configuration is the publicable `roots`.
+pub fn configured(roots: &[&str]) -> Fixture {
+    Fixture::with_config(Config {
+        publicable: roots.iter().map(|root| (*root).into()).collect(),
+        ..Config::default()
+    })
+}
+
 /// Discovery over the configured `roots`, at most 100 candidates.
 pub fn search(store: &Store, roots: &[&str]) -> publicator::error::Result<Vec<Candidate>> {
     let search = Search {
@@ -197,6 +205,11 @@ pub mod ui {
     }
 
     impl Effects {
+        /// Whether any produced message satisfies `f`.
+        pub fn any(&self, f: impl FnMut(&Message) -> bool) -> bool {
+            self.messages.iter().any(f)
+        }
+
         fn record(&mut self, action: Action<Message>) {
             match action {
                 Action::Output(message) => self.messages.push(message),
@@ -271,6 +284,21 @@ pub mod ui {
         );
         let _ = app.update(completion);
     }
+}
+
+/// Listens but never accepts or answers: a request connects into the backlog and waits for
+/// headers that never come. `connections` drains that backlog afterwards.
+pub fn silent() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    (listener, url)
+}
+
+/// The inherited `PATH` with `dir` searched first.
+pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(dir.to_owned()).chain(std::env::split_paths(&inherited)))
+        .unwrap()
 }
 
 /// Drains the backlog of a listener that never accepts: the connections made to it.

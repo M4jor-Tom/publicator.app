@@ -2,7 +2,7 @@
 //! lives in a temporary directory; the real data tree is never probed.
 mod common;
 
-use common::{Fixture, found, identify, run_child_test, search, solid_image};
+use common::{Fixture, configured, found, identify, run_child_test, search, solid_image};
 use publicator::{
     config::{Config, Paths},
     error::Error,
@@ -19,13 +19,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
-
-fn configured(roots: &[&str]) -> Fixture {
-    Fixture::with_config(Config {
-        publicable: roots.iter().map(|root| (*root).into()).collect(),
-        ..Config::default()
-    })
-}
 
 fn canonical(f: &Fixture, names: &[&str]) -> Vec<PathBuf> {
     let mut paths = names

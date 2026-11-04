@@ -28,9 +28,7 @@ art() { # art FILE SEED WIDTH HEIGHT
 }
 
 # The prompt archive is its own repository: no caller Git context, config or hooks leak in.
-while read -r name; do
-  unset "$name"
-done < <(git rev-parse --local-env-vars)
+unset $(git rev-parse --local-env-vars)
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_DATE="$now +0000" GIT_COMMITTER_DATE="$now +0000"
 git init -q "$dir/prompts"
@@ -47,8 +45,8 @@ candidates=(
   "$(identity dunes.txt <"$dir/prompts/dunes.txt")"
   "$(identity fog.txt <"$dir/prompts/fog.txt")"
   "$(identity fog.txt <<<'An unarchived fog draft')"
+  candidate-{4..8}.png
 )
-for i in 4 5 6 7 8; do candidates+=("candidate-$i.png"); done
 for i in "${!candidates[@]}"; do
   art "$dir/picked/${candidates[i]}" "$((i + 1))" $((480 + (i + 1) % 3 * 160)) $((640 - (i + 1) % 2 * 240))
 done

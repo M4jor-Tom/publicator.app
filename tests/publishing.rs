@@ -2,7 +2,7 @@ mod common;
 use common::{Fixture, row};
 use publicator::{
     application::Application,
-    publishing::{PublishRequest, Publisher},
+    publishing::{PublishReport, PublishRequest, Publisher},
 };
 use serde_json::json;
 use std::{
@@ -13,6 +13,22 @@ use std::{
 
 fn app(f: &Fixture) -> Application {
     app_with_timezone(f, None)
+}
+fn with_worker(f: &Fixture, worker: PathBuf) -> Application {
+    app(f).with_publisher(Publisher::new(worker, PathBuf::from("unused")))
+}
+/// Every pending cell, headless.
+fn request() -> PublishRequest {
+    PublishRequest {
+        uuids: None,
+        headless: true,
+    }
+}
+/// One uncancelled publish through `worker`.
+async fn publish(f: &Fixture, worker: PathBuf) -> publicator::error::Result<PublishReport> {
+    with_worker(f, worker)
+        .publish(request(), Arc::default())
+        .await
 }
 fn app_with_timezone(f: &Fixture, timezone: Option<&str>) -> Application {
     std::fs::write(f.path("tags.txt"), "one\ntwo\n").unwrap();
@@ -87,17 +103,7 @@ done"#,
             log.display()
         ),
     );
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = publish(&f, worker).await.unwrap();
 
     assert_eq!(
         (report.published, report.failed, report.unattempted),
@@ -122,14 +128,7 @@ async fn assert_no_worker_started(f: &Fixture) {
         PathBuf::from("/does/not/exist"),
     );
     let report = publisher
-        .publish(
-            &app(f),
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
+        .publish(&app(f), request(), Arc::default())
         .await
         .unwrap();
     assert_eq!(
@@ -196,23 +195,13 @@ done"#,
             log.display()
         ),
     );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let publish = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    let first = app
-        .publish(publish(), Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
+    let app = with_worker(&f, worker);
+    let first = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!((first.published, first.failed), (1, 0));
     let before_second = std::fs::read(&f.store.paths().json).unwrap();
     let calls_before = std::fs::read(&log).unwrap();
 
-    let second = app
-        .publish(publish(), Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
+    let second = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!(
         (
             second.published,
@@ -278,17 +267,7 @@ done"#,
             log.display()
         ),
     );
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = publish(&f, worker).await.unwrap();
     assert_eq!(report.published, 1);
     let lines = std::fs::read_to_string(log).unwrap();
     assert!(lines.lines().last().unwrap().ends_with(".png"));
@@ -308,16 +287,7 @@ async fn unsupported_artwork_fails_preflight_before_worker_start() {
     f.write(json!([item]));
     let marker = f.path("started");
     let worker = fake_worker(&f, &format!("touch '{}'", marker.display()));
-    let result = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let result = publish(&f, worker).await;
     assert!(result.is_err());
     assert!(!marker.exists());
 }
@@ -335,16 +305,7 @@ async fn step_check_failure_prevents_worker_session_start() {
             started.display()
         ),
     );
-    let result = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let result = publish(&f, worker).await;
     assert!(result.is_err());
     assert!(checked.exists());
     assert!(!started.exists());
@@ -369,16 +330,7 @@ done"#,
     );
     let app = app_with_timezone(&f, Some("America/New_York"))
         .with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let report = app
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!(report.published, 1);
     let commands: Vec<serde_json::Value> = std::fs::read_to_string(log)
         .unwrap()
@@ -412,12 +364,8 @@ done"#,
             pids.display()
         ),
     );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    let publish = app.publish(request, Arc::new(AtomicBool::new(false)));
+    let app = with_worker(&f, worker);
+    let publish = app.publish(request(), Arc::default());
     let report = tokio::time::timeout(Duration::from_secs(60), publish)
         .await
         .expect("a stderr-filling worker cannot stall the run")
@@ -490,17 +438,7 @@ done"#,
     );
 
     let started = std::time::Instant::now();
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = publish(&f, worker).await.unwrap();
     let publish_elapsed = started.elapsed();
     assert_eq!(report.failed, 1);
 
@@ -620,13 +558,8 @@ done"#,
             log.display()
         ),
     );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    let cancel = || Arc::new(AtomicBool::new(false));
-    let first = app.publish(request(), cancel()).await.unwrap();
+    let app = with_worker(&f, worker);
+    let first = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!(
         (first.published, first.failed, first.unattempted),
         (1, 1, 1)
@@ -642,7 +575,7 @@ done"#,
             .unwrap()
             .contains("persisted-before-next")
     );
-    let retry = app.publish(request(), cancel()).await.unwrap();
+    let retry = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!((retry.published, retry.failed), (0, 1));
     let calls: Vec<_> = std::fs::read_to_string(&log)
         .unwrap()
@@ -696,22 +629,11 @@ done"#,
             calls.display()
         ),
     );
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
-    let first = app
-        .publish(request(), Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
+    let app = with_worker(&f, worker);
+    let first = app.publish(request(), Arc::default()).await.unwrap();
     assert_eq!(first.unknown, 1);
     assert_eq!(first.unattempted, 1);
-    assert!(
-        app.publish(request(), Arc::new(AtomicBool::new(false)))
-            .await
-            .is_err()
-    );
+    assert!(app.publish(request(), Arc::default()).await.is_err());
     assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 1);
 }
 #[tokio::test]
@@ -741,17 +663,7 @@ done"#,
             first_id
         ),
     );
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = publish(&f, worker).await.unwrap();
     assert_eq!(
         (report.published, report.unknown, report.unattempted),
         (1, 1, 0)
@@ -779,16 +691,7 @@ done"#,
             database.display()
         ),
     );
-    let result = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let result = publish(&f, worker).await;
     assert!(result.is_err());
     let mut receipts = std::fs::read_dir(f.path(".publicator/publish")).unwrap();
     let receipt_file = receipts
@@ -845,17 +748,12 @@ done"#,
                 calls.display()
             ),
         );
-        let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
-        let request = || PublishRequest {
-            uuids: None,
-            headless: true,
-        };
-        let cancel = || Arc::new(AtomicBool::new(false));
+        let app = with_worker(&f, worker);
         let control = name == "control";
         let (failed, unknown, sends) = if control { (1, 0, 2) } else { (0, 1, 1) };
-        let first = app.publish(request(), cancel()).await.unwrap();
+        let first = app.publish(request(), Arc::default()).await.unwrap();
         assert_eq!((first.failed, first.unknown), (failed, unknown), "{name}");
-        let retry = app.publish(request(), cancel()).await;
+        let retry = app.publish(request(), Arc::default()).await;
         assert_eq!(retry.is_ok(), control, "{name} retry");
         let sent = std::fs::read_to_string(&calls).unwrap().lines().count();
         assert_eq!(sent, sends, "{name} sends");
@@ -891,16 +789,7 @@ async fn another_process_publisher_lock_prevents_worker_start() {
     assert!(common::eventually(Duration::from_secs(10), || ready.exists()));
     let marker = f.path("started");
     let worker = fake_worker(&f, &format!("touch '{}'", marker.display()));
-    let result = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let result = publish(&f, worker).await;
     std::fs::write(release, "release").unwrap();
     assert!(holder.0.wait().unwrap().success());
     assert!(matches!(result, Err(publicator::error::Error::Busy(_))));
@@ -935,18 +824,9 @@ done"#,
         ),
     );
     let cancel = Arc::new(AtomicBool::new(false));
-    let app = app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused")));
+    let app = with_worker(&f, worker);
     let task_cancel = cancel.clone();
-    let task = tokio::spawn(async move {
-        app.publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            task_cancel,
-        )
-        .await
-    });
+    let task = tokio::spawn(async move { app.publish(request(), task_cancel).await });
     let entered = tokio::task::spawn_blocking(move || {
         common::eventually(Duration::from_secs(10), || marker.exists())
     });
@@ -968,16 +848,7 @@ async fn an_unreadable_receipt_blocks_publishing_before_any_worker_starts() {
         }
         let marker = f.path("started");
         let worker = fake_worker(&f, &format!("touch '{}'", marker.display()));
-        let result = app(&f)
-            .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-            .publish(
-                PublishRequest {
-                    uuids: None,
-                    headless: true,
-                },
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await;
+        let result = publish(&f, worker).await;
         assert!(result.is_err(), "{receipt:?}");
         assert_eq!(
             marker.exists(),
@@ -1029,17 +900,7 @@ done"#,
             received.display()
         ),
     );
-    let report = app(&f)
-        .with_publisher(Publisher::new(worker, PathBuf::from("unused")))
-        .publish(
-            PublishRequest {
-                uuids: None,
-                headless: true,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
+    let report = publish(&f, worker).await.unwrap();
     assert_eq!(report.failed, 1);
     assert_eq!(std::fs::read(received).unwrap(), approved);
     assert_ne!(std::fs::read(&original).unwrap(), approved);
@@ -1051,11 +912,7 @@ async fn aborting_an_in_flight_publish_kills_the_worker_group_and_keeps_the_inte
     let worker = f.path("worker.sh");
     common::executable::write_executable(&worker, &common::hanging_submit_worker(&calls, &gate));
     let _watchdog = common::GroupWatchdog(&gate);
-    let app = Arc::new(app(&f).with_publisher(Publisher::new(worker, PathBuf::from("unused"))));
-    let request = || PublishRequest {
-        uuids: None,
-        headless: true,
-    };
+    let app = Arc::new(with_worker(&f, worker));
     let task = tokio::spawn({
         let app = app.clone();
         async move { app.publish(request(), Arc::default()).await }

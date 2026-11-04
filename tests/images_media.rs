@@ -1,14 +1,10 @@
 //! Media admission and conversion: every check decodes media generated here with ImageMagick.
 mod common;
 
-use common::{Fixture, executable::write_executable, identify, run_child_test};
+use common::{Fixture, configured, executable::write_executable, identify, run_child_test};
 use publicator::{
-    config::Config,
     error::Result,
-    images::{
-        Search, ensure_thumb, file_sha512, find_candidates, prepare_ai_image, prepare_upload,
-        validate_upload,
-    },
+    images::{ensure_thumb, file_sha512, prepare_ai_image, prepare_upload, validate_upload},
 };
 use std::{
     env, fs,
@@ -211,24 +207,12 @@ fn decodable_media_outside_the_admitted_formats_is_refused() {
 
 #[test]
 fn discovery_admits_the_tiff_suffix_but_not_tif() {
-    let config = Config {
-        publicable: vec!["art".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["art"]);
     fs::create_dir(f.path("art")).unwrap();
     let tiff = f.generated("art/page.tiff", &["-size", "4x4", "xc:red"]);
     let tif = f.generated("art/page.tif", &["-size", "4x4", "xc:blue"]);
     assert_eq!(identify(&tif, "%m"), "TIFF");
-    let search = Search {
-        limit: 25,
-        paths: vec!["art".into()],
-    };
-    let found = find_candidates(&f.store, &search).unwrap();
-    assert_eq!(
-        found.into_iter().map(|c| c.path).collect::<Vec<_>>(),
-        [tiff]
-    );
+    assert_eq!(common::found(&f, &["art"]).unwrap(), [tiff]);
 }
 
 const FAILING_MAGICK_ROOT: &str = "PUBLICATOR_TEST_FAILING_MAGICK_ROOT";
@@ -256,8 +240,7 @@ fn failed_thumbnail_conversion_caches_nothing_and_the_next_call_retries() {
     let bin = f.path("bin");
     fs::create_dir(&bin).unwrap();
     write_executable(&bin.join("magick"), "#!/bin/sh\nexit 1\n");
-    let inherited = env::var_os("PATH").unwrap();
-    let path = env::join_paths([bin].into_iter().chain(env::split_paths(&inherited))).unwrap();
+    let path = common::path_with(&bin);
     run_child_test(
         "failed_conversion_child",
         f.root.path(),

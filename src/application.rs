@@ -437,7 +437,7 @@ mod test_http;
 mod persistence_tests {
     use super::{
         Application, GENERATE_MARKER, GenerationRequest, Source, Store, VISION_MODELS, Value,
-        test_http::{Reply, Server},
+        test_http::{Reply, Server, completion},
     };
     use crate::{
         config::{Config, Paths},
@@ -471,15 +471,6 @@ mod persistence_tests {
         let paths = Paths::resolve(Some(root.path()), None).unwrap();
         fs::write(&paths.json, serde_json::to_vec(&rows).unwrap()).unwrap();
         (root, Store::new(paths, Config::default()).unwrap())
-    }
-
-    fn completion(title: &str) -> Reply {
-        let content = json!({"title": title, "description": "A generated description."});
-        Reply::new(
-            "/chat/completions",
-            200,
-            json!({"choices":[{"message":{"content": content.to_string()}}]}),
-        )
     }
 
     fn app(store: &Store, server: &Server) -> Application {

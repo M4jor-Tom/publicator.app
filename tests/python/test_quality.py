@@ -191,29 +191,27 @@ class PrePushTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.head)
         self.assertEqual(self.git("status", "--porcelain"), "")
 
-    def test_quality_runner_clears_git_context_before_running_tools(self):
+    def run_quality(self, spies, timeout=60):
+        """Runs quality.sh in the fixture repo with each `spies` tool (name: sh body) first on PATH."""
         real_bash = shutil.which("bash")
         bin_dir = Path(self.env["PATH"].split(os.pathsep)[0])
-        for name in ("pytest", "cargo", "bash"):
-            tool = bin_dir / name
-            tool.write_text('#!/bin/sh\ntest -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_INDEX_FILE:-}"\n')
-            tool.chmod(0o755)
+        for name, body in spies.items():
+            (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
+            (bin_dir / name).chmod(0o755)
+        return subprocess.run([real_bash, str(ROOT / "scripts/quality.sh")], cwd=self.repo,
+                              env=self.env, text=True, capture_output=True, timeout=timeout)
+
+    def test_quality_runner_clears_git_context_before_running_tools(self):
         self.env.update(GIT_DIR=str(self.repo / ".git"), GIT_WORK_TREE=str(self.repo),
                         GIT_INDEX_FILE=str(self.repo / ".git/index"))
-        result = subprocess.run([real_bash, str(ROOT / "scripts/quality.sh")],
-                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        no_git = 'test -z "${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_INDEX_FILE:-}"'
+        result = self.run_quality(dict.fromkeys(("pytest", "cargo", "bash"), no_git))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_quality_runner_tests_headless_in_a_separate_target_dir(self):
-        real_bash = shutil.which("bash")
-        bin_dir = Path(self.env["PATH"].split(os.pathsep)[0])
-        for name, body in (("pytest", "exit 0"), ("bash", "exit 0"),
-                           ("cargo", 'printf "%s|%s\\n" "${CARGO_TARGET_DIR:-}" "$*" >> "$CALLS"')):
-            (bin_dir / name).write_text(f"#!/bin/sh\n{body}\n")
-            (bin_dir / name).chmod(0o755)
         self.env.pop("CARGO_TARGET_DIR", None)
-        result = subprocess.run([real_bash, str(ROOT / "scripts/quality.sh")], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True, timeout=60)
+        result = self.run_quality({"pytest": "exit 0", "bash": "exit 0",
+                                   "cargo": 'printf "%s|%s\\n" "${CARGO_TARGET_DIR:-}" "$*" >> "$CALLS"'})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         tests = [line for line in self.calls.read_text().splitlines() if "|test " in line]
         self.assertEqual(tests, ["|test --locked --all-targets --features desktop",
@@ -221,18 +219,12 @@ class PrePushTests(unittest.TestCase):
 
     def test_quality_runner_fails_when_a_python_test_fails(self):
         # Real pytest over a disposable tests/python; every other tool is a passing spy.
-        real_bash = shutil.which("bash")
-        bin_dir = Path(self.env["PATH"].split(os.pathsep)[0])
-        for name in ("cargo", "bash"):
-            (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
-            (bin_dir / name).chmod(0o755)
         tests = self.repo / "tests/python"
         tests.mkdir(parents=True)
         for body, fails in (("assert True", False), ("assert False", True)):
             with self.subTest(body=body):
                 (tests / "test_fixture.py").write_text(f"def test_fixture():\n    {body}\n")
-                result = subprocess.run([real_bash, str(ROOT / "scripts/quality.sh")], cwd=self.repo,
-                                        env=self.env, text=True, capture_output=True, timeout=120)
+                result = self.run_quality({"cargo": "exit 0", "bash": "exit 0"}, timeout=120)
                 self.assertEqual(result.returncode != 0, fails, result.stdout + result.stderr)
                 self.assertIn("1 failed" if fails else "1 passed", result.stdout)
 

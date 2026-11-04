@@ -1,5 +1,5 @@
 mod common;
-use common::http::{Reply, Server};
+use common::http::{Reply, Server, completion, content};
 use common::{Fixture, eventually, id, row, run_child_test, running, with_markers};
 use publicator::{
     application::Application,
@@ -9,13 +9,7 @@ use publicator::{
 };
 use serde_json::json;
 use std::{
-    net::TcpListener,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc,
-    },
-    thread,
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -33,16 +27,6 @@ fn provider_failures(records: usize) -> Vec<Reply> {
     (0..records)
         .flat_map(|_| [failure("/chat/completions"), failure("/models")])
         .collect()
-}
-fn completion(title: &str) -> Reply {
-    Reply::new(
-        "/chat/completions",
-        200,
-        json!({"choices":[{"message":{"content":content(title)}}]}),
-    )
-}
-fn content(title: &str) -> String {
-    json!({"title":title,"description":"A complete generated description."}).to_string()
 }
 fn local_client(endpoint: String, llmfit: &std::path::Path) -> MetadataClient {
     MetadataClient::new(
@@ -93,11 +77,7 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
     let allowed_paths = Paths::resolve(Some(f.root.path()), Some(&json_path)).unwrap();
     let allowed_store = Store::new(allowed_paths, config.clone()).unwrap();
     std::fs::write(&json_path, json!([make_row("Allowed")]).to_string()).unwrap();
-    let server = Server::start(vec![Reply::new(
-        "/chat/completions",
-        200,
-        json!({"choices":[{"message":{"content":content("Allowed title")}}]}),
-    )]);
+    let server = Server::start(vec![completion("Allowed title")]);
     let allowed_app = Application::new(Arc::new(allowed_store), client(server.url().to_owned()));
     let report = allowed_app
         .generate_marked(&request(Source::OpenRouter))
@@ -203,8 +183,8 @@ async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
 async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_work() {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED"), row(2, "SCHEDULED")]));
-    let (server, app, task, release_tx) = paused_generation(&f, Reply::new("/chat/completions", 200, json!({"choices":[{"message":{"content":json!({"title":"Generated title","description":"A generated description."}).to_string()}}]})))
-    .await;
+    let (server, app, task, release_tx) =
+        paused_generation(&f, completion("Generated title")).await;
     assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
     assert!(
         app.generate_one(&id(1), request(Source::OpenRouter))
@@ -222,10 +202,7 @@ async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_w
 #[tokio::test]
 async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
     let f = Fixture::new();
-    let mut rows = Vec::new();
-    for n in 1..=3 {
-        rows.push(f.marked_row(n));
-    }
+    let mut rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
     rows[2]["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
     rows[2]["description"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
     f.write(json!(rows));
@@ -236,11 +213,7 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
             json!({"error":{"message":"fixture failure"}}),
         ),
         Reply::new("/models", 200, json!({"data":[]})),
-        Reply::new(
-            "/chat/completions",
-            200,
-            json!({"choices":[{"message":{"content":content("Generated")}}]}),
-        ),
+        completion("Generated"),
     ]);
     let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
 
@@ -276,10 +249,7 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
 #[tokio::test]
 async fn batch_persists_each_success_before_continuing_after_failure() {
     let f = Fixture::new();
-    let mut rows = Vec::new();
-    for n in 1..=3 {
-        rows.push(f.marked_row(n));
-    }
+    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
     f.write(json!(rows));
     // The second (failing) record's request is held until the first success is on disk.
     let mut replies = vec![completion("title-3")];
@@ -327,24 +297,12 @@ async fn successful_batches_save_in_provider_order() {
         (Source::Local, vec![1, 2, 3]),
     ] {
         let f = Fixture::new();
-        let mut rows = Vec::new();
-        for n in 1..=3 {
-            let mut p = f.art_row(n, "SCHEDULED");
-            p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-            p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-            rows.push(p);
-        }
+        let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
         f.write(json!(rows));
         let replies = if source == Source::OpenRouter {
             expected
                 .iter()
-                .map(|n| {
-                    Reply::new(
-                        "/chat/completions",
-                        200,
-                        json!({"choices":[{"message":{"content":content(&format!("title-{n}"))}}]}),
-                    )
-                })
+                .map(|n| completion(&format!("title-{n}")))
                 .collect()
         } else {
             let mut replies = vec![Reply::new(
@@ -414,30 +372,10 @@ async fn publishing_lease_blocks_edits_until_dropped() {
 
 #[tokio::test]
 async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
-    use std::io::ErrorKind;
-
     let f = Fixture::new();
     f.image("1.png", 4, 4);
     f.write(json!([row(1, "PICKED")]));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let (thread_calls, thread_stop) = (Arc::clone(&calls), Arc::clone(&stop));
-    let server = thread::spawn(move || {
-        while !thread_stop.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((_, _)) => {
-                    thread_calls.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("counter listener failed: {error}"),
-            }
-        }
-    });
+    let (listener, endpoint) = common::silent();
     let app = Application::new(Arc::new(f.store.clone()), client(endpoint));
     let before_phase = std::fs::read(&f.store.paths().json).unwrap();
     assert!(
@@ -460,9 +398,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before_model);
 
     for invalid_field in ["uuid", "submissionTimestamp"] {
-        let mut invalid = row(1, "SCHEDULED");
-        invalid["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        invalid["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+        let mut invalid = with_markers(row(1, "SCHEDULED"));
         if invalid_field == "uuid" {
             invalid["uuid"] = json!("short");
         } else {
@@ -482,9 +418,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
         );
     }
     tokio::time::sleep(Duration::from_millis(30)).await;
-    stop.store(true, Ordering::Relaxed);
-    server.join().unwrap();
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(common::connections(&listener), 0);
 }
 
 #[tokio::test]
@@ -539,25 +473,12 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
 #[tokio::test]
 async fn batch_keeps_first_successful_safe_model_as_preference() {
     let f = Fixture::new();
-    let mut rows = Vec::new();
-    for n in 1..=3 {
-        let mut p = f.art_row(n, "SCHEDULED");
-        p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-        rows.push(p);
-    }
+    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
     f.write(json!(rows));
     let catalog = json!({"data":[
         {"id":"vendor/model-b:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}},
         {"id":"google/model-c:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}}
     ]});
-    let success = |title: &str| {
-        Reply::new(
-            "/chat/completions",
-            200,
-            json!({"choices":[{"message":{"content":content(title)}}]}),
-        )
-    };
     let failed = || {
         Reply::new(
             "/chat/completions",
@@ -568,10 +489,10 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
     let server = Server::start(vec![
         failed(),
         Reply::new("/models", 200, catalog.clone()),
-        success("one"),
+        completion("one"),
         failed(),
-        success("two"),
-        success("three"),
+        completion("two"),
+        completion("three"),
     ]);
     let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let report = app
@@ -600,10 +521,7 @@ async fn batch_keeps_first_successful_safe_model_as_preference() {
 #[tokio::test]
 async fn changed_artwork_bytes_make_no_provider_call_and_save_nothing() {
     let f = Fixture::new();
-    let mut publication = f.art_row(1, "SCHEDULED");
-    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    publication["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    f.write(json!([publication]));
+    f.write(json!([f.marked_row(1)]));
     f.colored("1.png", "blue");
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let server = Server::start(vec![completion("Generated")]);
@@ -741,11 +659,7 @@ async fn stalled_image_preparation_fails_within_the_generation_deadline() {
         bin.path().join("pids").display()
     );
     common::executable::write_executable(&bin.path().join("identify"), &script);
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(bin.path().to_owned()).chain(std::env::split_paths(&inherited)),
-    )
-    .unwrap();
+    let path = common::path_with(bin.path());
     let child = std::panic::catch_unwind(|| {
         run_child_test(
             "stalled_image_preparation_fails_within_the_generation_deadline",

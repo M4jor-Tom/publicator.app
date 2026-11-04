@@ -31,6 +31,17 @@ impl Reply {
     }
 }
 
+/// Generated metadata as a provider returns it: `title` and a complete description.
+pub fn content(title: &str) -> String {
+    serde_json::json!({"title":title,"description":"A complete generated description."}).to_string()
+}
+
+/// An OpenRouter chat completion answering `content(title)`.
+pub fn completion(title: &str) -> Reply {
+    let body = serde_json::json!({"choices":[{"message":{"content":content(title)}}]});
+    Reply::new("/chat/completions", 200, body)
+}
+
 pub struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,

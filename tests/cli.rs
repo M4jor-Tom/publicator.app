@@ -99,14 +99,7 @@ fn run_local(root: &std::path::Path, server: &Server, args: &[&str]) -> std::pro
     let mut command = Command::new(env!("CARGO_BIN_EXE_publicator"));
     command
         .current_dir(root)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                root.display(),
-                std::env::var_os("PATH").unwrap().to_string_lossy()
-            ),
-        )
+        .env("PATH", common::path_with(root))
         .env("PUBLICATOR_OLLAMA_URL", server.url())
         .arg("generate-meta")
         .arg("--source")
@@ -145,14 +138,7 @@ fn run_local_pty(root: &std::path::Path, server: &Server, input: &[u8]) -> std::
     let stderr = slave_file.try_clone().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                root.display(),
-                std::env::var_os("PATH").unwrap().to_string_lossy()
-            ),
-        )
+        .env("PATH", common::path_with(root))
         .env("PUBLICATOR_OLLAMA_URL", server.url())
         .args([
             "generate-meta",
@@ -613,14 +599,7 @@ fn cli_local_consent_paths_are_terminal_and_nonterminal_safe() {
     );
     let output = Command::new(env!("CARGO_BIN_EXE_publicator"))
         .current_dir(root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                root.path().display(),
-                std::env::var_os("PATH").unwrap().to_string_lossy()
-            ),
-        )
+        .env("PATH", common::path_with(root.path()))
         .env("PUBLICATOR_OLLAMA_URL", "http://127.0.0.1:1")
         .args([
             "generate-meta",
@@ -1087,8 +1066,7 @@ fn dummy_data(dir: &std::path::Path, spies: Option<&std::path::Path>) -> std::pr
         .arg(dir)
         .env("PUBLICATOR_DUMMY_NOW", DUMMY_NOW.to_string());
     if let Some(spies) = spies {
-        let path = std::env::var("PATH").unwrap();
-        command.env("PATH", format!("{}:{path}", spies.display()));
+        command.env("PATH", common::path_with(spies));
     }
     common::bounded_output(&mut command, std::time::Duration::from_secs(120))
 }

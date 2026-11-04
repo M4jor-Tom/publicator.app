@@ -64,8 +64,7 @@ def test_daemon_refuses_planted_endpoints_before_browser_or_exec(tmp_path, monke
     run = tmp_path / "run"
     run.mkdir(mode=0o700)
     sentinel, victim = tmp_path / "executed", tmp_path / "victim"
-    if plant is not plant_cmd_symlink:
-        victim.write_text("keep")
+    victim.write_text("keep")
     plant(run, f"open({str(sentinel)!r}, 'w').write('executed')", victim)
     before = victim.read_text()
     monkeypatch.setattr(pw_daemon.tempfile, "mkdtemp", lambda **_: str(run))

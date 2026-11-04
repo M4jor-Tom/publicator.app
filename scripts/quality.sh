@@ -2,9 +2,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 # Tests create their own repositories; a caller's explicit Git paths must not leak.
-while read -r name; do
-    unset "$name"
-done < <(git rev-parse --local-env-vars)
+unset $(git rev-parse --local-env-vars)
 
 status=0
 check() {

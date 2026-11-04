@@ -6,7 +6,6 @@ use iced::Element;
 use publicator::{
     application::Application,
     config::{Config, Paths},
-    metadata::{Endpoints, MetadataClient},
     ui::{App, Message, UiOptions, pick, schedule},
     workflow::{self, DateEdit},
 };
@@ -29,12 +28,7 @@ fn app_with_rows(
     };
     let store = Arc::new(publicator::store::Store::new(paths, config).unwrap());
     std::fs::write(&store.paths().json, serde_json::to_vec(&rows).unwrap()).unwrap();
-    let client = MetadataClient::new(
-        reqwest::Client::new(),
-        Endpoints::default(),
-        "llmfit".into(),
-    );
-    let application = Arc::new(Application::new(store.clone(), client));
+    let application = Arc::new(common::offline_app(store.clone()));
     let (mut app, _) = App::from_application(
         application.clone(),
         UiOptions {
@@ -74,14 +68,7 @@ fn default_search_selects_every_configured_publicable_directory() {
         ..Config::default()
     };
     let store = Arc::new(publicator::store::Store::new(paths, config).unwrap());
-    let application = Arc::new(Application::new(
-        store,
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
+    let application = Arc::new(common::offline_app(store));
     let (app, _) = App::from_application(
         application,
         UiOptions {
@@ -157,14 +144,7 @@ per_slot = 1"#,
         serde_json::to_vec(&json!([row])).unwrap(),
     )
     .unwrap();
-    let application = Arc::new(Application::new(
-        store.clone(),
-        MetadataClient::new(
-            reqwest::Client::new(),
-            Endpoints::default(),
-            "llmfit".into(),
-        ),
-    ));
+    let application = Arc::new(common::offline_app(store.clone()));
     let (mut app, _) = App::from_application(
         application,
         UiOptions {

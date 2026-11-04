@@ -1,23 +1,16 @@
 mod common;
 
-use common::{Fixture, identify, row, solid_image};
-use publicator::{
-    config::Config,
-    images::{
-        Candidate, Search, delete_candidate, ensure_thumb, file_sha512, find_candidates,
-        prepare_ai_image, prepare_upload, thumb_name, validate_upload,
-    },
+use common::{Fixture, configured, identify, row, solid_image};
+use publicator::images::{
+    Candidate, Search, delete_candidate, ensure_thumb, file_sha512, find_candidates,
+    prepare_ai_image, prepare_upload, thumb_name, validate_upload,
 };
 use serde_json::json;
 use std::{fs, path::PathBuf};
 
 #[test]
 fn search_accepts_only_configured_unique_paths_and_supported_limits() {
-    let config = Config {
-        publicable: vec!["picked".into(), "more".into(), "missing".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["picked", "more", "missing"]);
     fs::create_dir_all(f.path("picked")).unwrap();
     fs::create_dir_all(f.path("more")).unwrap();
     f.image("picked/a.png", 10, 10);
@@ -70,11 +63,7 @@ fn search_accepts_only_configured_unique_paths_and_supported_limits() {
 
 #[test]
 fn search_caps_results_at_the_selected_supported_limit() {
-    let config = Config {
-        publicable: vec!["art".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["art"]);
     fs::create_dir_all(f.path("art")).unwrap();
     for index in 0..30 {
         f.image(&format!("art/{index}.png"), index + 1, 1);
@@ -92,11 +81,7 @@ fn search_caps_results_at_the_selected_supported_limit() {
 
 #[test]
 fn discovery_skips_a_duplicate_hash_under_a_new_basename() {
-    let config = Config {
-        publicable: vec!["picked".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["picked"]);
     fs::create_dir_all(f.path("picked")).unwrap();
     fs::create_dir_all(f.path("history")).unwrap();
     let old = f.image("history/old.png", 12, 12);
@@ -122,11 +107,7 @@ fn discovery_skips_a_duplicate_hash_under_a_new_basename() {
 
 #[test]
 fn discovery_rejects_every_hash_key_and_case_without_basename_help() {
-    let config = Config {
-        publicable: vec!["picked".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["picked"]);
     fs::create_dir_all(f.path("picked")).unwrap();
     let mut published = row(1, "APPEARED");
     published["files"] = json!([]);
@@ -157,11 +138,7 @@ fn discovery_rejects_every_hash_key_and_case_without_basename_help() {
 
 #[test]
 fn discovery_offers_one_candidate_per_content_identity() {
-    let config = Config {
-        publicable: vec!["art".into(), "art/nested".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["art", "art/nested"]);
     fs::create_dir_all(f.path("art/nested")).unwrap();
     let first = f.image("art/first.png", 10, 10);
     fs::copy(&first, f.path("art/copy.png")).unwrap();
@@ -179,11 +156,7 @@ fn discovery_offers_one_candidate_per_content_identity() {
 
 #[test]
 fn discovery_skips_changed_bytes_under_a_referenced_basename() {
-    let config = Config {
-        publicable: vec!["art".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["art"]);
     fs::create_dir_all(f.path("art")).unwrap();
     let referenced = f.image("art/changed.png", 12, 12);
     let old_hash = file_sha512(&referenced).unwrap();
@@ -209,11 +182,7 @@ fn discovery_skips_changed_bytes_under_a_referenced_basename() {
 
 #[test]
 fn referenced_basename_blocks_delete_even_when_art_bytes_changed() {
-    let config = Config {
-        publicable: vec!["art".into()],
-        ..Config::default()
-    };
-    let f = Fixture::with_config(config);
+    let f = configured(&["art"]);
     fs::create_dir_all(f.path("art")).unwrap();
     let p = f.image("art/changed.png", 12, 12);
     let candidate = Candidate {

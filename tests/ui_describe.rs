@@ -1,7 +1,11 @@
 #![cfg(feature = "desktop")]
 
 mod common;
-use common::{Fixture, http::Reply, id, row, with_markers};
+use common::{
+    Fixture,
+    http::{Reply, completion},
+    id, row, with_markers,
+};
 use iced::Element;
 use publicator::{
     application::Application,
@@ -710,11 +714,8 @@ fn selecting_local_source_does_not_itself_confirm_install() {
 async fn describe_dispatch_holds_only_target_until_provider_result_is_persisted() {
     let f = Fixture::new();
     f.write(json!([f.marked_row(1), row(2, "SCHEDULED")]));
-    let (server, started_rx, release_tx) = common::http::Server::start_paused(Reply::new(
-        "/chat/completions",
-        200,
-        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Saved after provider completion."}).to_string()}}]}),
-    ));
+    let (server, started_rx, release_tx) =
+        common::http::Server::start_paused(completion("Generated"));
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let task = tokio::spawn(common::ui::first_output(
         app.update(Message::GenerateOne(id(1))),
@@ -765,15 +766,8 @@ async fn pick_previews_load_exactly_the_shown_placeholders_anywhere_in_the_list(
         let image = f.image(&format!("source-{n}.png"), 3 + n, 3);
         std::fs::copy(image, dir.join(format!("{n}.png"))).unwrap();
     }
-    let store = Arc::new(f.store.clone());
-    let client = MetadataClient::new(
-        reqwest::Client::new(),
-        Endpoints::default(),
-        "llmfit".into(),
-    );
-    let application = Arc::new(Application::new(store, client));
     let (mut app, _) = App::from_application(
-        application,
+        Arc::new(common::offline_app(Arc::new(f.store.clone()))),
         UiOptions {
             openrouter_model: None,
             ai_timeout: Duration::from_secs(1),
@@ -818,10 +812,7 @@ async fn row_previews_load_the_shown_rows_of_the_active_tab() {
     for n in 1..=10 {
         let image = f.image(&format!("{n}.png"), 3 + n as u32, 3);
         let mut publication = row(n, "SCHEDULED");
-        let digest = openssl::sha::sha512(&std::fs::read(&image).unwrap())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let digest = publicator::images::file_sha512(&image).unwrap();
         publication["files"][0]["sha512sum"] = json!(digest);
         digests.push(publicator::images::thumb_name(&image, &digest).unwrap());
         rows.push(publication);
@@ -939,10 +930,7 @@ async fn repeated_explicit_save_lands_the_newest_revision_last() {
     edit(&mut app, 2, "Unrelated");
     let unrelated = common::ui::send(&mut app, Message::SaveDraft(id(2))).await;
     assert!(
-        unrelated
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::SaveFinished { result: Ok(()), .. })),
+        unrelated.any(|message| matches!(message, Message::SaveFinished { result: Ok(()), .. })),
         "an unrelated record stays saveable while A is in flight: {unrelated:?}"
     );
     assert_eq!(f.read()[1]["title"], "Unrelated");
@@ -953,10 +941,7 @@ async fn repeated_explicit_save_lands_the_newest_revision_last() {
     assert_eq!(f.read()[0]["title"], "Revision B");
     let refresh = common::ui::send(&mut app, Message::Refresh).await;
     assert!(
-        refresh
-            .messages
-            .iter()
-            .any(|message| matches!(message, Message::LoadFinished(_, Ok(_)))),
+        refresh.any(|message| matches!(message, Message::LoadFinished(_, Ok(_)))),
         "the newest revision is clean, so Refresh is admitted: {refresh:?}"
     );
 }
@@ -965,11 +950,7 @@ async fn repeated_explicit_save_lands_the_newest_revision_last() {
 async fn dirty_draft_is_saved_before_single_generation_starts() {
     let f = Fixture::new();
     f.write(json!([f.marked_row(1)]));
-    let server = common::http::Server::start(vec![Reply::new(
-        "/chat/completions",
-        200,
-        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
-    )]);
+    let server = common::http::Server::start(vec![completion("Generated")]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let _ = app.update(Message::Edited {
         uuid: id(1),
@@ -1002,11 +983,7 @@ async fn failed_single_generation_can_be_retried_from_describe() {
             json!({"error":{"message":"fixture failure"}}),
         ),
         Reply::new("/models", 200, json!({"data":[]})),
-        Reply::new(
-            "/chat/completions",
-            200,
-            json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
-        ),
+        completion("Generated"),
     ]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
 
@@ -1027,7 +1004,10 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     ));
     let _ = app.update(retried);
     assert_eq!(f.read()[0]["title"], "Generated");
-    assert_eq!(f.read()[0]["description"], "Generated description.");
+    assert_eq!(
+        f.read()[0]["description"],
+        "A complete generated description."
+    );
     assert_eq!(f.read()[0]["state"], "DESCRIBED");
     assert_eq!(
         server
@@ -1041,14 +1021,14 @@ async fn failed_single_generation_can_be_retried_from_describe() {
 
 #[tokio::test]
 async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
-    use common::http::{Reply, Server};
+    use common::http::Server;
     let f = Fixture::new();
-    let mut rows = Vec::new();
-    for n in 1..=3 {
-        rows.push(f.marked_row(n));
-    }
+    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
     f.write(json!(rows));
-    let replies = [3, 2, 1].into_iter().map(|n| Reply::new("/chat/completions", 200, json!({"choices":[{"message":{"content":json!({"title":format!("title-{n}"),"description":"Generated description."}).to_string()}}]}))).collect();
+    let replies = [3, 2, 1]
+        .into_iter()
+        .map(|n| completion(&format!("title-{n}")))
+        .collect();
     let server = Server::start(replies);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
     let completion = common::ui::first_output(app.update(Message::GenerateMarked)).await;
@@ -1075,11 +1055,7 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
 async fn startup_model_option_selects_the_model_sent_to_the_provider() {
     let f = Fixture::new();
     f.write(json!([f.marked_row(1)]));
-    let server = common::http::Server::start(vec![Reply::new(
-        "/chat/completions",
-        200,
-        json!({"choices":[{"message":{"content":json!({"title":"Generated","description":"Generated description."}).to_string()}}]}),
-    )]);
+    let server = common::http::Server::start(vec![completion("Generated")]);
     let (mut app, _) =
         fixture_app_with_model(&f, server.url().to_owned(), Some(VISION_MODELS[1].clone()));
     let completion = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;

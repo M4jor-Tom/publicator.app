@@ -5,7 +5,6 @@ use publicator::{
         CatalogModel, Endpoints, GenerationRequest, MetadataClient, ModelOption, Source,
         VISION_MODELS,
     },
-    model::GENERATE_MARKER,
 };
 use serde_json::{Value, json};
 use std::{
@@ -62,9 +61,8 @@ fn request() -> GenerationRequest {
 
 #[tokio::test]
 async fn silent_headers_end_generation_at_its_deadline_with_no_later_request() {
-    // Listens but never accepts or answers: the request waits for headers that never come.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let client = client(&format!("http://{}", listener.local_addr().unwrap()));
+    let (listener, url) = common::silent();
+    let client = client(&url);
     let (_dir, image) = image();
     let timeout = Duration::from_secs(1);
     let begun = Instant::now();
@@ -95,8 +93,8 @@ async fn missing_key_child() {
     if std::env::var("OPENROUTER_KEY").as_deref() != Ok("") {
         return;
     }
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let client = keyless(&format!("http://{}", listener.local_addr().unwrap()));
+    let (listener, url) = common::silent();
+    let client = keyless(&url);
     let (_dir, image) = image();
     let error = client.generate(&image, &request()).await.unwrap_err();
     assert_eq!(
@@ -449,9 +447,7 @@ fn two_tone_row(f: &Fixture, n: u64, extension: &str, [left, right]: [&str; 2]) 
         .status()
         .unwrap();
     assert!(status.success());
-    let mut publication = common::row(n, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
+    let mut publication = common::with_markers(common::row(n, "SCHEDULED"));
     publication["files"][0] = json!({"basename": name, "sha512sum": file_sha512(&path).unwrap()});
     publication
 }
@@ -538,6 +534,3 @@ async fn batch_sends_the_recorded_artwork_and_keeps_the_attempted_candidate() {
         );
     }
 }
-
-#[allow(dead_code)]
-fn _api_type(_: Value) {}
