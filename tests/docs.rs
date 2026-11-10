@@ -85,7 +85,7 @@ fn documentation_path_check_ignores_groups_and_globs_but_catches_missing_literal
 }
 
 #[test]
-fn maintained_path_check_excludes_historical_roadmap_and_adr_paths() {
+fn maintained_path_check_excludes_roadmap_and_historical_adr_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let docs = maintained_docs(root);
     assert!(docs.contains(&root.join("docs/features/config.md")));
@@ -96,12 +96,10 @@ fn maintained_path_check_excludes_historical_roadmap_and_adr_paths() {
             .any(|path| path.starts_with(root.join("docs/adr")))
     );
 
-    let roadmap = std::fs::read_to_string(root.join("docs/ROADMAP.md")).unwrap();
     let adr = std::fs::read_to_string(
         root.join("docs/adr/0009-separate-interfaces-application-operations-and-store.md"),
     )
     .unwrap();
-    assert!(roadmap.contains("Task 23"));
     assert!(adr.contains("historical") || adr.contains("Superseded"));
 }
 

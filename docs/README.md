@@ -19,7 +19,7 @@ Feature maintenance docs live in `features/`. Each describes Does / Run / Code /
 - [0009 Separate interfaces, application operations and Store](adr/0009-separate-interfaces-application-operations-and-store.md) — historical Python/HTTP decision, superseded for the application interface by:
 - [0010 Rust core and native Iced interface](adr/0010-rust-core-and-native-iced-interface.md).
 
-Feature-specific behavior belongs with its owner. Preserve historical ADR/roadmap context; do not treat it as current runtime guidance.
+Feature-specific behavior belongs with its owner. Preserve historical ADR context; do not treat it as current runtime guidance. [ROADMAP](ROADMAP.md) lists open work only.
 
 ## Rust quality checks
 
@@ -78,6 +78,6 @@ publishing safety transition and the paths no check measures.
 
 - Document each symbol in the feature that owns its implementation; other files link there.
 - `src/` and `assets/publicationsSchema.json` are Rust application/code assets. `python/publicator_da/` is browser-only. The publishing skill remains a static manual/recovery contract.
-- Update feature docs, tests and code together. `tests/docs.rs` checks concrete paths in maintained docs; glob/placeholders and historical ROADMAP/ADR paths are intentionally excluded.
+- Update feature docs, tests and code together. `tests/docs.rs` checks concrete paths in maintained docs; glob/placeholders, ROADMAP and historical ADR paths are intentionally excluded.
 - Add architecture decisions with the next ADR number; mark superseded decisions without erasing history.
 - Plans, execution reports, screenshots and temporary fixtures belong in `/tmp`, not Git.

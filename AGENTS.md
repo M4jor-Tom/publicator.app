@@ -42,4 +42,4 @@ Read the owning file in `docs/features/` and relevant Rust callers before changi
 
 AI generation supports OpenRouter and local Ollama. A local service URL override is available only to the CLI via `PUBLICATOR_OLLAMA_URL`; it is a dependency endpoint, not a fake/test mode. Tests use loopback fixtures. Never install a model, spend provider credentials, access the real profile, or publish real artwork as part of validation.
 
-See [docs/README.md](docs/README.md) for feature ownership and ADRs. Task plans/reports and test artifacts stay in `/tmp`, not Git; the current Rust migration frontier in `docs/ROADMAP.md` must distinguish implementation/validation from pending final review and parent integration.
+See [docs/README.md](docs/README.md) for feature ownership and ADRs. Task plans/reports and test artifacts stay in `/tmp`, not Git; `docs/ROADMAP.md` lists open work only, so remove an item when it lands.
