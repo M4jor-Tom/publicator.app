@@ -834,6 +834,25 @@ async fn row_previews_load_the_shown_rows_of_the_active_tab() {
 }
 
 #[tokio::test]
+async fn row_preview_loads_for_a_hash_recorded_as_file_sha512sum() {
+    let f = Fixture::new();
+    let image = f.image("1.png", 4, 3);
+    let digest = publicator::images::file_sha512(&image).unwrap();
+    let mut publication = row(1, "SCHEDULED");
+    publication["files"][0] = json!({"basename": "1.png", "fileSha512sum": digest});
+    f.write(json!([publication]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let task = app.update(Message::Navigate(Tab::Describe));
+    common::ui::settle(&mut app, task).await;
+    let task = app.update(shown(id(1), true));
+    common::ui::settle(&mut app, task).await;
+    assert_eq!(
+        thumbs(&f),
+        [publicator::images::thumb_name(&image, &digest).unwrap()]
+    );
+}
+
+#[tokio::test]
 async fn delayed_title_save_preserves_newer_same_and_other_field_edits() {
     use fs2::FileExt;
 

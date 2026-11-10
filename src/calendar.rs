@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    model::{Delivery, GENERATE_MARKER, effective_schedule},
+    model::{Delivery, GENERATE_MARKER, effective_schedule, recorded_sha512},
 };
 use chrono::{DateTime, Datelike, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -45,12 +45,7 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
             .and_then(|file| file.get("basename"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let sha512 = first.and_then(|file| {
-            ["sha512sum", "fileSha512sum", "sha512sumHex"]
-                .into_iter()
-                .find_map(|key| file.get(key).and_then(Value::as_str))
-                .map(str::to_owned)
-        });
+        let sha512 = first.and_then(recorded_sha512).map(str::to_owned);
         let apparitions = match row.get("apparitions") {
             None => &[][..],
             Some(Value::Array(items)) => items.as_slice(),

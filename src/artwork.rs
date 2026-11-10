@@ -2,6 +2,7 @@
 use crate::{
     error::{Error, Result},
     images::{copy_verified, file_sha512, visit_visible_files},
+    model::recorded_sha512,
 };
 use serde_json::Value;
 use std::{
@@ -18,12 +19,11 @@ pub struct Artwork {
 /// Resolve `files[0]` to the visible file under `data_dir` with that basename whose bytes match
 /// the recorded SHA-512. Same-named files are told apart by hash; changed bytes are never accepted.
 pub fn resolve(data_dir: &Path, row: &Value) -> Result<Artwork> {
-    let field = |key| {
-        row.pointer(&format!("/files/0/{key}"))
-            .and_then(Value::as_str)
-    };
-    let basename =
-        field("basename").ok_or_else(|| Error::Validation("artwork basename is missing".into()))?;
+    let file = row.pointer("/files/0").unwrap_or(&Value::Null);
+    let basename = file
+        .get("basename")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Validation("artwork basename is missing".into()))?;
     if Path::new(basename)
         .file_name()
         .and_then(|name| name.to_str())
@@ -31,9 +31,8 @@ pub fn resolve(data_dir: &Path, row: &Value) -> Result<Artwork> {
     {
         return Err(Error::Validation("invalid artwork basename".into()));
     }
-    let recorded = field("sha512sum")
-        .or_else(|| field("fileSha512sum"))
-        .ok_or_else(|| Error::Validation("artwork hash is missing".into()))?;
+    let recorded =
+        recorded_sha512(file).ok_or_else(|| Error::Validation("artwork hash is missing".into()))?;
     let mut named = Vec::new();
     visit_visible_files(data_dir, &mut |entry| {
         if entry.file_name() == basename {

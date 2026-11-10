@@ -56,6 +56,25 @@ fn calendar_labels_marker_metadata_and_preserves_file_name() {
 }
 
 #[test]
+fn calendar_reads_file_sha512sum_and_ignores_sha512sum_hex() {
+    let recorded = |file| {
+        let mut p = row(1, "t", 1700000000);
+        p["files"][0] = file;
+        p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
+        timeline(&[p]).unwrap().remove(0).sha512
+    };
+    let hash = "b".repeat(128);
+    assert_eq!(
+        recorded(json!({"basename":"a.png","fileSha512sum":hash})),
+        Some(hash)
+    );
+    assert_eq!(
+        recorded(json!({"basename":"a.png","sha512sumHex":"c".repeat(128)})),
+        None
+    );
+}
+
+#[test]
 fn calendar_orders_events_and_months_include_now() {
     let mut later = row(
         2,

@@ -6,7 +6,6 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 
 - `echo-first`, the Describe/Schedule row previews and the Calendar still find artwork by first matching basename (`images::index_by_basename`), not the hash-verified `artwork::resolve`. `echo-first` feeds the manual SKILL fallback upload, so it can hand over a different file than the recorded hash. Behavior change: confirm before switching.
 - Describe rebuilds the whole data-dir basename index once per shown row (`src/ui/describe.rs`); build it once per load.
-- Recorded-hash keys disagree across readers: `sha512sum`/`fileSha512sum` (artwork, workflow, journal, images), plus `sha512sumHex` in the calendar and in Describe, which skips `fileSha512sum`. Settle on one list.
 
 ## Native UI
 

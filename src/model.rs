@@ -35,6 +35,14 @@ pub fn effective_schedule(row: &serde_json::Value) -> Option<i64> {
                 .and_then(serde_json::Value::as_i64)
         })
 }
+/// Keys a schema `File` object may record its SHA-512 under, in schema order.
+pub const RECORDED_SHA512_KEYS: [&str; 2] = ["sha512sum", "fileSha512sum"];
+/// The recorded SHA-512 of a `File` object: the first of `RECORDED_SHA512_KEYS` holding a string.
+pub fn recorded_sha512(file: &serde_json::Value) -> Option<&str> {
+    RECORDED_SHA512_KEYS
+        .into_iter()
+        .find_map(|key| file.get(key).and_then(serde_json::Value::as_str))
+}
 pub fn has_delivery_success(row: &serde_json::Value) -> bool {
     row.get("apparitions")
         .and_then(serde_json::Value::as_array)

@@ -1,5 +1,6 @@
 use crate::{
     error::{Error, Result},
+    model::RECORDED_SHA512_KEYS,
     store::Store,
 };
 use openssl::hash::{Hasher, MessageDigest};
@@ -171,7 +172,7 @@ impl References {
             basenames: published_file_fields(rows, &["basename", "fileName"])
                 .map(str::to_owned)
                 .collect(),
-            hashes: published_file_fields(rows, &["sha512sum", "fileSha512sum"])
+            hashes: published_file_fields(rows, &RECORDED_SHA512_KEYS)
                 .filter(|hash| !hash.is_empty())
                 .map(str::to_ascii_lowercase)
                 .collect(),

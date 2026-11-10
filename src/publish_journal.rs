@@ -1,7 +1,7 @@
 use crate::{
     artwork::{self, Artwork},
     error::{Error, Result},
-    model::{Phase, deliveries_complete, phase, validate_metadata},
+    model::{Phase, deliveries_complete, phase, recorded_sha512, validate_metadata},
     publish_protocol::{PublishJob, WorkerEvent},
     store::{Flock, Store, write_atomic},
 };
@@ -906,8 +906,7 @@ fn row_options_match(row: &Value, app: &Value, approved: &ApprovedSnapshot) -> R
             .get("files")
             .and_then(Value::as_array)
             .and_then(|files| files.first())
-            .and_then(|f| f.get("sha512sum").or_else(|| f.get("fileSha512sum")))
-            .and_then(Value::as_str)
+            .and_then(recorded_sha512)
             .is_some_and(|hash| hash.eq_ignore_ascii_case(&approved.source_hash)))
 }
 

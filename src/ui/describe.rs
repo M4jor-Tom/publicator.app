@@ -1,7 +1,7 @@
 use super::{App, Message, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{GENERATE_MARKER, Phase, phase, recorded_sha512},
 };
 use iced::{
     Element, Length, Task,
@@ -68,11 +68,7 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
 fn preview_identity(row: &Value) -> Option<(String, String)> {
     let file = row.get("files")?.as_array()?.first()?;
     let basename = file.get("basename")?.as_str()?.to_owned();
-    let sha = file
-        .get("sha512sum")
-        .or_else(|| file.get("sha512sumHex"))?
-        .as_str()?
-        .to_owned();
+    let sha = recorded_sha512(file)?.to_owned();
     Some((basename, sha))
 }
 

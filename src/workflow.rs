@@ -3,7 +3,8 @@ use crate::{
     error::{Error, Result},
     images::{Candidate, file_sha512},
     model::{
-        GENERATE_MARKER, Phase, deliveries_complete, has_delivery_success, phase, validate_metadata,
+        GENERATE_MARKER, Phase, RECORDED_SHA512_KEYS, deliveries_complete, has_delivery_success,
+        phase, validate_metadata,
     },
     scheduling::{profiles, repack, resolve_wall_clock},
     store::Store,
@@ -116,7 +117,7 @@ fn pick_with_hooks(
         for row in rows.iter() {
             for files in ["files", "previewFilesIfNotFree"] {
                 if row.get(files).and_then(Value::as_array).into_iter().flatten().any(|file| {
-                    ["sha512sum", "fileSha512sum"].iter().any(|key| file.get(*key)
+                    RECORDED_SHA512_KEYS.iter().any(|key| file.get(*key)
                         .and_then(Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(&sha)))
                 }) {
                     return row.get("uuid").and_then(Value::as_str)
