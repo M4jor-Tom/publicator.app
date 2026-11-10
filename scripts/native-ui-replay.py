@@ -102,6 +102,7 @@ class Image:
 
     def __init__(self, width, height, data):
         self.w, self.h, self.data = width, height, data
+        self.cards = {}  # region -> card boxes: see cards()
 
     def px(self, x, y):
         offset = (y * self.w + x) * 3
@@ -518,7 +519,10 @@ def buttons(img, region, min_w=30):
 
 
 def cards(img, region):
-    return img.boxes(CARD, region, 150, 100)
+    """Card boxes in `region`, searched once per capture: previews() and gutters() share them."""
+    if region not in img.cards:
+        img.cards[region] = img.boxes(CARD, region, 150, 100)
+    return img.cards[region]
 
 
 def clear(img, box, color):
