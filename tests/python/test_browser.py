@@ -402,11 +402,12 @@ class FormLocator:
 class FormPage(CheckboxPage):
     """One stateful submit form whose Schedule click is answered by `answer` (None: no reply; an exception is raised)."""
 
-    def __init__(self, answer=reply(), sticks_after=1, chips=0, chip_click="removes", galleries=(), sticky=True):
+    def __init__(self, answer=reply(), sticks_after=1, chips=0, chip_click="removes", galleries=(), tiers=(),
+                 sticky=True):
         super().__init__(sticks_after)
         self.answer = answer
         self.chips, self.chip_click = chips, chip_click
-        self.selected, self.sticky, self.open_combo = {"tiers": [], "gallery": list(galleries)}, sticky, None
+        self.selected, self.sticky, self.open_combo = {"tiers": list(tiers), "galleries": list(galleries)}, sticky, None
         self.typed, self.asked, self.picks, self.commits = [], [], [], 0
         self.keyboard = SimpleNamespace(press=lambda key: None)
 
@@ -417,7 +418,7 @@ class FormPage(CheckboxPage):
     def get_by_label(self, label, **kwargs): return self.ask("label", label)
     def get_by_text(self, text, **kwargs): return self.ask("text", text)
     def locator(self, selector):
-        kind = "chips" if "data-tag" in selector else "gallery" if "Gallery" in selector else "field"
+        kind = "chips" if "data-tag" in selector else "galleries" if "Gallery" in selector else "field"
         return self.ask(kind, selector)
 
     def ask(self, kind, text):
@@ -489,12 +490,6 @@ def test_exception_before_commit_is_failed_and_never_clicks_schedule(monkeypatch
     assert (event["type"], page.commits) == ("failed", 0)
 
 
-def test_submit_selects_every_requested_tier(monkeypatch):
-    page = FormPage()
-    assert submit(monkeypatch, page, tiers=["gold", "silver"])["type"] == "scheduled"
-    assert page.selected["tiers"] == ["gold", "silver"]
-
-
 def test_submit_skips_unset_premium_tiers_and_galleries(monkeypatch):
     page = FormPage()
     assert submit(monkeypatch, page)["type"] == "scheduled"
@@ -517,20 +512,26 @@ def test_pre_filled_tags_must_all_clear_before_new_tags_or_commit(monkeypatch, c
     assert (page.chips == 0, page.typed, page.commits) == (cleared, ["new"] if cleared else [], int(cleared))
 
 
+COMBOS = pytest.mark.parametrize("combo", ["tiers", "galleries"])
+
+
+@COMBOS
 @pytest.mark.parametrize("selected, requested, picks", [
     (["Artwork"], ["Art"], ["Art"]),  # a selected superstring does not satisfy the request
     (["Art"], ["Art"], []),  # an exact selection is not toggled off
     ([], ["Art", "Artwork"], ["Art", "Artwork"]),
     (["Artwork", "Art"], ["Art", "Artwork"], []),
 ])
-def test_galleries_compare_exact_selected_labels(monkeypatch, selected, requested, picks):
-    page = FormPage(galleries=selected)
-    assert submit(monkeypatch, page, galleries=requested)["type"] == "scheduled"
+def test_combos_compare_exact_selected_labels(monkeypatch, combo, selected, requested, picks):
+    page = FormPage(**{combo: selected})
+    assert submit(monkeypatch, page, **{combo: requested})["type"] == "scheduled"
     assert page.picks == picks
-    assert set(requested) <= set(page.selected["gallery"])
+    assert set(requested) <= set(page.selected[combo])
 
 
-def test_gallery_pick_that_does_not_stick_fails_before_commit(monkeypatch):
+@COMBOS
+def test_combo_pick_that_does_not_stick_fails_before_commit(monkeypatch, combo):
     page = FormPage(sticky=False)
-    event = submit(monkeypatch, page, galleries=["Art"])
-    assert (event["type"], page.picks, page.commits) == ("failed", ["Art"], 0)
+    event = submit(monkeypatch, page, **{combo: ["Art"]})
+    assert (event["type"], event["error"], page.picks, page.commits) == (
+        "failed", f"{combo} did not stay selected: ['Art']", ["Art"], 0)

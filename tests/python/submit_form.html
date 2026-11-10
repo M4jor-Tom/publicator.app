@@ -3,7 +3,7 @@
 <title>Offline submit form</title>
 <!-- Local stand-in for the controls publicator_da.browser drives; window.FIXTURE configures it.
      It proves the session logic against a real DOM, not the live DeviantArt selectors. -->
-<style>#gallery { min-height: 2em; border: 1px solid; }</style>
+<style>#tiers, #gallery { min-height: 2em; border: 1px solid; }</style>
 <a href="/submit">Submit</a>
 <form id="form" hidden onsubmit="return false">
   <button type="button" id="upload">Upload Your Art</button>
@@ -13,6 +13,9 @@
   <label><input type="checkbox" name="matureContent"> Mature</label>
   <label><input type="checkbox" name="isAiGenerated"> Created using AI tools</label>
   <div role="combobox" id="tags"><input aria-errormessage="tags-error"></div>
+  <div>Submit to your subscribers</div>
+  <div role="combobox" id="tiers"></div>
+  <div role="listbox" id="tier-options" hidden></div>
   <div>Gallery</div>
   <div role="combobox" id="gallery"></div>
   <div role="listbox" id="options" hidden></div>
@@ -30,7 +33,8 @@
   <button type="button" aria-haspopup="menu">More options</button>
 </form>
 <script>
-const F = Object.assign({start: [2026, 1], tags: [], selected: [], offered: [], stuck: [], outcome: "land"}, window.FIXTURE);
+const F = Object.assign({start: [2026, 1], tags: [], selected: [], offered: [], selected_tiers: [], offered_tiers: [],
+                         stuck: [], outcome: "land"}, window.FIXTURE);
 const $ = id => document.getElementById(id);
 function make(tag, text, attributes = {}) {
   const element = document.createElement(tag);
@@ -53,20 +57,25 @@ tagInput.onkeydown = event => {
   if (event.key === "Enter" && tagInput.value) { addTag(tagInput.value); tagInput.value = ""; }
 };
 
-// Multi-select: clicking an option toggles it, so blindly re-picking a selected gallery removes it.
-const chosen = [...F.selected];
-const renderGalleries = () => $("gallery").replaceChildren(...chosen.map(name => make("span", name)));
-$("gallery").onclick = () => { $("options").hidden = !$("options").hidden; };
-for (const name of F.offered) {
-  const option = make("div", name, {role: "option"});
-  option.onclick = () => {
-    const at = chosen.indexOf(name);
-    if (at < 0) chosen.push(name); else chosen.splice(at, 1);
-    renderGalleries();
-  };
-  $("options").append(option);
+// Multi-select: clicking an option toggles it, so blindly re-picking a selected tier or gallery removes it.
+function multiSelect(combo, options, selected, offered) {
+  const chosen = [...selected];
+  const render = () => $(combo).replaceChildren(...chosen.map(name => make("span", name)));
+  $(combo).onclick = () => { $(options).hidden = !$(options).hidden; };
+  for (const name of offered) {
+    const option = make("div", name, {role: "option"});
+    option.onclick = () => {
+      const at = chosen.indexOf(name);
+      if (at < 0) chosen.push(name); else chosen.splice(at, 1);
+      render();
+    };
+    $(options).append(option);
+  }
+  render();
+  return chosen;
 }
-renderGalleries();
+const tiers = multiSelect("tiers", "tier-options", F.selected_tiers, F.offered_tiers);
+const galleries = multiSelect("gallery", "options", F.selected, F.offered);
 
 let view = new Date(F.start[0], F.start[1] - 1, 1), picked = null, scheduled = null;
 document.querySelector('[aria-haspopup="menu"]').onclick = () => {
@@ -118,7 +127,7 @@ $("commit").onclick = () => {
   sessionStorage.commits = Number(sessionStorage.commits || 0) + 1;
   if (F.outcome === "reject") { $("error").hidden = false; return; }
   sessionStorage.submitted = JSON.stringify({
-    scheduled, galleries: chosen, files: $("file").files.length,
+    scheduled, tiers, galleries, files: $("file").files.length,
     tags: [...document.querySelectorAll("#tags [data-tag]")].map(chip => chip.dataset.tag),
     mature: document.querySelector('[name="matureContent"]').checked,
     ai: document.querySelector('[name="isAiGenerated"]').checked,

@@ -9,7 +9,6 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 
 ## DeviantArt worker and images
 
-- Tiers use blind `_pick_combo`; galleries first check `_combo_labels` (`python/publicator_da/browser.py`).
 - `identify -regard-warnings` (`src/images.rs`) refuses any image with a decoder warning, even a harmless one.
 - The manual fallback (`echo-first` → SKILL upload) hands over the original file, which can be `.webp`; DeviantArt refuses `.webp`, while automation converts via `images::prepare_upload`.
 

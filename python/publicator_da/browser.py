@@ -136,10 +136,17 @@ def _pick_schedule(page, s):
     page.get_by_text("Confirm Schedule", exact=True).click(); page.wait_for_timeout(1500)
 
 
-def _pick_combo(page, combo, text):
-    combo.click(); page.wait_for_timeout(500)
-    page.get_by_text(text, exact=True).first.click()
-    combo.click(); page.wait_for_timeout(200)
+def _pick_combo(page, combo, labels, what):
+    # Clicking an option toggles it: pick only unselected labels, then check every one stuck.
+    combo.scroll_into_view_if_needed()
+    for label in labels:
+        if label not in _combo_labels(combo):
+            combo.click(); page.wait_for_timeout(500)
+            page.get_by_text(label, exact=True).first.click()
+            combo.click(); page.wait_for_timeout(200)
+    selected = set(_combo_labels(combo))
+    if missing := [label for label in labels if label not in selected]:
+        raise RuntimeError(f"{what} did not stay selected: {missing}")
 
 
 def _commit_reply(response):
@@ -186,16 +193,10 @@ def _submit_entry(page, job, before_commit):
         page.locator('input[name="downloadDollarPrice"]').fill(f'{float(job["price"]):g}')
     if job["tiers"]:
         combo = page.get_by_text("Submit to your subscribers").locator('xpath=following::*[@role="combobox"][1]')
-        combo.scroll_into_view_if_needed()
-        for tier in job["tiers"]: _pick_combo(page, combo, tier)
+        _pick_combo(page, combo, job["tiers"], "tiers")
     if job["galleries"]:
         combo = page.locator('xpath=//*[normalize-space(text())="Gallery"]/following::*[@role="combobox"][1]')
-        combo.scroll_into_view_if_needed()
-        for gallery in job["galleries"]:
-            if gallery not in _combo_labels(combo): _pick_combo(page, combo, gallery)
-        selected = set(_combo_labels(combo))
-        if missing := [gallery for gallery in job["galleries"] if gallery not in selected]:
-            raise RuntimeError(f"galleries did not stay selected: {missing}")
+        _pick_combo(page, combo, job["galleries"], "galleries")
     _pick_schedule(page, job["schedule"])
     set_checkbox(page, "matureContent", True)
     before_commit()

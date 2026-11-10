@@ -16,7 +16,7 @@ FORM_HTML = Path(__file__).with_name("submit_form.html").read_text(encoding="utf
 PARIS_2027 = {"epoch": 1800039600, "timezone": "Europe/Paris", "year": 2027, "month": 1, "day": 15, "hour": 20, "minute": 0}
 DEVIATION = "https://www.deviantart.com/artist/art/Title-1"
 JOB = {"attempt_id": "attempt", "uuid": "artwork", "title": "Title", "description": "Description",
-       "tags": ["fresh"], "tiers": [], "galleries": ["Art", "Featured"], "schedule": PARIS_2027}
+       "tags": ["fresh"], "tiers": ["Gold", "Silver"], "galleries": ["Art", "Featured"], "schedule": PARIS_2027}
 
 
 def serve_offline(route):
@@ -75,9 +75,10 @@ def submit(page, tmp_path):
     ("land", "scheduled"), ("delayed", "scheduled"), ("reject", "unknown"), ("refused", "unknown")])
 def test_submit_is_scheduled_only_on_a_confirmed_commit_reply(open_form, tmp_path, monkeypatch, outcome, expected):
     monkeypatch.setattr(browser, "COMMIT_EVIDENCE_MS", 3000)
-    # Selected "Artwork" must not satisfy "Art"; selected "Featured" must not be toggled off.
+    # Selected "Artwork" must not satisfy "Art"; selected "Featured" and "Gold" must not be toggled off.
     page = open_form(start=[2026, 11], tags=["stale", "old"], selected=["Artwork", "Featured"],
-                     offered=["Art", "Artwork", "Featured"], outcome=outcome)
+                     offered=["Art", "Artwork", "Featured"], selected_tiers=["Gold"],
+                     offered_tiers=["Gold", "Silver"], outcome=outcome)
     event = submit(page, tmp_path)
     assert (event["type"], event.get("url")) == (expected, DEVIATION if expected == "scheduled" else None)
     state = storage(page)
@@ -85,7 +86,8 @@ def test_submit_is_scheduled_only_on_a_confirmed_commit_reply(open_form, tmp_pat
     if expected == "scheduled":
         assert state["submitted"] == {
             "scheduled": {"date": [2027, 1, 15], "hour": 20, "epoch": 1800039600, "timezone": "Europe/Paris"},
-            "galleries": ["Artwork", "Featured", "Art"], "tags": ["fresh"], "files": 1, "mature": True, "ai": True,
+            "tiers": ["Gold", "Silver"], "galleries": ["Artwork", "Featured", "Art"], "tags": ["fresh"], "files": 1,
+            "mature": True, "ai": True,
         }
 
 
