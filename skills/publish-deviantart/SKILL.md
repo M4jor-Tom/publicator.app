@@ -59,6 +59,10 @@ metadata-approved publication with an unpublished DeviantArt apparition in
 nix run <publicator.py>#echo-first -- --data-dir .
 ```
 
+If `echo-first` refuses because the artwork `no longer matches its recorded content`,
+the file changed since it was picked and the unresolved-attempt steps do not apply:
+stop and ask the owner; never upload another file.
+
 ## Manual fallback (safe failures only): finish in the #login Firefox, probe with the daemon
 
 ```sh

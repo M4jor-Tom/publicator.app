@@ -5,6 +5,7 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 ## DeviantArt worker and images
 
 - The manual fallback (`echo-first` → SKILL upload) hands over the original file, which can be `.webp`; DeviantArt refuses `.webp`, while automation converts via `images::prepare_upload`.
+- The worker's `_pick_combo` (`python/publicator_da/browser.py`) only ensures the requested tiers and galleries are selected: it never deselects ones DeviantArt pre-selects that the job did not request, and leaves the tier box untouched when the job has no tiers, so a piece approved free could go out subscriber-only if DeviantArt pre-fills tiers. The new tier check is also unproven on the live page: selected chips must show the exact option text, otherwise every tiered publish fails safely before commit. Needs live-page knowledge: verify on the next supervised tiered publish, then make the selection exact.
 
 ## Testing
 
