@@ -2,10 +2,6 @@
 
 Open work only; remove an item when it lands. The completed Rust/Iced migration plan, its checkpoints and the fab0d03 review live in Git history (`7b10352` is the last full migration roadmap).
 
-## Native UI
-
-- A tall Calendar day grows alone, leaving blank space under its week neighbours.
-
 ## DeviantArt worker and images
 
 - `identify -regard-warnings` (`src/images.rs`) refuses any image with a decoder warning, even a harmless one.

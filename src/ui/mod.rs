@@ -3871,6 +3871,79 @@ done
         assert!(app.prompt_matches.is_empty() && app.calendar_artwork.is_empty());
     }
 
+    /// Every cell of a week, blank ones included, is painted down to the week's tallest day;
+    /// weeks without a tall day keep the 78 px minimum.
+    #[tokio::test(flavor = "current_thread")]
+    async fn calendar_week_cells_share_the_tallest_day_height() {
+        use iced::{Color, Size};
+        use iced_runtime::core::{Layout, layout::Limits, renderer, widget::Tree};
+        let (mut app, _root) = app();
+        // Six events on Friday 3 November 2023, in the week after two blank cells.
+        let rows = (1..=6)
+            .map(|n| {
+                let mut row = calendar_row(n, "art.png");
+                row["submissionTimestamp"] = 1_699_012_800.into();
+                row
+            })
+            .collect::<Vec<_>>();
+        let events = crate::calendar::timeline(&rows).unwrap();
+        app.publications = Some(rows);
+        let month = chrono::NaiveDate::from_ymd_opt(2023, 11, 1).unwrap();
+        let mut view = calendar::month_view(&app, &events, month, None, 0, chrono_tz::UTC);
+        let mut renderer = <iced::Renderer as renderer::Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .unwrap();
+        let mut tree = Tree::new(&view);
+        let limits = Limits::new(Size::ZERO, Size::new(700.0, f32::INFINITY));
+        let node = view.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let size = node.size();
+        view.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style {
+                text_color: Color::WHITE,
+            },
+            Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &iced::Rectangle::with_size(size),
+        );
+        let unpainted = Color::from_rgb8(255, 0, 255);
+        let (width, height) = (size.width as u32, size.height as u32);
+        let pixels =
+            renderer::Headless::screenshot(&mut renderer, Size::new(width, height), 1.0, unpainted);
+        // The month is its title, the weekday names, then its weeks.
+        let weeks = Layout::new(&node)
+            .children()
+            .nth(2)
+            .unwrap()
+            .children()
+            .collect::<Vec<_>>();
+        let heights = weeks
+            .iter()
+            .map(|week| week.bounds().height)
+            .collect::<Vec<_>>();
+        assert!(heights[0] > 100.0, "the six-event week grows: {heights:?}");
+        assert!(heights[1..].iter().all(|&h| h == 78.0), "{heights:?}");
+        for (index, week) in weeks.iter().enumerate() {
+            let bounds = week.bounds();
+            let y = (bounds.y + bounds.height - 3.0) as u32;
+            for column in 0..7 {
+                let x = (bounds.x + (column as f32 + 0.5) * bounds.width / 7.0) as u32;
+                let at = ((y * width + x) * 4) as usize;
+                assert_ne!(
+                    pixels[at..at + 3],
+                    [255, 0, 255],
+                    "week {index} column {column} is blank above its bottom"
+                );
+            }
+        }
+    }
+
     #[test]
     fn custom_date_input_ends_at_a_date_save_or_refresh_and_blocks_its_approval() {
         let (mut app, root) = app();

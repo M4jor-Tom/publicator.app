@@ -8,7 +8,7 @@ use crate::{
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use iced::{
     Element, Length, Task,
-    widget::{button, column, container, row, scrollable, space, text},
+    widget::{button, column, container, row, scrollable, space, stack, text},
 };
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -71,7 +71,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn month_view<'a>(
+pub(super) fn month_view<'a>(
     state: &'a App,
     events: &[Event],
     month: NaiveDate,
@@ -87,11 +87,13 @@ fn month_view<'a>(
     };
     let days = days_in_month(month);
     let first_weekday = month.weekday().num_days_from_monday() as usize;
-    let blank = || {
-        container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fixed(78.0))
-            .style(style::other_day)
+    // A grid cell is its background and, laid out apart, its content (see the week stack below).
+    let background = || container(space()).width(Length::Fill).height(Length::Fill);
+    let blank = || -> (Element<'a, Message>, Element<'a, Message>) {
+        (
+            background().style(style::other_day).into(),
+            space().width(Length::Fill).into(),
+        )
     };
     let section = column![
         text(title)
@@ -105,11 +107,7 @@ fn month_view<'a>(
             .into())),
     ]
     .spacing(4);
-    let mut weeks = column![];
-    let mut week = row![];
-    for _ in 0..first_weekday {
-        week = week.push(blank());
-    }
+    let mut cells = (0..first_weekday).map(|_| blank()).collect::<Vec<_>>();
     for day in 1..=days {
         let date = month.with_day(day).unwrap();
         let mut cell =
@@ -121,23 +119,24 @@ fn month_view<'a>(
             cell = cell.push(event_view(state, event, now, zone));
         }
         // Like the web's 78px table cell: a minimum that grows to show every event.
-        // ponytail: only the day's own cell grows, not its whole week row; equalize if that reads badly.
-        week = week.push(
+        cells.push((
+            background().style(style::day(Some(date) == today)).into(),
             container(row![space().height(74.0), cell])
                 .width(Length::Fill)
                 .padding(2)
-                .style(style::day(Some(date) == today)),
-        );
-        if (first_weekday + day as usize).is_multiple_of(7) {
-            weeks = weeks.push(week);
-            week = row![];
-        }
+                .into(),
+        ));
     }
-    if !(first_weekday + days as usize).is_multiple_of(7) {
-        for _ in (first_weekday + days as usize) % 7..7 {
-            week = week.push(blank());
-        }
-        weeks = weeks.push(week);
+    while !cells.len().is_multiple_of(7) {
+        cells.push(blank());
+    }
+    let mut weeks = column![];
+    while !cells.is_empty() {
+        // Every cell of a week is as tall as its tallest day. A Shrink row gives Fill-height
+        // children only the height of the siblings laid out before them (iced 0.14 flex), but a
+        // stack lays its under layer out at its base layer's size: the contents set the height.
+        let (backgrounds, contents): (Vec<_>, Vec<_>) = cells.drain(..7).unzip();
+        weeks = weeks.push(stack![row(contents)].push_under(row(backgrounds)));
     }
     section.push(weeks).into()
 }
