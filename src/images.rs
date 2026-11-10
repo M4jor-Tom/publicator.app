@@ -740,19 +740,25 @@ mod bound {
     }
 }
 
-pub fn index_by_basename(root: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
-    let mut index = std::collections::HashMap::new();
+/// Visible files by basename, each name's paths in directory order.
+pub type BasenameIndex = std::collections::HashMap<String, Vec<PathBuf>>;
+
+/// Every visible file under `root`; same-named files are all kept, for `artwork::resolve_in` to
+/// tell apart by recorded hash.
+pub fn index_by_basename(root: &Path) -> Result<BasenameIndex> {
+    let mut index = BasenameIndex::new();
     visit_visible_files(root, &mut |entry| {
         index
             .entry(entry.file_name().to_string_lossy().into_owned())
-            .or_insert_with(|| entry.path());
+            .or_default()
+            .push(entry.path());
     })?;
     Ok(index)
 }
 
 /// Visits every regular file under `dir` in directory order, skipping dot-directories; symlinks
 /// are not followed.
-pub(crate) fn visit_visible_files(dir: &Path, visit: &mut impl FnMut(&fs::DirEntry)) -> Result<()> {
+fn visit_visible_files(dir: &Path, visit: &mut impl FnMut(&fs::DirEntry)) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;

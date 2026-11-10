@@ -19,9 +19,9 @@ Calendar projects each apparition as a distinct event, falling back to publicati
 - A day shows every event: its cell keeps the web's 78 px as a minimum and grows with its events and any opened one.
 - Every apparition is retained with its platform, delivery state and actual URL; title/date remain publication-shared.
 - Preview/cache access is limited to known artwork; missing files do not fabricate previews.
+- Artwork and previews are per row (keyed by UUID) and resolve by recorded hash, so rows sharing a basename each show their own file; a row whose artwork cannot be resolved shows "Artwork unavailable" with the reason.
 - Prompt content is shared with the Pick view; a nearest match is never represented as exact prompt text.
 
 ## Gotchas
 
-- Duplicate artwork basenames in one data directory may be ambiguous; retain unique file identities.
 - Calendar is read-only and does not reserve, approve or publish work.

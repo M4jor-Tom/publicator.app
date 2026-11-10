@@ -629,12 +629,8 @@ fn echo_first_uses_configured_timezone_and_vision_models_only_runs_llmfit() {
         "[schedule]\ntimezone='Pacific/Honolulu'\n",
     )
     .unwrap();
-    fs::write(root.path().join("art.png"), b"not read by basename index").unwrap();
-    fs::write(root.path().join("publications.json"), json!([{
-        "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description",
-        "submissionTimestamp":1700000000, "files":[{"basename":"art.png","sha512sum":"0".repeat(128)}],
-        "apparitions":[{"platformName":"deviantart","state":"unpublished"}]
-    }]).to_string()).unwrap();
+    fs::write(root.path().join("art.png"), b"recorded artwork bytes").unwrap();
+    echo_first_data(root.path(), &root.path().join("art.png"));
     let echo = cli(
         cwd.path(),
         &["echo-first", "--data-dir", root.path().to_str().unwrap()],
@@ -669,6 +665,67 @@ fn echo_first_uses_configured_timezone_and_vision_models_only_runs_llmfit() {
         String::from_utf8_lossy(&vision.stderr)
     );
     assert!(String::from_utf8_lossy(&vision.stdout).contains("gemma4:26b-a4b"));
+}
+
+/// One pending DeviantArt row whose `art.png` records the hash of `recorded`'s bytes.
+fn echo_first_data(root: &std::path::Path, recorded: &std::path::Path) {
+    fs::write(root.join("publications.json"), json!([{
+        "uuid":"00000000-0000-4000-8000-000000000001", "state":"DESCRIBED", "title":"Title", "description":"Description",
+        "submissionTimestamp":1700000000,
+        "files":[{"basename":"art.png","sha512sum":publicator::images::file_sha512(recorded).unwrap()}],
+        "apparitions":[{"platformName":"deviantart","state":"unpublished"}]
+    }]).to_string()).unwrap();
+}
+
+#[test]
+fn echo_first_prints_the_recorded_file_among_same_named_files() {
+    for recorded in ["a", "b"] {
+        let root = tempdir().unwrap();
+        // a/ is both named and created first, so a name-, creation- or reverse-ordered walk meets
+        // the unrecorded namesake first in one of the two cases.
+        for dir in ["a", "b"] {
+            fs::create_dir(root.path().join(dir)).unwrap();
+            fs::write(root.path().join(dir).join("art.png"), dir).unwrap();
+        }
+        let expected = root.path().join(recorded).join("art.png");
+        echo_first_data(root.path(), &expected);
+        let echo = cli(
+            root.path(),
+            &["echo-first", "--data-dir", root.path().to_str().unwrap()],
+        );
+        assert!(
+            echo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&echo.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&echo.stdout)
+                .lines()
+                .any(|line| line == format!("path: {}", expected.display())),
+            "{}",
+            String::from_utf8_lossy(&echo.stdout)
+        );
+    }
+}
+
+#[test]
+fn echo_first_refuses_artwork_whose_bytes_changed() {
+    let root = tempdir().unwrap();
+    let art = root.path().join("art.png");
+    fs::write(&art, b"recorded artwork bytes").unwrap();
+    echo_first_data(root.path(), &art);
+    fs::write(&art, b"edited artwork bytes").unwrap();
+    let echo = cli(
+        root.path(),
+        &["echo-first", "--data-dir", root.path().to_str().unwrap()],
+    );
+    assert!(!echo.status.success());
+    assert!(
+        String::from_utf8_lossy(&echo.stderr).contains("no longer matches its recorded content"),
+        "{}",
+        String::from_utf8_lossy(&echo.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&echo.stdout).contains("path:"));
 }
 
 #[test]

@@ -172,18 +172,14 @@ fn echo_first(data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
                     })
                 })
     }) {
-        let basename = row
-            .pointer("/files/0/basename")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| Error::Validation("artwork basename missing".into()))?;
         let schedule = publicator::model::effective_schedule(row)
             .ok_or_else(|| Error::Validation("schedule missing".into()))?;
         let date = chrono::DateTime::from_timestamp(schedule, 0)
             .ok_or_else(|| Error::Validation("invalid schedule".into()))?
             .with_timezone(&zone);
-        let image = publicator::images::index_by_basename(&paths.data_dir)?
-            .remove(basename)
-            .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
+        // The original, hash-verified now: the manual upload picks it later, so a staged copy
+        // would be gone or leaked by then.
+        let image = publicator::artwork::resolve(&paths.data_dir, row)?.path;
         println!("path: {}", image.display());
         println!(
             "title: {}",

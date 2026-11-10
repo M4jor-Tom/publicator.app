@@ -2,11 +2,6 @@
 
 Open work only; remove an item when it lands. The completed Rust/Iced migration plan, its checkpoints and the fab0d03 review live in Git history (`7b10352` is the last full migration roadmap).
 
-## Artwork lookup
-
-- `echo-first`, the Describe/Schedule row previews and the Calendar still find artwork by first matching basename (`images::index_by_basename`), not the hash-verified `artwork::resolve`. `echo-first` feeds the manual SKILL fallback upload, so it can hand over a different file than the recorded hash. Behavior change: confirm before switching.
-- Describe rebuilds the whole data-dir basename index once per shown row (`src/ui/describe.rs`); build it once per load.
-
 ## Native UI
 
 - Long candidate file names overflow Pick cards.
@@ -16,6 +11,7 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 
 - Tiers use blind `_pick_combo`; galleries first check `_combo_labels` (`python/publicator_da/browser.py`).
 - `identify -regard-warnings` (`src/images.rs`) refuses any image with a decoder warning, even a harmless one.
+- The manual fallback (`echo-first` → SKILL upload) hands over the original file, which can be `.webp`; DeviantArt refuses `.webp`, while automation converts via `images::prepare_upload`.
 
 ## Code health
 

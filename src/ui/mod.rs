@@ -10,7 +10,7 @@ pub mod style;
 
 use crate::{
     application::Application as CoreApplication,
-    images::Candidate,
+    images::{BasenameIndex, Candidate},
     metadata::{GenerationRequest, LocalStatus, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
     prompts::{PromptArchive, PromptMatch, SearchMatches},
@@ -27,7 +27,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -274,7 +274,7 @@ pub enum Message {
     /// Calendar artwork and prompts, stamped with the reload generation of their rows.
     CalendarPrepared(u64, Result<calendar::Preparation, String>),
     CalendarPreviewFinished {
-        basename: String,
+        uuid: String,
         result: Result<PathBuf, String>,
     },
     ToggleCalendarEvent(String),
@@ -366,9 +366,12 @@ pub struct App {
     calendar_preparing: bool,
     calendar_prepared: bool,
     calendar_error: Option<String>,
-    calendar_artwork: HashMap<String, Option<PathBuf>>,
+    /// Per row UUID: the file its artwork previews from (`artwork::preview_source`).
+    calendar_artwork: HashMap<String, Result<PathBuf, String>>,
     calendar_previews: HashMap<String, Option<Result<PathBuf, String>>>,
     calendar_expanded: HashSet<String>,
+    /// The data directory's basename index, walked at most once per load (`artwork_index`).
+    artwork_index: Arc<OnceLock<Result<BasenameIndex, String>>>,
     url_opener: fn(&str) -> Result<(), String>,
 }
 
@@ -462,6 +465,7 @@ impl App {
             calendar_artwork: HashMap::new(),
             calendar_previews: HashMap::new(),
             calendar_expanded: HashSet::new(),
+            artwork_index: Default::default(),
             url_opener,
         };
         (app, Self::load_task(application, 0, None, Vec::new()))
@@ -506,8 +510,8 @@ impl App {
     pub fn calendar_prepared(&self) -> bool {
         self.calendar_prepared
     }
-    pub fn calendar_art_path(&self, basename: &str) -> Option<&Path> {
-        self.calendar_artwork.get(basename)?.as_deref()
+    pub fn calendar_art_path(&self, uuid: &str) -> Option<&Path> {
+        self.calendar_artwork.get(uuid)?.as_deref().ok()
     }
     pub fn revealed_publication(&self) -> Option<&str> {
         self.revealed_publication.as_deref()
@@ -1187,8 +1191,8 @@ impl App {
                 self.calendar_prepared = true;
                 self.calendar_error = Some(error);
             }
-            Message::CalendarPreviewFinished { basename, result } => {
-                self.calendar_previews.insert(basename, Some(result));
+            Message::CalendarPreviewFinished { uuid, result } => {
+                self.calendar_previews.insert(uuid, Some(result));
                 return calendar::preview_tasks(self);
             }
             Message::ToggleCalendarEvent(key) => {
@@ -1340,6 +1344,7 @@ impl App {
         self.calendar_error = None;
         self.calendar_artwork.clear();
         self.calendar_previews.clear();
+        self.artwork_index = Default::default();
         let shown = match self.active_tab {
             Tab::Calendar => calendar::prepare_task(self),
             _ => describe::preview_tasks(self),
@@ -2762,6 +2767,19 @@ pub(super) fn prompt_tasks(state: &App) -> Task<Message> {
     )
 }
 
+/// The load's basename index, walked on first use; blocks, so call it from a blocking task.
+pub(super) fn artwork_index<'a>(
+    index: &'a OnceLock<Result<BasenameIndex, String>>,
+    data_dir: &Path,
+) -> Result<&'a BasenameIndex, String> {
+    index
+        .get_or_init(|| {
+            crate::images::index_by_basename(data_dir).map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 pub(super) fn resolve_prompt_matches(
     archive: Option<&PromptArchive>,
     archive_error: Option<&str>,
@@ -3753,9 +3771,9 @@ done
         assert!(exits(close).await, "close waits for the save, then exits");
     }
 
-    fn calendar_row(basename: &str) -> Value {
+    fn calendar_row(n: u64, basename: &str) -> Value {
         serde_json::json!({
-            "uuid": uuid(1), "state": "DESCRIBED", "title": "Title", "description": "Description",
+            "uuid": uuid(n), "state": "DESCRIBED", "title": "Title", "description": "Description",
             "submissionTimestamp": 1_700_002_800,
             "files": [{"basename": basename, "sha512sum": "0".repeat(128)}],
             "apparitions": [{"platformName": "deviantart", "state": "unpublished"}]
@@ -3775,8 +3793,11 @@ done
     #[tokio::test(flavor = "current_thread")]
     async fn replies_from_before_the_latest_reload_cannot_replace_newer_rows_or_calendar() {
         let root = tempfile::tempdir().unwrap();
-        let (mut app, init) =
-            offline_app(root.path(), &[calendar_row("old.png")], Config::default());
+        let (mut app, init) = offline_app(
+            root.path(),
+            &[calendar_row(1, "old.png")],
+            Config::default(),
+        );
         let startup = run_task(init).await;
         for message in startup.clone() {
             let _ = app.update(message);
@@ -3785,9 +3806,9 @@ done
         let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
         assert!(app.calendar_preparing);
 
-        replace_rows(&app, vec![calendar_row("new.png")]);
+        replace_rows(&app, vec![calendar_row(2, "new.png")]);
         send(&mut app, Message::Refresh).await;
-        assert!(app.calendar_artwork.contains_key("new.png"));
+        assert!(app.calendar_artwork.contains_key(&uuid(2)));
         for message in startup.into_iter().chain(old_prepared).filter(|message| {
             matches!(
                 message,
@@ -3800,7 +3821,7 @@ done
             app.publications.as_ref().unwrap()[0]["files"][0]["basename"],
             "new.png"
         );
-        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), ["new.png"]);
+        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), [&uuid(2)]);
         let data_dir = &app.application.store().paths().data_dir;
         assert!(!app.prompt_matches.contains_key(&data_dir.join("old.png")));
         assert!(app.prompt_matches.contains_key(&data_dir.join("new.png")));
@@ -3812,8 +3833,8 @@ done
     #[tokio::test(flavor = "current_thread")]
     async fn calendar_preparation_of_replaced_rows_is_dropped_after_the_reload_prepares() {
         let root = tempfile::tempdir().unwrap();
-        let mut app = loaded_offline_app(root.path(), &[calendar_row("old.png")]).await;
-        replace_rows(&app, vec![calendar_row("new.png")]);
+        let mut app = loaded_offline_app(root.path(), &[calendar_row(1, "old.png")]).await;
+        replace_rows(&app, vec![calendar_row(2, "new.png")]);
         let reload = run_task(app.update(Message::Refresh)).await;
         let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
         for message in reload {
@@ -3823,14 +3844,14 @@ done
         for message in old_prepared {
             assert!(iced_runtime::task::into_stream(app.update(message)).is_none());
         }
-        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), ["new.png"]);
+        assert_eq!(app.calendar_artwork.keys().collect::<Vec<_>>(), [&uuid(2)]);
         assert!(app.calendar_prepared && !app.calendar_preparing);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn stale_calendar_preparation_ends_preparing_without_extending_prompts() {
         let root = tempfile::tempdir().unwrap();
-        let mut app = loaded_offline_app(root.path(), &[calendar_row("old.png")]).await;
+        let mut app = loaded_offline_app(root.path(), &[calendar_row(1, "old.png")]).await;
         let old_prepared = run_task(app.update(Message::Navigate(Tab::Calendar))).await;
         std::fs::write(&app.application.store().paths().json, "{").unwrap();
         let reload = send(&mut app, Message::Refresh).await;

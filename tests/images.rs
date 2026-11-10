@@ -422,6 +422,20 @@ fn basename_lookup_ignores_hidden_runtime_directories() {
     fs::write(f.path("art/same.png"), b"art").unwrap();
     fs::write(f.path(".thumbs/same.png"), b"cache").unwrap();
     let result = publicator::images::index_by_basename(f.root.path()).unwrap();
-    assert_eq!(result.get("same.png").unwrap(), &f.path("art/same.png"));
+    assert_eq!(result["same.png"], vec![f.path("art/same.png")]);
     assert!(!result.contains_key("private.png"));
+}
+
+#[test]
+fn basename_index_keeps_every_same_named_file() {
+    let f = Fixture::new();
+    for dir in ["a", "b"] {
+        fs::create_dir_all(f.path(dir)).unwrap();
+        // Arbitrary bytes: the basename index never reads content.
+        fs::write(f.path(&format!("{dir}/same.png")), dir).unwrap();
+    }
+    let mut named =
+        publicator::images::index_by_basename(f.root.path()).unwrap()["same.png"].clone();
+    named.sort();
+    assert_eq!(named, [f.path("a/same.png"), f.path("b/same.png")]);
 }

@@ -31,29 +31,31 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
             if !state.shown_previews.contains(uuid) || state.row_previews.contains_key(uuid) {
                 return None;
             }
-            let (basename, sha) = preview_identity(row)?;
-            Some((uuid.to_owned(), basename, sha))
+            let sha = row
+                .pointer("/files/0")
+                .and_then(recorded_sha512)?
+                .to_owned();
+            Some((uuid.to_owned(), row.clone(), sha))
         })
         .take(capacity)
         .collect();
     let root = state.application.store().paths().data_dir.clone();
     let cache = root.join(".thumbs");
     let mut tasks = Vec::new();
-    for (uuid, basename, sha) in records {
+    for (uuid, row, sha) in records {
         state.row_previews.insert(uuid.clone(), None);
         let task_uuid = uuid.clone();
         let root = root.clone();
         let cache = cache.clone();
+        let index = state.artwork_index.clone();
         tasks.push(Task::perform(
             async move {
                 let source = tokio::task::spawn_blocking(move || {
-                    crate::images::index_by_basename(&root)?
-                        .remove(&basename)
-                        .ok_or_else(|| crate::error::Error::NotFound(format!("artwork {basename}")))
+                    crate::artwork::preview_source(super::artwork_index(&index, &root)?, &row)
+                        .map_err(|error| error.to_string())
                 })
                 .await
-                .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-                .map_err(|error| error.to_string())?;
+                .unwrap_or_else(|error| Err(error.to_string()))?;
                 crate::ui::preview::prepare(source, sha, cache).await
             },
             move |result| Message::RowPreviewFinished {
@@ -63,13 +65,6 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         ));
     }
     Task::batch(tasks)
-}
-
-fn preview_identity(row: &Value) -> Option<(String, String)> {
-    let file = row.get("files")?.as_array()?.first()?;
-    let basename = file.get("basename")?.as_str()?.to_owned();
-    let sha = recorded_sha512(file)?.to_owned();
-    Some((basename, sha))
 }
 
 pub fn view(state: &App) -> Element<'_, Message> {

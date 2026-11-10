@@ -4,7 +4,7 @@ mod common;
 use common::{
     Fixture,
     http::{Reply, completion},
-    id, row, with_markers,
+    id, row, thumbs, with_markers,
 };
 use iced::Element;
 use publicator::{
@@ -21,20 +21,6 @@ fn shown(key: impl Into<String>, shown: bool) -> Message {
         key: key.into(),
         shown,
     }
-}
-
-/// Cached thumbnail file names.
-fn thumbs(f: &Fixture) -> Vec<String> {
-    let mut names: Vec<_> = std::fs::read_dir(f.path(".thumbs"))
-        .map(|entries| {
-            entries
-                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                .filter(|name| !name.starts_with('.'))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
 }
 
 fn fixture_app(f: &Fixture, endpoint: String) -> (App, Arc<Application>) {
@@ -850,6 +836,36 @@ async fn row_preview_loads_for_a_hash_recorded_as_file_sha512sum() {
         thumbs(&f),
         [publicator::images::thumb_name(&image, &digest).unwrap()]
     );
+}
+
+#[tokio::test]
+async fn describe_rows_sharing_a_basename_each_preview_their_recorded_file() {
+    let f = Fixture::new();
+    let mut rows = Vec::new();
+    let mut expected = Vec::new();
+    for (n, dir, color) in [(1, "a", "red"), (2, "b", "blue")] {
+        let image = f.colored(&format!("{dir}/blur.png"), color);
+        let digest = publicator::images::file_sha512(&image).unwrap();
+        let mut publication = row(n, "SCHEDULED");
+        publication["files"][0] = json!({"basename": "blur.png", "sha512sum": digest});
+        rows.push(publication);
+        expected.push(publicator::images::thumb_name(&image, &digest).unwrap());
+    }
+    expected.sort();
+    f.write(json!(rows));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let task = app.update(Message::Navigate(Tab::Describe));
+    common::ui::settle(&mut app, task).await;
+    for n in [1, 2] {
+        let effects = common::ui::send(&mut app, shown(id(n), true)).await;
+        assert!(
+            effects.any(|message| matches!(message,
+                Message::RowPreviewFinished { uuid, result: Ok(_) } if *uuid == id(n))),
+            "{:?}",
+            effects.messages
+        );
+    }
+    assert_eq!(thumbs(&f), expected);
 }
 
 #[tokio::test]

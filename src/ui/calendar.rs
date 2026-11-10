@@ -1,7 +1,7 @@
 use super::{App, Message, style};
 use crate::{
+    artwork,
     calendar::{self, Event},
-    images,
     prompts::PromptMatch,
     scheduling,
 };
@@ -23,7 +23,8 @@ const SCROLL_ID: &str = "calendar-events";
 
 #[derive(Clone, Debug)]
 pub struct Preparation {
-    pub artwork: HashMap<String, Option<PathBuf>>,
+    /// Per row UUID with events: `artwork::preview_source`, or why it has no artwork.
+    pub artwork: HashMap<String, Result<PathBuf, String>>,
     pub prompts: Vec<(PathBuf, PromptMatch)>,
 }
 
@@ -155,17 +156,14 @@ fn days_in_month(month: NaiveDate) -> u32 {
 }
 
 pub(super) fn event_prompt_view<'a>(state: &'a App, event: &Event) -> Option<Element<'a, Message>> {
-    let prompt_path = event.basename.as_deref().map(|basename| {
-        state
-            .calendar_artwork
-            .get(basename)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| state.application.store().paths().data_dir.join(basename))
-    });
-    prompt_path
-        .as_deref()
-        .and_then(|path| state.prompt_matches.get(path))
+    let basename = event.basename.as_deref()?;
+    let prompt_path = match state.calendar_artwork.get(&event.uuid) {
+        Some(Ok(path)) => path.clone(),
+        _ => state.application.store().paths().data_dir.join(basename),
+    };
+    state
+        .prompt_matches
+        .get(&prompt_path)
         .map(super::prompt::view)
 }
 
@@ -226,13 +224,10 @@ fn event_view<'a>(
 }
 
 fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
-    let Some(basename) = event.basename.as_deref() else {
-        return text("Artwork missing").into();
-    };
-    match state.calendar_artwork.get(basename) {
+    match state.calendar_artwork.get(&event.uuid) {
         None => text("Checking artwork…").into(),
-        Some(None) => text("Artwork missing").into(),
-        Some(Some(_)) => match state.calendar_previews.get(basename) {
+        Some(Err(error)) => text(format!("Artwork unavailable: {error}")).into(),
+        Some(Ok(_)) => match state.calendar_previews.get(&event.uuid) {
             None | Some(None) => text("Loading thumbnail…").into(),
             Some(Some(Ok(path))) => {
                 iced::widget::image(iced::widget::image::Handle::from_path(path))
@@ -260,34 +255,37 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
             ));
         }
     };
-    let basenames = events
-        .iter()
-        .filter_map(|event| event.basename.clone())
-        .collect::<HashSet<_>>();
     let data_dir = state.application.store().paths().data_dir.clone();
+    let index = state.artwork_index.clone();
     let archive = state.prompt_archive.clone();
     let archive_error = state.prompt_archive_error.clone();
     state.calendar_preparing = true;
     Task::perform(
         async move {
             tokio::task::spawn_blocking(move || {
-                let index = images::index_by_basename(&data_dir)?;
-                let artwork = basenames
-                    .into_iter()
-                    .map(|basename| {
-                        let path = index.get(&basename).cloned();
-                        (basename, path)
+                let index = super::artwork_index(&index, &data_dir)?;
+                let with_events = events
+                    .iter()
+                    .map(|event| event.uuid.as_str())
+                    .collect::<HashSet<_>>();
+                let artwork = rows
+                    .iter()
+                    .filter_map(|row| {
+                        let uuid = row.get("uuid")?.as_str()?;
+                        if !with_events.contains(uuid) {
+                            return None;
+                        }
+                        let source = artwork::preview_source(index, row);
+                        Some((uuid.to_owned(), source.map_err(|error| error.to_string())))
                     })
                     .collect::<HashMap<_, _>>();
                 let paths = events
                     .iter()
-                    .filter_map(|event| event.basename.as_ref())
-                    .map(|basename| {
-                        artwork
-                            .get(basename)
-                            .and_then(Option::as_ref)
-                            .cloned()
-                            .unwrap_or_else(|| data_dir.join(basename))
+                    .filter_map(|event| {
+                        Some(match artwork.get(&event.uuid) {
+                            Some(Ok(path)) => path.clone(),
+                            _ => data_dir.join(event.basename.as_ref()?),
+                        })
                     })
                     .collect();
                 let prompts = super::resolve_prompt_matches(
@@ -295,11 +293,10 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
                     archive_error.as_deref(),
                     paths,
                 );
-                Ok::<_, crate::error::Error>(Preparation { artwork, prompts })
+                Ok(Preparation { artwork, prompts })
             })
             .await
-            .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
-            .map_err(|error| error.to_string())
+            .unwrap_or_else(|error| Err(error.to_string()))
         },
         move |result| Message::CalendarPrepared(generation, result),
     )
@@ -325,26 +322,26 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         .iter()
         .filter(|event| state.calendar_expanded.contains(&event_key(event)))
         .filter_map(|event| {
-            let basename = event.basename.as_ref()?;
-            let source = state.calendar_artwork.get(basename)?.as_ref()?;
-            if !seen.insert(basename.clone()) || state.calendar_previews.contains_key(basename) {
+            let source = state.calendar_artwork.get(&event.uuid)?.as_ref().ok()?;
+            if !seen.insert(&event.uuid) || state.calendar_previews.contains_key(&event.uuid) {
                 return None;
             }
-            let sha = event.sha512.clone();
-            Some((basename.clone(), source.clone(), sha))
+            // `preview_source` refused rows without a recorded hash.
+            let sha = event.sha512.clone()?;
+            Some((event.uuid.clone(), source.clone(), sha))
         })
         .take(capacity)
         .collect::<Vec<_>>();
     let cache = state.application.store().paths().data_dir.join(".thumbs");
     let mut tasks = Vec::new();
-    for (basename, source, sha) in records {
-        state.calendar_previews.insert(basename.clone(), None);
-        let task_basename = basename.clone();
+    for (uuid, source, sha) in records {
+        state.calendar_previews.insert(uuid.clone(), None);
+        let task_uuid = uuid.clone();
         let cache = cache.clone();
         tasks.push(Task::perform(
-            async move { super::preview::prepare_lazy(source, sha, cache).await },
+            super::preview::prepare(source, sha, cache),
             move |result| Message::CalendarPreviewFinished {
-                basename: task_basename,
+                uuid: task_uuid,
                 result,
             },
         ));

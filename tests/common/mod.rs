@@ -92,6 +92,20 @@ impl Fixture {
     }
 }
 
+/// Cached thumbnail file names in `f`'s `.thumbs/`, sorted.
+pub fn thumbs(f: &Fixture) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(f.path(".thumbs"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 /// A fixture whose only configuration is the publicable `roots`.
 pub fn configured(roots: &[&str]) -> Fixture {
     Fixture::with_config(Config {
