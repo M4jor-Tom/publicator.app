@@ -273,7 +273,9 @@ pub enum Message {
     PromptMatchesFinished(Vec<(PathBuf, PromptMatch)>),
     /// Calendar artwork and prompts, stamped with the reload generation of their rows.
     CalendarPrepared(u64, Result<calendar::Preparation, String>),
+    /// A Calendar thumbnail, stamped with the reload generation of the rows it previews.
     CalendarPreviewFinished {
+        generation: u64,
         uuid: String,
         result: Result<PathBuf, String>,
     },
@@ -649,11 +651,12 @@ impl App {
 
     /// The one guard for reload and calendar replies: a completion stamped before the latest
     /// `reload_task` describes an older snapshot and must not replace newer rows or artwork.
-    /// A calendar preparation carries the generation of the rows it read, so one started while a
-    /// reload is pending is dropped and that reload's own preparation stands.
+    /// A calendar preparation or thumbnail carries the generation of the rows it read, so one
+    /// started while a reload is pending is dropped and that reload's own request stands.
     fn stale_load(&mut self, message: &Message) -> bool {
-        let (Message::LoadFinished(generation, _) | Message::CalendarPrepared(generation, _)) =
-            message
+        let (Message::LoadFinished(generation, _)
+        | Message::CalendarPrepared(generation, _)
+        | Message::CalendarPreviewFinished { generation, .. }) = message
         else {
             return false;
         };
@@ -1191,7 +1194,7 @@ impl App {
                 self.calendar_prepared = true;
                 self.calendar_error = Some(error);
             }
-            Message::CalendarPreviewFinished { uuid, result } => {
+            Message::CalendarPreviewFinished { uuid, result, .. } => {
                 self.calendar_previews.insert(uuid, Some(result));
                 return calendar::preview_tasks(self);
             }
@@ -3826,6 +3829,41 @@ done
         assert!(!app.prompt_matches.contains_key(&data_dir.join("old.png")));
         assert!(app.prompt_matches.contains_key(&data_dir.join("new.png")));
         assert!(app.calendar_prepared && !app.calendar_preparing);
+    }
+
+    /// A Calendar thumbnail requested before a Refresh cannot fill the reloaded Calendar's slot,
+    /// which the reload's own preparation then requests again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn calendar_preview_from_before_a_reload_cannot_fill_the_reloaded_slot() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("art.png"), "not the recorded content").unwrap();
+        let mut app = loaded_offline_app(root.path(), &[calendar_row(1, "art.png")]).await;
+        let _ = app.update(Message::ToggleCalendarEvent(format!("{}:0", uuid(1))));
+        let mut old_preview = Vec::new();
+        for message in run_task(app.update(Message::Navigate(Tab::Calendar))).await {
+            old_preview.extend(run_task(app.update(message)).await);
+        }
+        assert!(matches!(
+            old_preview[..],
+            [Message::CalendarPreviewFinished { .. }]
+        ));
+
+        let mut reloaded = Vec::new();
+        for message in run_task(app.update(Message::Refresh)).await {
+            reloaded.extend(run_task(app.update(message)).await);
+        }
+        assert!(app.calendar_previews.is_empty(), "the reload cleared it");
+        for message in old_preview {
+            let _ = app.update(message);
+        }
+        assert!(
+            app.calendar_previews.is_empty(),
+            "the old thumbnail is dropped"
+        );
+        for message in reloaded {
+            let _ = app.update(message);
+        }
+        assert_eq!(app.calendar_previews.get(&uuid(1)), Some(&None));
     }
 
     /// A preparation that read the rows a pending reload replaces cannot overwrite that reload's

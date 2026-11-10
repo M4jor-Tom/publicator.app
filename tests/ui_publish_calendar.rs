@@ -1498,7 +1498,7 @@ async fn calendar_rows_sharing_a_basename_get_their_own_artwork_and_preview() {
         assert_eq!(app.calendar_art_path(&common::id(n)), Some(image.as_path()));
         assert!(
             effects.any(|message| matches!(message,
-                Message::CalendarPreviewFinished { uuid, result: Ok(path) }
+                Message::CalendarPreviewFinished { uuid, result: Ok(path), .. }
                     if *uuid == common::id(n) && path.ends_with(thumb))),
             "{:?}",
             effects.messages

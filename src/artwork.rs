@@ -23,7 +23,7 @@ pub fn resolve(data_dir: &Path, row: &Value) -> Result<Artwork> {
 }
 
 /// `resolve` against an already built basename index.
-pub fn resolve_in(index: &BasenameIndex, row: &Value) -> Result<Artwork> {
+fn resolve_in(index: &BasenameIndex, row: &Value) -> Result<Artwork> {
     let (basename, recorded) = identity(row)?;
     let named = index
         .get(basename)

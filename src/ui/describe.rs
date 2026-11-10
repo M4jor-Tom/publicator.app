@@ -33,8 +33,8 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
             }
             let sha = row
                 .pointer("/files/0")
-                .and_then(recorded_sha512)?
-                .to_owned();
+                .and_then(recorded_sha512)
+                .map(str::to_owned);
             Some((uuid.to_owned(), row.clone(), sha))
         })
         .take(capacity)
@@ -56,7 +56,8 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
                 })
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()))?;
-                crate::ui::preview::prepare(source, sha, cache).await
+                // `preview_source` refused a row without a recorded hash.
+                crate::ui::preview::prepare(source, sha.unwrap_or_default(), cache).await
             },
             move |result| Message::RowPreviewFinished {
                 uuid: task_uuid,

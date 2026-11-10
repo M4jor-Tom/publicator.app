@@ -332,6 +332,7 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         .take(capacity)
         .collect::<Vec<_>>();
     let cache = state.application.store().paths().data_dir.join(".thumbs");
+    let generation = state.rows_generation;
     let mut tasks = Vec::new();
     for (uuid, source, sha) in records {
         state.calendar_previews.insert(uuid.clone(), None);
@@ -340,6 +341,7 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         tasks.push(Task::perform(
             super::preview::prepare(source, sha, cache),
             move |result| Message::CalendarPreviewFinished {
+                generation,
                 uuid: task_uuid,
                 result,
             },

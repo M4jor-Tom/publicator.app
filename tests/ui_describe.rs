@@ -839,6 +839,27 @@ async fn row_preview_loads_for_a_hash_recorded_as_file_sha512sum() {
 }
 
 #[tokio::test]
+async fn row_without_recorded_hash_reports_an_error_not_an_unverified_preview() {
+    let f = Fixture::new();
+    f.image("1.png", 4, 3);
+    let mut publication = row(1, "SCHEDULED");
+    publication["files"][0] = json!({"basename": "1.png"});
+    f.write(json!([publication]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let task = app.update(Message::Navigate(Tab::Describe));
+    common::ui::settle(&mut app, task).await;
+    let effects = common::ui::send(&mut app, shown(id(1), true)).await;
+    assert!(
+        effects.any(|message| matches!(message,
+            Message::RowPreviewFinished { uuid, result: Err(error) }
+                if *uuid == id(1) && error.contains("artwork hash is missing"))),
+        "{:?}",
+        effects.messages
+    );
+    assert!(thumbs(&f).is_empty(), "no preview of unverified bytes");
+}
+
+#[tokio::test]
 async fn describe_rows_sharing_a_basename_each_preview_their_recorded_file() {
     let f = Fixture::new();
     let mut rows = Vec::new();
