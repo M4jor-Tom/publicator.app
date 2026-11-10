@@ -92,8 +92,10 @@ def test_submit_is_scheduled_only_on_a_confirmed_commit_reply(open_form, tmp_pat
 
 
 def test_submit_fails_without_commit_when_a_checkbox_will_not_stick(open_form, tmp_path):
-    page = open_form(start=[2026, 11], offered=["Art", "Featured"], stuck=["isAiGenerated"])
-    assert submit(page, tmp_path)["type"] == "failed"
+    page = open_form(start=[2026, 11], offered=["Art", "Featured"], offered_tiers=["Gold", "Silver"],
+                     stuck=["isAiGenerated"])
+    event = submit(page, tmp_path)
+    assert (event["type"], "would not stay True" in event["error"]) == ("failed", True)
     assert "commits" not in storage(page)
 
 
