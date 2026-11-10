@@ -1463,20 +1463,22 @@ def every_visible_card_loads_its_own_image(ctx):
         app.resize(*size)
         for tab in ("Pick", "Schedule", "Describe", "Publish"):
             navigate(app, tab)
-            shown = []
             for fraction in (1.0, 0.45, 0.0, 0.8):
+                what = f"{tab} at {size} {fraction:.0%}"
                 jump(app, fraction)
-                img, region, blocks = previews(app, palette, f"{tab} at {size} {fraction:.0%}")
-                shown += blocks
+                img, region, blocks = previews(app, palette, what)
                 if tab in orders:
                     assert_order(blocks, phase_names(app, orders[tab]), tab)
-                else:
-                    # Long digest names wrap inside their card instead of running across.
-                    spilled = [box for box in gutters(img, region) if not clear(img, box, PAGE)]
-                    check(not spilled, f"Pick card text crosses the gutters {spilled} at {size}")
-            # Pick cards are about as tall as the default view: a stop between two rows of
-            # thumbnails is legitimate, an empty sweep is not.
-            check(shown, f"{tab} shows no artwork at {size}")
+                    continue
+                if not blocks:
+                    # Pick cards are about as tall as the view, so a stop can fall between two
+                    # rows of thumbnails; 40 px up, the upper row's always shows.
+                    scroll_by(app, -40)
+                    img, region, blocks = previews(app, palette, f"{what} - 40 px")
+                check(blocks, f"{what} shows no artwork")
+                # Long digest names wrap inside their card instead of running across.
+                spilled = [box for box in gutters(img, region) if not clear(img, box, PAGE)]
+                check(not spilled, f"Pick card text crosses the gutters {spilled} at {size}")
     close_and_wait(app)
 
 
