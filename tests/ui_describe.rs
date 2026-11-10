@@ -862,16 +862,7 @@ async fn row_without_recorded_hash_reports_an_error_not_an_unverified_preview() 
 #[tokio::test]
 async fn describe_rows_sharing_a_basename_each_preview_their_recorded_file() {
     let f = Fixture::new();
-    let mut rows = Vec::new();
-    let mut expected = Vec::new();
-    for (n, dir, color) in [(1, "a", "red"), (2, "b", "blue")] {
-        let image = f.colored(&format!("{dir}/blur.png"), color);
-        let digest = publicator::images::file_sha512(&image).unwrap();
-        let mut publication = row(n, "SCHEDULED");
-        publication["files"][0] = json!({"basename": "blur.png", "sha512sum": digest});
-        rows.push(publication);
-        expected.push(publicator::images::thumb_name(&image, &digest).unwrap());
-    }
+    let (rows, _, mut expected) = f.namesake_rows("SCHEDULED");
     expected.sort();
     f.write(json!(rows));
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());

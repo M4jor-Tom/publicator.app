@@ -1,7 +1,7 @@
 //! A publication's artwork, found by its recorded content identity rather than by name alone.
 use crate::{
     error::{Error, Result},
-    images::{BasenameIndex, copy_verified, file_sha512, index_by_basename},
+    images::{BasenameIndex, copy_verified, file_sha512, visit_visible_files},
     model::recorded_sha512,
 };
 use serde_json::Value;
@@ -19,15 +19,21 @@ pub struct Artwork {
 /// Resolve `files[0]` to the visible file under `data_dir` with that basename whose bytes match
 /// the recorded SHA-512. Same-named files are told apart by hash; changed bytes are never accepted.
 pub fn resolve(data_dir: &Path, row: &Value) -> Result<Artwork> {
-    resolve_in(&index_by_basename(data_dir)?, row)
+    let (basename, recorded) = identity(row)?;
+    let mut named = Vec::new();
+    visit_visible_files(data_dir, &mut |entry| {
+        if entry.file_name() == basename {
+            named.push(entry.path());
+        }
+    })?;
+    resolve_in(&named, basename, recorded)
 }
 
-/// `resolve` against an already built basename index.
-fn resolve_in(index: &BasenameIndex, row: &Value) -> Result<Artwork> {
-    let (basename, recorded) = identity(row)?;
-    let named = index
-        .get(basename)
-        .ok_or_else(|| Error::NotFound(format!("artwork {basename}")))?;
+/// The first of `basename`'s `named` paths whose bytes hash to `recorded`.
+fn resolve_in(named: &[PathBuf], basename: &str, recorded: &str) -> Result<Artwork> {
+    if named.is_empty() {
+        return Err(Error::NotFound(format!("artwork {basename}")));
+    }
     for path in named {
         let sha512 = file_sha512(path)?;
         if sha512.eq_ignore_ascii_case(recorded) {
@@ -42,16 +48,18 @@ fn resolve_in(index: &BasenameIndex, row: &Value) -> Result<Artwork> {
     )))
 }
 
-/// The file to preview `files[0]` from: its lone namesake, else the namesake matching the recorded
-/// hash. A recorded hash is required; the preview cache verifies the bytes against it.
-pub fn preview_source(index: &BasenameIndex, row: &Value) -> Result<PathBuf> {
-    let (basename, _) = identity(row)?;
-    match index.get(basename).map(Vec::as_slice) {
+/// The file to preview `files[0]` from, with its recorded SHA-512: its lone namesake, else the
+/// namesake matching the recorded hash. A recorded hash is required; the preview cache verifies
+/// the bytes against it.
+pub fn preview_source(index: &BasenameIndex, row: &Value) -> Result<(PathBuf, String)> {
+    let (basename, recorded) = identity(row)?;
+    let path = match index.get(basename).map(Vec::as_slice).unwrap_or_default() {
         // ponytail: unhashed; ensure_thumb verifies it on a cache miss and a cache hit is the
         // recorded content
-        Some([only]) => Ok(only.clone()),
-        _ => resolve_in(index, row).map(|artwork| artwork.path),
-    }
+        [only] => only.clone(),
+        named => resolve_in(named, basename, recorded)?.path,
+    };
+    Ok((path, recorded.to_owned()))
 }
 
 /// The validated basename and recorded SHA-512 of `files[0]`.
@@ -93,6 +101,7 @@ impl Artwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::index_by_basename;
     use serde_json::json;
 
     fn row(sha512: Option<&str>) -> Value {
@@ -117,7 +126,7 @@ mod tests {
         let unrelated = "0".repeat(128);
         assert_eq!(
             preview_source(&index, &row(Some(&unrelated))).unwrap(),
-            lone
+            (lone, unrelated.clone())
         );
         assert!(matches!(
             preview_source(&index, &row(None)),
@@ -132,8 +141,8 @@ mod tests {
         for recorded in [&a, &b] {
             let sha512 = file_sha512(recorded).unwrap();
             assert_eq!(
-                &preview_source(&index, &row(Some(&sha512))).unwrap(),
-                recorded
+                preview_source(&index, &row(Some(&sha512))).unwrap(),
+                (recorded.clone(), sha512)
             );
         }
         assert!(matches!(
@@ -141,8 +150,9 @@ mod tests {
             Err(Error::ReconciliationRequired(_))
         ));
         // Schema order: `sha512sum` is read before `fileSha512sum`.
-        let mut both = row(Some(&file_sha512(&b).unwrap()));
+        let sha512 = file_sha512(&b).unwrap();
+        let mut both = row(Some(&sha512));
         both["files"][0]["fileSha512sum"] = json!(file_sha512(&a).unwrap());
-        assert_eq!(resolve_in(&index, &both).unwrap().path, b);
+        assert_eq!(preview_source(&index, &both).unwrap(), (b, sha512));
     }
 }

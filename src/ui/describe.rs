@@ -1,7 +1,7 @@
 use super::{App, Message, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
-    model::{GENERATE_MARKER, Phase, phase, recorded_sha512},
+    model::{GENERATE_MARKER, Phase, phase},
 };
 use iced::{
     Element, Length, Task,
@@ -31,18 +31,14 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
             if !state.shown_previews.contains(uuid) || state.row_previews.contains_key(uuid) {
                 return None;
             }
-            let sha = row
-                .pointer("/files/0")
-                .and_then(recorded_sha512)
-                .map(str::to_owned);
-            Some((uuid.to_owned(), row.clone(), sha))
+            Some((uuid.to_owned(), row.clone()))
         })
         .take(capacity)
         .collect();
     let root = state.application.store().paths().data_dir.clone();
     let cache = root.join(".thumbs");
     let mut tasks = Vec::new();
-    for (uuid, row, sha) in records {
+    for (uuid, row) in records {
         state.row_previews.insert(uuid.clone(), None);
         let task_uuid = uuid.clone();
         let root = root.clone();
@@ -50,14 +46,16 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         let index = state.artwork_index.clone();
         tasks.push(Task::perform(
             async move {
-                let source = tokio::task::spawn_blocking(move || {
-                    crate::artwork::preview_source(super::artwork_index(&index, &root)?, &row)
+                tokio::task::spawn_blocking(move || {
+                    let index = super::artwork_index(&index, &root)?;
+                    crate::artwork::preview_source(index, &row)
+                        .and_then(|(source, sha512)| {
+                            crate::images::ensure_thumb(&source, &cache, &sha512)
+                        })
                         .map_err(|error| error.to_string())
                 })
                 .await
-                .unwrap_or_else(|error| Err(error.to_string()))?;
-                // `preview_source` refused a row without a recorded hash.
-                crate::ui::preview::prepare(source, sha.unwrap_or_default(), cache).await
+                .unwrap_or_else(|error| Err(error.to_string()))
             },
             move |result| Message::RowPreviewFinished {
                 uuid: task_uuid,

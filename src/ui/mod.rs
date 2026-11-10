@@ -368,8 +368,9 @@ pub struct App {
     calendar_preparing: bool,
     calendar_prepared: bool,
     calendar_error: Option<String>,
-    /// Per row UUID: the file its artwork previews from (`artwork::preview_source`).
-    calendar_artwork: HashMap<String, Result<PathBuf, String>>,
+    /// Per row UUID: the file its artwork previews from and its recorded SHA-512
+    /// (`artwork::preview_source`).
+    calendar_artwork: HashMap<String, Result<(PathBuf, String), String>>,
     calendar_previews: HashMap<String, Option<Result<PathBuf, String>>>,
     calendar_expanded: HashSet<String>,
     /// The data directory's basename index, walked at most once per load (`artwork_index`).
@@ -512,8 +513,10 @@ impl App {
     pub fn calendar_prepared(&self) -> bool {
         self.calendar_prepared
     }
-    pub fn calendar_art_path(&self, uuid: &str) -> Option<&Path> {
-        self.calendar_artwork.get(uuid)?.as_deref().ok()
+    /// The file a row's Calendar artwork previews from and its recorded SHA-512.
+    pub fn calendar_art(&self, uuid: &str) -> Option<(&Path, &str)> {
+        let (path, sha512) = self.calendar_artwork.get(uuid)?.as_ref().ok()?;
+        Some((path, sha512))
     }
     pub fn revealed_publication(&self) -> Option<&str> {
         self.revealed_publication.as_deref()

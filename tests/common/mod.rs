@@ -90,6 +90,21 @@ impl Fixture {
     pub fn marked_row(&self, n: u64) -> Value {
         with_markers(self.art_row(n, "SCHEDULED"))
     }
+    /// Rows 1 and 2 in `state` whose artwork shares the basename `blur.png` (`a/` red, `b/` blue),
+    /// each recording its own file's SHA-512; with those files and their thumbnail names.
+    pub fn namesake_rows(&self, state: &str) -> (Vec<Value>, Vec<std::path::PathBuf>, Vec<String>) {
+        let (mut rows, mut images, mut thumbs) = (Vec::new(), Vec::new(), Vec::new());
+        for (n, dir, color) in [(1, "a", "red"), (2, "b", "blue")] {
+            let image = self.colored(&format!("{dir}/blur.png"), color);
+            let digest = publicator::images::file_sha512(&image).unwrap();
+            let mut publication = row(n, state);
+            publication["files"][0] = json!({"basename": "blur.png", "sha512sum": digest});
+            rows.push(publication);
+            thumbs.push(publicator::images::thumb_name(&image, &digest).unwrap());
+            images.push(image);
+        }
+        (rows, images, thumbs)
+    }
 }
 
 /// Cached thumbnail file names in `f`'s `.thumbs/`, sorted.

@@ -15,7 +15,7 @@ const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,8 +23,9 @@ const SCROLL_ID: &str = "calendar-events";
 
 #[derive(Clone, Debug)]
 pub struct Preparation {
-    /// Per row UUID with events: `artwork::preview_source`, or why it has no artwork.
-    pub artwork: HashMap<String, Result<PathBuf, String>>,
+    /// Per row UUID with events: `artwork::preview_source` (the file and its recorded SHA-512),
+    /// or why it has no artwork.
+    pub artwork: HashMap<String, Result<(PathBuf, String), String>>,
     pub prompts: Vec<(PathBuf, PromptMatch)>,
 }
 
@@ -155,15 +156,20 @@ fn days_in_month(month: NaiveDate) -> u32 {
 }
 
 pub(super) fn event_prompt_view<'a>(state: &'a App, event: &Event) -> Option<Element<'a, Message>> {
-    let basename = event.basename.as_deref()?;
-    let prompt_path = match state.calendar_artwork.get(&event.uuid) {
-        Some(Ok(path)) => path.clone(),
-        _ => state.application.store().paths().data_dir.join(basename),
-    };
+    let artwork = state.calendar_art(&event.uuid).map(|(path, _)| path);
+    let data_dir = &state.application.store().paths().data_dir;
     state
         .prompt_matches
-        .get(&prompt_path)
+        .get(&prompt_path(artwork, data_dir, event)?)
         .map(super::prompt::view)
+}
+
+/// Where an event's prompt is matched: its resolved artwork, else `data_dir/<basename>`.
+fn prompt_path(artwork: Option<&Path>, data_dir: &Path, event: &Event) -> Option<PathBuf> {
+    match artwork {
+        Some(path) => Some(path.to_owned()),
+        None => Some(data_dir.join(event.basename.as_deref()?)),
+    }
 }
 
 fn event_date(event: &Event, zone: chrono_tz::Tz) -> Option<NaiveDate> {
@@ -281,10 +287,8 @@ pub(super) fn prepare_task(state: &mut App) -> Task<Message> {
                 let paths = events
                     .iter()
                     .filter_map(|event| {
-                        Some(match artwork.get(&event.uuid) {
-                            Some(Ok(path)) => path.clone(),
-                            _ => data_dir.join(event.basename.as_ref()?),
-                        })
+                        let found = artwork.get(&event.uuid).and_then(|art| art.as_ref().ok());
+                        prompt_path(found.map(|(path, _)| path.as_path()), &data_dir, event)
                     })
                     .collect();
                 let prompts = super::resolve_prompt_matches(
@@ -321,13 +325,11 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         .iter()
         .filter(|event| state.calendar_expanded.contains(&event_key(event)))
         .filter_map(|event| {
-            let source = state.calendar_artwork.get(&event.uuid)?.as_ref().ok()?;
+            let (source, sha) = state.calendar_art(&event.uuid)?;
             if !seen.insert(&event.uuid) || state.calendar_previews.contains_key(&event.uuid) {
                 return None;
             }
-            // `preview_source` refused rows without a recorded hash.
-            let sha = event.sha512.clone()?;
-            Some((event.uuid.clone(), source.clone(), sha))
+            Some((event.uuid.clone(), source.to_owned(), sha.to_owned()))
         })
         .take(capacity)
         .collect::<Vec<_>>();

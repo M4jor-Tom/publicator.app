@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    model::{Delivery, GENERATE_MARKER, effective_schedule, recorded_sha512},
+    model::{Delivery, GENERATE_MARKER, effective_schedule},
 };
 use chrono::{DateTime, Datelike, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -15,7 +15,6 @@ pub struct Event {
     pub timestamp: i64,
     pub url: Option<String>,
     pub basename: Option<String>,
-    pub sha512: Option<String>,
     pub delivery: Delivery,
 }
 
@@ -39,13 +38,13 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
             title
         };
         let timestamp = effective_schedule(row).unwrap_or(0);
-        let files = row.get("files").and_then(Value::as_array);
-        let first = files.and_then(|items| items.first());
-        let basename = first
+        let basename = row
+            .get("files")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
             .and_then(|file| file.get("basename"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let sha512 = first.and_then(recorded_sha512).map(str::to_owned);
         let apparitions = match row.get("apparitions") {
             None => &[][..],
             Some(Value::Array(items)) => items.as_slice(),
@@ -71,7 +70,6 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
                 timestamp,
                 url: app.get("url").and_then(Value::as_str).map(str::to_owned),
                 basename: basename.clone(),
-                sha512: sha512.clone(),
                 delivery,
             });
         }

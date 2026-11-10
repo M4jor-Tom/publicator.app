@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     error::{Error, Result},
-    images::{Candidate, file_sha512},
+    images::{Candidate, file_sha512, published_file_fields},
     model::{
         GENERATE_MARKER, Phase, RECORDED_SHA512_KEYS, deliveries_complete, has_delivery_success,
         phase, validate_metadata,
@@ -115,14 +115,11 @@ fn pick_with_hooks(
             ));
         }
         for row in rows.iter() {
-            for files in ["files", "previewFilesIfNotFree"] {
-                if row.get(files).and_then(Value::as_array).into_iter().flatten().any(|file| {
-                    RECORDED_SHA512_KEYS.iter().any(|key| file.get(*key)
-                        .and_then(Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(&sha)))
-                }) {
-                    return row.get("uuid").and_then(Value::as_str)
-                        .map(str::to_owned).ok_or_else(|| Error::Validation("publication UUID missing".into()));
-                }
+            if published_file_fields(std::slice::from_ref(row), &RECORDED_SHA512_KEYS)
+                .any(|value| value.eq_ignore_ascii_case(&sha))
+            {
+                return row.get("uuid").and_then(Value::as_str)
+                    .map(str::to_owned).ok_or_else(|| Error::Validation("publication UUID missing".into()));
             }
         }
         let uuid = uuid::Uuid::new_v4().to_string();

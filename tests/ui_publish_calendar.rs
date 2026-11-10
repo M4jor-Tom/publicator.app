@@ -26,15 +26,20 @@ use std::{
     time::Duration,
 };
 
-fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> App {
-    f.write(serde_json::json!([row.clone()]));
-    let (mut app, _) = App::from_application(
+/// A UI over `f`'s store with unreachable AI providers, and the task starting its first load.
+fn offline_ui(f: &common::Fixture) -> (App, iced::Task<Message>) {
+    App::from_application(
         Arc::new(common::offline_app(Arc::new(f.store.clone()))),
         UiOptions {
             openrouter_model: None,
             ai_timeout: Duration::from_secs(1),
         },
-    );
+    )
+}
+
+fn loaded_default_app(f: &common::Fixture, row: serde_json::Value) -> App {
+    f.write(serde_json::json!([row.clone()]));
+    let (mut app, _) = offline_ui(f);
     let _ = app.update(Message::LoadFinished(0, Ok(vec![row].into())));
     app
 }
@@ -1443,7 +1448,7 @@ async fn configured_prompt_archive_resolves_pick_and_calendar_off_thread_and_mis
                     && matches!(prompt, PromptMatch::Unknown(_)))
     )));
     assert!(app.calendar_prepared());
-    assert!(app.calendar_art_path(&common::id(2)).is_none());
+    assert!(app.calendar_art(&common::id(2)).is_none());
     assert_eq!(std::fs::read_dir(f.path(".thumbs")).unwrap().count(), 1);
     assert!(matches!(
         app.prompt_match(&exact_path),
@@ -1459,13 +1464,7 @@ async fn expanded_calendar(
     rows: &[serde_json::Value],
 ) -> (App, common::ui::Effects) {
     f.write(serde_json::json!(rows));
-    let (mut app, init) = App::from_application(
-        Arc::new(common::offline_app(Arc::new(f.store.clone()))),
-        UiOptions {
-            openrouter_model: None,
-            ai_timeout: Duration::from_secs(1),
-        },
-    );
+    let (mut app, init) = offline_ui(f);
     common::ui::settle(&mut app, init).await;
     for row in rows {
         let uuid = row["uuid"].as_str().unwrap();
@@ -1479,23 +1478,17 @@ async fn expanded_calendar(
 #[tokio::test]
 async fn calendar_rows_sharing_a_basename_get_their_own_artwork_and_preview() {
     let f = common::Fixture::new();
-    let mut rows = Vec::new();
-    let mut images = Vec::new();
-    let mut expected = Vec::new();
-    for (n, dir, color) in [(1, "a", "red"), (2, "b", "blue")] {
-        let image = f.colored(&format!("{dir}/blur.png"), color);
-        let digest = publicator::images::file_sha512(&image).unwrap();
-        let mut publication = common::row(n, "DESCRIBED");
-        publication["files"][0] = serde_json::json!({"basename": "blur.png", "sha512sum": digest});
+    let (mut rows, images, mut expected) = f.namesake_rows("DESCRIBED");
+    for publication in &mut rows {
         publication["apparitions"] =
             serde_json::json!([{"platformName":"deviantart","state":"unpublished"}]);
-        rows.push(publication);
-        expected.push(publicator::images::thumb_name(&image, &digest).unwrap());
-        images.push(image);
     }
     let (app, effects) = expanded_calendar(&f, &rows).await;
     for (n, (image, thumb)) in [1, 2].into_iter().zip(images.iter().zip(&expected)) {
-        assert_eq!(app.calendar_art_path(&common::id(n)), Some(image.as_path()));
+        assert_eq!(
+            app.calendar_art(&common::id(n)).map(|(path, _)| path),
+            Some(image.as_path())
+        );
         assert!(
             effects.any(|message| matches!(message,
                 Message::CalendarPreviewFinished { uuid, result: Ok(path), .. }
@@ -1521,7 +1514,7 @@ async fn calendar_row_without_recorded_hash_shows_an_error_not_an_unverified_pre
     assert!(effects.any(|message| matches!(message,
         Message::CalendarPrepared(_, Ok(prepared))
             if matches!(&prepared.artwork[&common::id(1)], Err(error) if error.contains("artwork hash is missing")))));
-    assert_eq!(app.calendar_art_path(&common::id(1)), None);
+    assert_eq!(app.calendar_art(&common::id(1)), None);
     assert!(
         common::thumbs(&f).is_empty(),
         "no preview of unverified bytes"

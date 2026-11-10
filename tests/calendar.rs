@@ -37,8 +37,6 @@ fn calendar_keeps_two_apparitions_with_one_shared_title() {
     assert_eq!(ev[0].delivery, Delivery::Unpublished);
     assert_eq!(ev[1].delivery, Delivery::PublishedOrScheduled);
     assert_eq!(ev[0].basename.as_deref(), Some("art.png"));
-    let expected_hash = "a".repeat(128);
-    assert_eq!(ev[0].sha512.as_deref(), Some(expected_hash.as_str()));
 }
 
 #[test]
@@ -51,27 +49,7 @@ fn calendar_labels_marker_metadata_and_preserves_file_name() {
     assert_eq!(event.title, "AI metadata pending");
     assert_eq!(event.url, None);
     assert_eq!(event.basename.as_deref(), Some("old.png"));
-    assert_eq!(event.sha512.as_deref(), Some("legacy"));
     assert_eq!(event.timestamp, 1700000000);
-}
-
-#[test]
-fn calendar_reads_file_sha512sum_and_ignores_sha512sum_hex() {
-    let recorded = |file| {
-        let mut p = row(1, "t", 1700000000);
-        p["files"][0] = file;
-        p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
-        timeline(&[p]).unwrap().remove(0).sha512
-    };
-    let hash = "b".repeat(128);
-    assert_eq!(
-        recorded(json!({"basename":"a.png","fileSha512sum":hash})),
-        Some(hash)
-    );
-    assert_eq!(
-        recorded(json!({"basename":"a.png","sha512sumHex":"c".repeat(128)})),
-        None
-    );
 }
 
 #[test]
@@ -132,7 +110,6 @@ fn calendar_falls_back_to_submission_time_and_handles_publications_without_files
     let event = &timeline(&[p]).unwrap()[0];
     assert_eq!(event.timestamp, 1700000000);
     assert_eq!(event.basename, None);
-    assert_eq!(event.sha512, None);
     assert_eq!(event.url, None);
 }
 
@@ -192,7 +169,6 @@ fn at(timestamp: i64) -> Event {
         timestamp,
         url: None,
         basename: None,
-        sha512: None,
         delivery: Delivery::Unpublished,
     }
 }
