@@ -31,5 +31,5 @@ Publication state records completed phases PICKED, SCHEDULED, DESCRIBED and APPE
 - Writes keep the file's key order and 4-space indent so the data repository diffs only real changes. Remove JSON keys with `shift_remove`: `clippy.toml` bans `Map::remove`, which under `preserve_order` moves the last key into the hole.
 - A receipt is evidence of an attempted side effect, not proof the remote site rejected it. Resolve ambiguous outcomes before retrying.
 - Migration is a pure validated transformation; title recovery never guesses URL slugs or mutates the original browser profile.
-- Migration infers DESCRIBED for complete metadata with a legacy date or any successful delivery, as `record_delivery` would after a partial send; partial history is never left PICKED. Delivered history is reserved regardless of phase (see [scheduling](scheduling.md)).
+- Migration infers DESCRIBED for complete metadata with a legacy date or any successful delivery, as publishing records a partial send; partial history is never left PICKED. Delivered history is reserved regardless of phase (see [scheduling](scheduling.md)).
 - A recognized legacy `urlElsePublicationName` must be a string; `null` counts as absent, and any other type fails with a contextual error instead of being dropped.

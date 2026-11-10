@@ -3,22 +3,9 @@ use common::{Fixture, id, row};
 use publicator::{
     config::Config,
     error::Error,
-    workflow::{PlatformOptions, REGISTERED_PLATFORMS, record_delivery, save_options, select},
+    workflow::{PlatformOptions, REGISTERED_PLATFORMS, save_options, select},
 };
 use serde_json::json;
-
-#[test]
-fn historical_pending_prevents_appeared() {
-    let f = Fixture::new();
-    let mut p = row(1, "DESCRIBED");
-    p["apparitions"] = json!([
-        {"platformName":"pixiv","state":"unpublished"},
-        {"platformName":"deviantart","state":"unpublished"}
-    ]);
-    f.write(json!([p]));
-    record_delivery(&f.store, &id(1), "deviantart", None).unwrap();
-    assert_eq!(f.read()[0]["state"], "DESCRIBED");
-}
 
 #[test]
 fn registry_and_select_all_add_only_deviantart_in_one_mutation() {
@@ -108,11 +95,10 @@ fn deselect_all_removes_only_the_pending_target_and_restores_appeared() {
 }
 
 #[test]
-fn only_registered_platform_can_be_selected_or_recorded() {
+fn only_registered_platform_can_be_selected() {
     let f = Fixture::new();
     f.write(json!([row(1, "DESCRIBED")]));
     assert!(select(&f.store, Some(&id(1)), Some("pixiv"), true).is_err());
-    assert!(record_delivery(&f.store, &id(1), "pixiv", None).is_err());
     assert_eq!(f.read()[0]["apparitions"], json!([]));
 }
 
@@ -241,40 +227,6 @@ fn options_reject_invalid_price_and_unconfigured_values_without_writing() {
 }
 
 #[test]
-fn delivery_records_url_and_completes_only_when_every_apparition_succeeded() {
-    let f = Fixture::new();
-    let mut p = row(1, "DESCRIBED");
-    p["apparitions"] = json!([
-        {"platformName":"deviantart","state":"unpublished"},
-        {"platformName":"pixiv","state":"published_or_scheduled"}
-    ]);
-    f.write(json!([p]));
-    record_delivery(
-        &f.store,
-        &id(1),
-        "deviantart",
-        Some("https://www.deviantart.com/a"),
-    )
-    .unwrap();
-    assert_eq!(f.read()[0]["state"], "APPEARED");
-    assert_eq!(
-        f.read()[0]["apparitions"][0]["url"],
-        "https://www.deviantart.com/a"
-    );
-    assert!(record_delivery(&f.store, &id(1), "deviantart", None).is_err());
-}
-
-#[test]
-fn recording_delivery_without_url_does_not_invent_one() {
-    let f = Fixture::new();
-    let mut p = row(1, "DESCRIBED");
-    p["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
-    f.write(json!([p]));
-    record_delivery(&f.store, &id(1), "deviantart", None).unwrap();
-    assert!(f.read()[0]["apparitions"][0].get("url").is_none());
-}
-
-#[test]
 fn absent_apparitions_behave_like_an_empty_collection() {
     let absent = || {
         let mut publication = row(1, "DESCRIBED");
@@ -293,8 +245,6 @@ fn absent_apparitions_behave_like_an_empty_collection() {
         matches!(options, Err(Error::InvalidState(_))),
         "{options:?}"
     );
-    let delivery = record_delivery(&f.store, &id(1), "deviantart", None);
-    assert!(matches!(delivery, Err(Error::NotFound(_))), "{delivery:?}");
     select(&f.store, Some(&id(1)), Some("deviantart"), false).unwrap();
     let deselected = f.read();
     assert!(

@@ -13,10 +13,6 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 - `identify -regard-warnings` (`src/images.rs`) refuses any image with a decoder warning, even a harmless one.
 - The manual fallback (`echo-first` → SKILL upload) hands over the original file, which can be `.webp`; DeviantArt refuses `.webp`, while automation converts via `images::prepare_upload`.
 
-## Code health
-
-- `publish_journal::apply_delivery` duplicates the state transition in `workflow::record_delivery`. Consider one shared pure transition, without nesting Store mutations or weakening atomicity.
-
 ## Testing
 
 - Native replay (`nix run .#native-acceptance`) runs on demand only, not in `nix flake check`, and drives xdotool on Xvfb rather than a VNC bridge.

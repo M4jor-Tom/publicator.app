@@ -515,40 +515,6 @@ fn apply_options(app: &mut Value, options: PlatformOptions) {
     }
 }
 
-pub fn record_delivery(
-    store: &Store,
-    uuid: &str,
-    platform: &str,
-    actual_url: Option<&str>,
-) -> Result<()> {
-    if !REGISTERED_PLATFORMS.contains(&platform) {
-        return Err(Error::Validation(format!(
-            "unregistered platform: {platform}"
-        )));
-    }
-    store.mutate(|rows| {
-        let pub_ = find_mut(rows, uuid)?;
-        let apps = apparitions_mut(pub_)?;
-        let app = apps
-            .iter_mut()
-            .find(|app| app.get("platformName").and_then(Value::as_str) == Some(platform))
-            .ok_or_else(|| Error::NotFound(format!("{uuid}:{platform}")))?;
-        if app.get("state").and_then(Value::as_str) != Some("unpublished") {
-            return Err(Error::InvalidState("delivery target is not pending".into()));
-        }
-        app["state"] = json!("published_or_scheduled");
-        if let Some(url) = actual_url {
-            app["url"] = json!(url);
-        }
-        pub_["state"] = if deliveries_complete(pub_) {
-            json!("APPEARED")
-        } else {
-            json!("DESCRIBED")
-        };
-        Ok(())
-    })
-}
-
 pub fn return_to_scheduling(store: &Store, uuid: &str) -> Result<()> {
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;

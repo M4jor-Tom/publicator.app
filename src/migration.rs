@@ -29,7 +29,7 @@ fn inferred_state(row: &Value) -> String {
             .is_some_and(|value| !value.trim().is_empty() && !value.contains(GENERATE_MARKER))
     });
     let dated = row.get(OLD_DATE).is_some();
-    // A partial delivery has left the editable stages, as record_delivery would record it.
+    // A partial delivery has left the editable stages, as publishing records it.
     if complete && (dated || has_delivery_success(row)) {
         "DESCRIBED"
     } else if dated {

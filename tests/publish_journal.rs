@@ -133,6 +133,23 @@ fn worker_url_reaches_the_store_only_when_valid_and_never_blocks_the_schedule() 
 }
 
 #[test]
+fn applied_delivery_appears_only_once_every_target_succeeded() {
+    let f = publish_fixture();
+    f.store
+        .mutate(|rows| {
+            rows[0]["apparitions"][1]["state"] = json!("published_or_scheduled");
+            Ok(())
+        })
+        .unwrap();
+    let (job, snap) = job_for(&f);
+    let j = PublishJournal::new(f.root.path()).unwrap();
+    j.begin(&job, &snap).unwrap();
+    j.terminal(&scheduled(&job)).unwrap();
+    j.apply_scheduled(&f.store, &job.attempt_id).unwrap();
+    assert_eq!(f.read()[0]["state"], "APPEARED");
+}
+
+#[test]
 fn locked_attempt_snapshot_is_read_only_and_only_unresolved_attempts_block() {
     use publicator::publish_journal::publisher_lock;
     let f = publish_fixture();
@@ -271,7 +288,13 @@ fn recorded_store_success_is_replayed_once_even_with_historical_pending_platform
     let journal = PublishJournal::new(f.root.path()).unwrap();
     journal.begin(&job, &snap).unwrap();
     journal.terminal(&scheduled(&job)).unwrap();
-    publicator::workflow::record_delivery(&f.store, &job.uuid, "deviantart", None).unwrap();
+    // The Store write landed but the receipt was never marked applied (crash in between).
+    f.store
+        .mutate(|rows| {
+            rows[0]["apparitions"][0]["state"] = json!("published_or_scheduled");
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(
         journal.recover(&f.store).unwrap().replayed,
         vec![job.attempt_id.clone()]
