@@ -29,7 +29,7 @@ compilation and a green gate say nothing about unlisted paths (see [Unmeasured](
 | Real DeviantArt login (`nix run .#login`, human Firefox; PerimeterX blocks automation) | none | supervised |
 | Real publish against live DeviantArt (`nix run .#da-publish`): live DOM, remote draft/schedule effect | none | supervised |
 | Manual recovery and reconciliation evidence per `.claude/skills/publish-deviantart/SKILL.md` | none | supervised |
-| Native window replay (`nix run .#native-acceptance [STORY ...]` runs `scripts/native-ui-replay.py` on a private Xvfb against `examples/ui_acceptance.rs` fakes): focus, keyboard, scroll, visible images, persisted edits, close routes | replay stories (not part of `nix flake check`); `scripts/native-ui-smoke.sh` stays the supervised human tool | unattended, run on demand |
+| Native window replay (`nix run .#native-acceptance [STORY ...]` runs `scripts/native-ui-replay.py` on a private Xvfb against `examples/ui_acceptance.rs` fakes): focus, keyboard, scroll, visible images, long names kept inside cards, persisted edits, close routes | replay stories (not part of `nix flake check`); `scripts/native-ui-smoke.sh` stays the supervised human tool | unattended, run on demand |
 
 ## Unmeasured
 

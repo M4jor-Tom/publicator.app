@@ -4,7 +4,6 @@ Open work only; remove an item when it lands. The completed Rust/Iced migration 
 
 ## Native UI
 
-- Long candidate file names overflow Pick cards.
 - A tall Calendar day grows alone, leaving blank space under its week neighbours.
 
 ## DeviantArt worker and images

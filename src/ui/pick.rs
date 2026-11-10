@@ -254,8 +254,11 @@ pub fn view(state: &App) -> Element<'_, Message> {
         content = content.push(
             container(
                 row![
-                    // Wraps, so a long path never pushes the buttons out of the window.
-                    text(format!("Delete {}?", candidate.path.display())).width(Length::Fill),
+                    // Wraps, inside a digest-style name too, so a long path never pushes the
+                    // buttons out of the window or runs under them.
+                    text(format!("Delete {}?", candidate.path.display()))
+                        .wrapping(text::Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
                     button("Confirm delete").on_press(Message::ConfirmDelete),
                     button("Cancel").on_press(Message::CancelDelete)
                 ]
@@ -320,13 +323,15 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
     let missing = matches!(preview, Some(Some(Err(_)))) && !candidate.path.exists();
     let mut content = column![
         style::art(preview, missing, 240.0, &preview_key(&candidate.path)),
+        // A digest-style name has no word break: wrap between glyphs to keep it whole in the card.
         text(
             candidate
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Artwork")
-        ),
+        )
+        .wrapping(text::Wrapping::WordOrGlyph),
     ]
     .spacing(8);
     if state.prompt_archive.is_some() || state.prompt_archive_error.is_some() {

@@ -39,6 +39,7 @@ STORY_BUDGET = 900  # hard bound for one story, including its launches and exits
 CONTROL = (0xE9, 0xE9, 0xED)  # browser-grey buttons, pick lists and checked boxes
 CONTROL_PRESSED = (0xD0, 0xD0, 0xD7)  # active tab or choice; hovered pick list
 HOVER = (0xC7, 0xC7, 0xD9)  # hovered button, checkbox or scrollbar thumb
+PAGE = (0x1A, 0x1A, 0x1A)  # page background, as in the gutters between cards
 CARD = (0x2A, 0x2A, 0x2A)  # workflow cards and calendar chips
 HEADER = (0x11, 0x11, 0x11)  # header and footer bars
 WHITE = (0xFF, 0xFF, 0xFF)  # text inputs and editors
@@ -520,6 +521,18 @@ def cards(img, region):
     return img.boxes(CARD, region, 150, 100)
 
 
+def clear(img, box, color):
+    """Every pixel of box is `color`: no text runs across this gap."""
+    return crop(img, box) == bytes(color) * (box[2] * box[3])
+
+
+def gutters(img, region):
+    """The gaps right of cards with a neighbour in their row, inset from anti-aliased edges."""
+    listed = cards(img, region)
+    return [(a[0] + a[2] + 2, a[1], b[0] - a[0] - a[2] - 4, a[3])
+            for a, b in zip(listed, listed[1:]) if abs(a[1] - b[1]) <= 2]
+
+
 def notice(img, region=None):
     """The amber confirmation banner and its buttons."""
     banners = img.boxes(NOTICE, region or content(img), 200, 30)
@@ -854,7 +867,7 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     img, region, blocks = previews(app, palette, "Pick")
     check(name not in [n for n, _ in blocks], f"picked {name} is still offered in Pick")
     # Delete: cancel keeps the file; confirm removes it and its card. Narrower, the banner's long
-    # path must wrap rather than push its buttons out of the window.
+    # path must wrap rather than push its buttons out of the window or run under them.
     app.resize(1100, 1000)
     img, region, blocks = previews(app, palette, "Pick")
     name = blocks[0][0]
@@ -867,6 +880,12 @@ def pick_search_limit_subset_selection_and_delete(ctx):
         # Whole buttons: "Cancel", the narrower, is about 72 px wide.
         check(len(found) == 2 and min(b[2] for b in found) >= 60,
               f"the delete confirmation clips its buttons {found} at {banner}")
+        if confirm:  # narrower than the path's digest segment: it wraps beside the buttons
+            app.resize(560, 1000)
+            banner, found = app.look(lambda img: (n := notice(img)) and len(n[1]) == 2 and n,
+                                     "delete confirmation at 560 px")
+            gap = (found[0][0] - 6, banner[1] + 2, 4, banner[3] - 4)
+            check(clear(app.last, gap, NOTICE), f"the delete path runs under its buttons {found}")
         confirm_button, cancel_button = found
         app.click(center(confirm_button if confirm else cancel_button))
         app.look(lambda img: not notice(img), "the confirmation to close")
@@ -1433,7 +1452,8 @@ SIZES = ((700, 900), (1100, 760), (1500, 1000))
 @story
 def every_visible_card_loads_its_own_image(ctx):
     """At narrow/default/wide sizes, jumps and resizes leave no visible card without its
-    own image (pixel identity against the gallery manifest)."""
+    own image (pixel identity against the gallery manifest), and no Pick card's text crosses
+    into its neighbour."""
     app = ctx.launch("gallery", size=SIZES[0])
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     orders = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
@@ -1443,13 +1463,20 @@ def every_visible_card_loads_its_own_image(ctx):
         app.resize(*size)
         for tab in ("Pick", "Schedule", "Describe", "Publish"):
             navigate(app, tab)
+            shown = []
             for fraction in (1.0, 0.45, 0.0, 0.8):
                 jump(app, fraction)
                 img, region, blocks = previews(app, palette, f"{tab} at {size} {fraction:.0%}")
+                shown += blocks
                 if tab in orders:
                     assert_order(blocks, phase_names(app, orders[tab]), tab)
                 else:
-                    check(blocks, "Pick shows no artwork")
+                    # Long digest names wrap inside their card instead of running across.
+                    spilled = [box for box in gutters(img, region) if not clear(img, box, PAGE)]
+                    check(not spilled, f"Pick card text crosses the gutters {spilled} at {size}")
+            # Pick cards are about as tall as the default view: a stop between two rows of
+            # thumbnails is legitimate, an empty sweep is not.
+            check(shown, f"{tab} shows no artwork at {size}")
     close_and_wait(app)
 
 
