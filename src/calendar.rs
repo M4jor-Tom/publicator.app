@@ -39,10 +39,7 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
         };
         let timestamp = effective_schedule(row).unwrap_or(0);
         let basename = row
-            .get("files")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|file| file.get("basename"))
+            .pointer("/files/0/basename")
             .and_then(Value::as_str)
             .map(str::to_owned);
         let apparitions = match row.get("apparitions") {

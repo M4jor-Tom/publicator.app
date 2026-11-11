@@ -903,9 +903,7 @@ fn row_options_match(row: &Value, app: &Value, approved: &ApprovedSnapshot) -> R
         && strings(app, "galleries")? == approved.galleries
         && app.get("priceIfNotFree").and_then(Value::as_f64) == approved.price
         && row
-            .get("files")
-            .and_then(Value::as_array)
-            .and_then(|files| files.first())
+            .pointer("/files/0")
             .and_then(recorded_sha512)
             .is_some_and(|hash| hash.eq_ignore_ascii_case(&approved.source_hash)))
 }

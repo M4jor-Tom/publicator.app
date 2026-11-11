@@ -132,6 +132,13 @@ mod tests {
             preview_source(&index, &row(None)),
             Err(Error::Validation(_))
         ));
+        // A key outside `RECORDED_SHA512_KEYS` records no hash, even for a lone namesake.
+        let mut unknown_key = row(None);
+        unknown_key["files"][0]["sha512sumHex"] = json!(unrelated);
+        assert!(matches!(
+            preview_source(&index, &unknown_key),
+            Err(Error::Validation(_))
+        ));
 
         std::fs::remove_dir_all(root.path().join("lone")).unwrap();
         // a/ is both named and created first, so a name-, creation- or reverse-ordered walk meets

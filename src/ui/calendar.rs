@@ -166,10 +166,9 @@ pub(super) fn event_prompt_view<'a>(state: &'a App, event: &Event) -> Option<Ele
 
 /// Where an event's prompt is matched: its resolved artwork, else `data_dir/<basename>`.
 fn prompt_path(artwork: Option<&Path>, data_dir: &Path, event: &Event) -> Option<PathBuf> {
-    match artwork {
-        Some(path) => Some(path.to_owned()),
-        None => Some(data_dir.join(event.basename.as_deref()?)),
-    }
+    artwork
+        .map(Path::to_owned)
+        .or_else(|| event.basename.as_deref().map(|name| data_dir.join(name)))
 }
 
 fn event_date(event: &Event, zone: chrono_tz::Tz) -> Option<NaiveDate> {

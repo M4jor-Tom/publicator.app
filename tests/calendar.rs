@@ -43,7 +43,7 @@ fn calendar_keeps_two_apparitions_with_one_shared_title() {
 fn calendar_labels_marker_metadata_and_preserves_file_name() {
     let mut p = row(1, "real", 1700000000);
     p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] title");
-    p["files"][0] = json!({"basename":"old.png", "fileSha512sum":"legacy"});
+    p["files"][0] = json!({"basename":"old.png"});
     p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
     let event = &timeline(&[p]).unwrap()[0];
     assert_eq!(event.title, "AI metadata pending");
