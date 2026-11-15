@@ -477,7 +477,7 @@ def list_view(img):
     parts = img.boxes(RAIL, strip, 6, 20) + thumb
     if not parts:
         region = content(img)
-        table = img.boxes(TABLE, region, 1, 20)  # its left border; the top one anti-aliases
+        table = table_edges(img, region)
         return ((0, table[0][1] - 1, region[2], region[3]) if table else region), None
     top = min(y for _, y, _, _ in parts)
     bottom = max(y + h for _, y, _, h in parts)
@@ -519,6 +519,12 @@ def buttons(img, region, min_w=30):
     """Buttons and pick lists, hovered or not, in reading order."""
     found = [box for color in (CONTROL, HOVER, CONTROL_PRESSED) for box in img.boxes(color, region, min_w, 18)]
     return sorted(found, key=lambda box: (box[1] // 8, box[0]))
+
+
+def table_edges(img, region):
+    """The Publish table's left border at the content padding (x = 20), one segment per row
+    from its header down: row separators split it, and its top border anti-aliases."""
+    return img.boxes(TABLE, (0, region[1], 40, region[3]), 1, 20)
 
 
 def cards(img, region):
@@ -743,8 +749,8 @@ def close_and_wait(app, timeout=WAIT):
     check(code == 0, f"app exited with {code}")
 
 
-def phase_names(app, states):
-    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in states]
+def phase_names(app, states, keep=lambda row: True):
+    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in states and keep(row)]
 
 
 TAB_STATES = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
@@ -753,8 +759,8 @@ TAB_STATES = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
 
 def listed_names(app, tab):
     """The artwork a workflow tab lists, in store order; Publish skips sent DeviantArt cells."""
-    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in TAB_STATES[tab]
-            and (tab != "Publish" or (da(row) or {}).get("state", "unpublished") == "unpublished")]
+    return phase_names(app, TAB_STATES[tab], lambda row: tab != "Publish"
+                       or (da(row) or {}).get("state", "unpublished") == "unpublished")
 
 
 SMOKE = {"empty": "Schedule", "history": "Publish", "mixed": "Describe", "publish": "Publish"}
@@ -777,8 +783,8 @@ def launch_and_close_every_scenario(ctx):
                 app.look(lambda img: (names := [n for n, _ in palette.blocks(img, content(img))])
                          and names == expected[:len(names)], f"{scenario} {tab} artwork {expected}")
             elif tab == "Publish":  # a rendered table whose borders span only its header row
-                app.look(lambda img: (edges := img.boxes(TABLE, content(img), 1, 20))
-                         and max(y + h for _, y, _, h in edges) - edges[0][1] < 80,
+                app.look(lambda img: (edges := table_edges(img, content(img)))
+                         and edges[-1][1] + edges[-1][3] - edges[0][1] < 80,
                          f"an empty {scenario} Publish table")
             else:
                 app.look(lambda img: not cards(img, content(img)), f"an empty {scenario} {tab}")
@@ -917,7 +923,7 @@ def schedule_custom_preset_refresh_and_persistence(ctx):
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     before = app.digest()
     navigate(app, "Schedule")
-    expected = phase_names(app, ("PICKED", "SCHEDULED"))
+    expected = listed_names(app, "Schedule")
     img, region, blocks = previews(app, palette, "Schedule")
     assert_order(blocks, expected, "Schedule")
     jump(app, 0.5)
@@ -998,7 +1004,7 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     app = ctx.launch("gallery", size=(1100, 1000))  # the first card's Save draft on screen
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     navigate(app, "Describe")
-    expected = phase_names(app, ("SCHEDULED",))
+    expected = listed_names(app, "Describe")
     target = next(row for row in app.rows() if row["files"][0]["basename"] == expected[0])
     img, region, blocks = previews(app, palette, "Describe")
     assert_order(blocks, expected, "Describe")
@@ -1449,7 +1455,7 @@ def reopen_keeps_saved_edits(ctx):
     app = ctx.launch("mixed")
     palette = Palette.files(app.fixture.glob("art/*.png"))
     navigate(app, "Describe")
-    target = phase_names(app, ("SCHEDULED",))[0]
+    target = listed_names(app, "Describe")[0]
     uuid_ = next(r["uuid"] for r in app.rows() if r["files"][0]["basename"] == target)
     img, region, _ = previews(app, palette, "Describe")
     title = inputs(img, area(card_of(img, region, target, palette)))[0]

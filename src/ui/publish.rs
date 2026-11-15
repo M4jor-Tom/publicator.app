@@ -149,14 +149,14 @@ fn publish_disabled(state: &App, selections: &[bool]) -> bool {
         || !selections.iter().any(|selected| *selected)
 }
 
-enum Delivery<'a> {
+pub(super) enum Delivery<'a> {
     Locked,
     Pending(Option<&'a Value>),
     Other,
 }
 
 /// The DeviantArt apparition's delivery state; other states have no publish cell.
-fn delivery(publication: &Value) -> Delivery<'_> {
+pub(super) fn delivery(publication: &Value) -> Delivery<'_> {
     let da = publication
         .get("apparitions")
         .and_then(Value::as_array)
@@ -237,13 +237,14 @@ pub(super) fn ordered_rows<'a>(
 ) -> Vec<&'a Value> {
     super::revealed_rows(
         rows.iter().filter(|row| {
-            let uuid = row.get("uuid").and_then(Value::as_str);
             matches!(phase(row), Ok(Phase::Described | Phase::Appeared))
                 && match delivery(row) {
                     Delivery::Pending(_) => true,
-                    Delivery::Locked => uuid.is_some_and(|uuid| {
-                        target == Some(uuid) || locks.is_some_and(|locks| locks.contains(uuid))
-                    }),
+                    Delivery::Locked => {
+                        row.get("uuid").and_then(Value::as_str).is_some_and(|uuid| {
+                            target == Some(uuid) || locks.is_some_and(|locks| locks.contains(uuid))
+                        })
+                    }
                     Delivery::Other => false,
                 }
         }),
@@ -489,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn only_pending_deliveries_are_listed_unless_opened_from_calendar() {
+    fn sent_rows_are_listed_only_when_opened_from_calendar_or_awaiting_reconciliation() {
         let da = |state: &str| serde_json::json!([{"platformName":"deviantart","state":state}]);
         let rows = vec![
             serde_json::json!({"uuid":"pending","state":"DESCRIBED","apparitions":da("unpublished")}),
@@ -497,27 +498,16 @@ mod tests {
             serde_json::json!({"uuid":"deselected","state":"DESCRIBED","apparitions":[]}),
             serde_json::json!({"uuid":"odd","state":"DESCRIBED","apparitions":da("bogus")}),
         ];
-        let uuids = |target| {
-            ordered_rows(&rows, target, None)
+        let uuids = |target: Option<&str>, locks: Option<&HashSet<String>>| {
+            ordered_rows(&rows, target, locks)
                 .iter()
                 .map(|row| row["uuid"].as_str().unwrap())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(uuids(None), ["pending", "deselected"]);
-        let opened = uuids(Some("sent"));
+        assert_eq!(uuids(None, None), ["pending", "deselected"]);
+        let opened = uuids(Some("sent"), None);
         assert_eq!((opened[0], opened.len()), ("sent", 3));
-    }
-
-    #[test]
-    fn sent_rows_awaiting_reconciliation_stay_listed() {
-        let rows = vec![
-            serde_json::json!({"uuid":"applied","state":"APPEARED",
-                "apparitions":[{"platformName":"deviantart","state":"published_or_scheduled"}]}),
-            serde_json::json!({"uuid":"unapplied","state":"APPEARED",
-                "apparitions":[{"platformName":"deviantart","state":"published_or_scheduled"}]}),
-        ];
-        let locks = HashSet::from(["unapplied".to_owned()]);
-        let listed = ordered_rows(&rows, None, Some(&locks));
-        assert_eq!(listed, [&rows[1]]);
+        let locks = HashSet::from(["sent".to_owned()]);
+        assert_eq!(uuids(None, Some(&locks)), ["pending", "sent", "deselected"]);
     }
 }

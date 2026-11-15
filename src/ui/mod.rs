@@ -2145,26 +2145,11 @@ impl App {
         .into_iter()
         .filter_map(|publication| {
             let uuid = publication.get("uuid")?.as_str()?;
-            if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared))
-                || self.selection_locked(Some(uuid))
-            {
-                return None;
-            }
-            let apparition = publication
-                .get("apparitions")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|apparition| {
-                    apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
-                });
-            match apparition
-                .and_then(|apparition| apparition.get("state"))
-                .and_then(Value::as_str)
-            {
-                None | Some("unpublished") => Some(uuid.to_owned()),
-                _ => None,
-            }
+            (matches!(
+                publish::delivery(publication),
+                publish::Delivery::Pending(_)
+            ) && !self.selection_locked(Some(uuid)))
+            .then(|| uuid.to_owned())
         })
         .collect()
     }
