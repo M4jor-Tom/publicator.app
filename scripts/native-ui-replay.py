@@ -776,6 +776,10 @@ def launch_and_close_every_scenario(ctx):
             if expected:
                 app.look(lambda img: (names := [n for n, _ in palette.blocks(img, content(img))])
                          and names == expected[:len(names)], f"{scenario} {tab} artwork {expected}")
+            elif tab == "Publish":  # a rendered table whose borders span only its header row
+                app.look(lambda img: (edges := img.boxes(TABLE, content(img), 1, 20))
+                         and max(y + h for _, y, _, h in edges) - edges[0][1] < 80,
+                         f"an empty {scenario} Publish table")
             else:
                 app.look(lambda img: not cards(img, content(img)), f"an empty {scenario} {tab}")
         elif scenario == "calendar":

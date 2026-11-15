@@ -9,6 +9,7 @@ use iced::{
     widget::{button, checkbox, column, container, row, scrollable, table, text, text_input},
 };
 use serde_json::Value;
+use std::collections::HashSet;
 
 const SCROLL_ID: &str = "publish-publications";
 
@@ -52,7 +53,13 @@ pub fn view(state: &App) -> Element<'_, Message> {
     let rows: Vec<&Value> = state
         .publications
         .as_deref()
-        .map(|rows| ordered_rows(rows, state.revealed_publication()))
+        .map(|rows| {
+            ordered_rows(
+                rows,
+                state.revealed_publication(),
+                state.publish_locks.as_ref(),
+            )
+        })
         .unwrap_or_default();
     let selections: Vec<bool> = rows
         .iter()
@@ -221,14 +228,22 @@ fn platform_cell<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Mess
     cell.into()
 }
 
-/// Rows still awaiting DeviantArt; a sent one only when opened from Calendar (`target`).
-pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+/// Rows still awaiting DeviantArt; a sent one only when opened from Calendar (`target`) or
+/// while an unresolved attempt (`locks`) needs its context for reconciliation.
+pub(super) fn ordered_rows<'a>(
+    rows: &'a [Value],
+    target: Option<&str>,
+    locks: Option<&HashSet<String>>,
+) -> Vec<&'a Value> {
     super::revealed_rows(
         rows.iter().filter(|row| {
+            let uuid = row.get("uuid").and_then(Value::as_str);
             matches!(phase(row), Ok(Phase::Described | Phase::Appeared))
                 && match delivery(row) {
                     Delivery::Pending(_) => true,
-                    Delivery::Locked => row.get("uuid").and_then(Value::as_str) == target,
+                    Delivery::Locked => uuid.is_some_and(|uuid| {
+                        target == Some(uuid) || locks.is_some_and(|locks| locks.contains(uuid))
+                    }),
                     Delivery::Other => false,
                 }
         }),
@@ -469,7 +484,7 @@ mod tests {
             serde_json::json!({"uuid":"first", "state":"DESCRIBED"}),
             serde_json::json!({"uuid":"target", "state":"APPEARED"}),
         ];
-        let ordered = ordered_rows(&rows, Some("target"));
+        let ordered = ordered_rows(&rows, Some("target"), None);
         assert_eq!(ordered[0]["uuid"], "target");
     }
 
@@ -483,7 +498,7 @@ mod tests {
             serde_json::json!({"uuid":"odd","state":"DESCRIBED","apparitions":da("bogus")}),
         ];
         let uuids = |target| {
-            ordered_rows(&rows, target)
+            ordered_rows(&rows, target, None)
                 .iter()
                 .map(|row| row["uuid"].as_str().unwrap())
                 .collect::<Vec<_>>()
@@ -491,5 +506,18 @@ mod tests {
         assert_eq!(uuids(None), ["pending", "deselected"]);
         let opened = uuids(Some("sent"));
         assert_eq!((opened[0], opened.len()), ("sent", 3));
+    }
+
+    #[test]
+    fn sent_rows_awaiting_reconciliation_stay_listed() {
+        let rows = vec![
+            serde_json::json!({"uuid":"applied","state":"APPEARED",
+                "apparitions":[{"platformName":"deviantart","state":"published_or_scheduled"}]}),
+            serde_json::json!({"uuid":"unapplied","state":"APPEARED",
+                "apparitions":[{"platformName":"deviantart","state":"published_or_scheduled"}]}),
+        ];
+        let locks = HashSet::from(["unapplied".to_owned()]);
+        let listed = ordered_rows(&rows, None, Some(&locks));
+        assert_eq!(listed, [&rows[1]]);
     }
 }

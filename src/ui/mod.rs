@@ -2140,6 +2140,7 @@ impl App {
         publish::ordered_rows(
             self.publications.as_deref().unwrap_or_default(),
             self.revealed_publication(),
+            self.publish_locks.as_ref(),
         )
         .into_iter()
         .filter_map(|publication| {
@@ -2656,7 +2657,9 @@ impl App {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
             Tab::Describe => Some(describe::ordered_rows(rows, None).len()),
-            Tab::Publish => Some(publish::ordered_rows(rows, None).len()),
+            Tab::Publish => {
+                Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
+            }
             Tab::Calendar => None,
         };
         let mut header = row![text("Publish next").font(style::BOLD)]
