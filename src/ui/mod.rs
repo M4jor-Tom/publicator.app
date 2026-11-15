@@ -2140,30 +2140,16 @@ impl App {
         publish::ordered_rows(
             self.publications.as_deref().unwrap_or_default(),
             self.revealed_publication(),
+            self.publish_locks.as_ref(),
         )
         .into_iter()
         .filter_map(|publication| {
             let uuid = publication.get("uuid")?.as_str()?;
-            if !matches!(phase(publication), Ok(Phase::Described | Phase::Appeared))
-                || self.selection_locked(Some(uuid))
-            {
-                return None;
-            }
-            let apparition = publication
-                .get("apparitions")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|apparition| {
-                    apparition.get("platformName").and_then(Value::as_str) == Some("deviantart")
-                });
-            match apparition
-                .and_then(|apparition| apparition.get("state"))
-                .and_then(Value::as_str)
-            {
-                None | Some("unpublished") => Some(uuid.to_owned()),
-                _ => None,
-            }
+            (matches!(
+                publish::delivery(publication),
+                publish::Delivery::Pending(_)
+            ) && !self.selection_locked(Some(uuid)))
+            .then(|| uuid.to_owned())
         })
         .collect()
     }
@@ -2656,7 +2642,9 @@ impl App {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
             Tab::Describe => Some(describe::ordered_rows(rows, None).len()),
-            Tab::Publish => Some(publish::ordered_rows(rows, None).len()),
+            Tab::Publish => {
+                Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
+            }
             Tab::Calendar => None,
         };
         let mut header = row![text("Publish next").font(style::BOLD)]

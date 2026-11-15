@@ -53,6 +53,7 @@ CHIP_HOVER = (0x33, 0x33, 0x33)
 PROMPT_EXACT = (0xEE, 0xF4, 0xEE)
 RAIL = (0x32, 0x32, 0x32)  # scrollbar rail; also an unchecked checkbox
 THUMB = (0x4C, 0x4C, 0x4C)
+TABLE = (0x55, 0x55, 0x55)  # the Publish table's border
 PARIS = zoneinfo.ZoneInfo("Europe/Paris")
 KIRITIMATI = zoneinfo.ZoneInfo("Pacific/Kiritimati")
 
@@ -469,13 +470,15 @@ def press_footer(app, index):
 
 
 def list_view(img):
-    """The scrolled list's region (from its vertical scrollbar) and the scrollbar thumb; the
-    whole content area and no thumb when everything fits."""
+    """The scrolled list's region (from its vertical scrollbar) and the scrollbar thumb; when
+    everything fits, no thumb and the content area, from the Publish table's top if shown."""
     strip = (img.w - 60, 60, img.w, content(img)[3])
     thumb = img.boxes(THUMB, strip, 6, 10) + [b for b in img.boxes(HOVER, strip, 6, 10) if b[2] <= 12]
     parts = img.boxes(RAIL, strip, 6, 20) + thumb
     if not parts:
-        return content(img), None
+        region = content(img)
+        table = table_edges(img, region)
+        return ((0, table[0][1] - 1, region[2], region[3]) if table else region), None
     top = min(y for _, y, _, _ in parts)
     bottom = max(y + h for _, y, _, h in parts)
     right = max(x + w for x, _, w, _ in parts)
@@ -516,6 +519,12 @@ def buttons(img, region, min_w=30):
     """Buttons and pick lists, hovered or not, in reading order."""
     found = [box for color in (CONTROL, HOVER, CONTROL_PRESSED) for box in img.boxes(color, region, min_w, 18)]
     return sorted(found, key=lambda box: (box[1] // 8, box[0]))
+
+
+def table_edges(img, region):
+    """The Publish table's left border at the content padding (x = 20), one segment per row
+    from its header down: row separators split it, and its top border anti-aliases."""
+    return img.boxes(TABLE, (0, region[1], 40, region[3]), 1, 20)
 
 
 def cards(img, region):
@@ -740,17 +749,21 @@ def close_and_wait(app, timeout=WAIT):
     check(code == 0, f"app exited with {code}")
 
 
-def phase_names(app, states):
-    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in states]
+def phase_names(app, states, keep=lambda row: True):
+    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in states and keep(row)]
 
 
-SMOKE = {
-    # scenario: (tab, states whose artwork that tab lists)
-    "empty": ("Schedule", ()),
-    "history": ("Publish", ("DESCRIBED", "APPEARED")),
-    "mixed": ("Describe", ("SCHEDULED",)),
-    "publish": ("Publish", ("DESCRIBED", "APPEARED")),
-}
+TAB_STATES = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
+              "Publish": ("DESCRIBED", "APPEARED")}
+
+
+def listed_names(app, tab):
+    """The artwork a workflow tab lists, in store order; Publish skips sent DeviantArt cells."""
+    return phase_names(app, TAB_STATES[tab], lambda row: tab != "Publish"
+                       or (da(row) or {}).get("state", "unpublished") == "unpublished")
+
+
+SMOKE = {"empty": "Schedule", "history": "Publish", "mixed": "Describe", "publish": "Publish"}
 
 
 @story
@@ -762,13 +775,17 @@ def launch_and_close_every_scenario(ctx):
         app = ctx.launch(scenario, fixture=scenario)
         before = app.digest()
         if scenario in SMOKE:
-            tab, states = SMOKE[scenario]
+            tab = SMOKE[scenario]
             navigate(app, tab)
-            expected = phase_names(app, states)
+            expected = listed_names(app, tab)
             palette = Palette.files(app.fixture.glob("art/*.png"))
             if expected:
                 app.look(lambda img: (names := [n for n, _ in palette.blocks(img, content(img))])
                          and names == expected[:len(names)], f"{scenario} {tab} artwork {expected}")
+            elif tab == "Publish":  # a rendered table whose borders span only its header row
+                app.look(lambda img: (edges := table_edges(img, content(img)))
+                         and edges[-1][1] + edges[-1][3] - edges[0][1] < 80,
+                         f"an empty {scenario} Publish table")
             else:
                 app.look(lambda img: not cards(img, content(img)), f"an empty {scenario} {tab}")
         elif scenario == "calendar":
@@ -906,7 +923,7 @@ def schedule_custom_preset_refresh_and_persistence(ctx):
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     before = app.digest()
     navigate(app, "Schedule")
-    expected = phase_names(app, ("PICKED", "SCHEDULED"))
+    expected = listed_names(app, "Schedule")
     img, region, blocks = previews(app, palette, "Schedule")
     assert_order(blocks, expected, "Schedule")
     jump(app, 0.5)
@@ -987,7 +1004,7 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     app = ctx.launch("gallery", size=(1100, 1000))  # the first card's Save draft on screen
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     navigate(app, "Describe")
-    expected = phase_names(app, ("SCHEDULED",))
+    expected = listed_names(app, "Describe")
     target = next(row for row in app.rows() if row["files"][0]["basename"] == expected[0])
     img, region, blocks = previews(app, palette, "Describe")
     assert_order(blocks, expected, "Describe")
@@ -1438,7 +1455,7 @@ def reopen_keeps_saved_edits(ctx):
     app = ctx.launch("mixed")
     palette = Palette.files(app.fixture.glob("art/*.png"))
     navigate(app, "Describe")
-    target = phase_names(app, ("SCHEDULED",))[0]
+    target = listed_names(app, "Describe")[0]
     uuid_ = next(r["uuid"] for r in app.rows() if r["files"][0]["basename"] == target)
     img, region, _ = previews(app, palette, "Describe")
     title = inputs(img, area(card_of(img, region, target, palette)))[0]
@@ -1460,8 +1477,6 @@ def every_visible_card_loads_its_own_image(ctx):
     into its neighbour."""
     app = ctx.launch("gallery", size=SIZES[0])
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
-    orders = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
-              "Publish": ("DESCRIBED", "APPEARED")}
     search(app, limit_index=2)
     for size in SIZES:
         app.resize(*size)
@@ -1471,8 +1486,8 @@ def every_visible_card_loads_its_own_image(ctx):
                 what = f"{tab} at {size} {fraction:.0%}"
                 jump(app, fraction)
                 img, region, blocks = previews(app, palette, what)
-                if tab in orders:
-                    assert_order(blocks, phase_names(app, orders[tab]), tab)
+                if tab in TAB_STATES:
+                    assert_order(blocks, listed_names(app, tab), tab)
                     continue
                 if not blocks:
                     # Pick cards are about as tall as the view, so a stop can fall between two
