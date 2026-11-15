@@ -53,10 +53,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         .publications
         .as_deref()
         .map(|rows| ordered_rows(rows, state.revealed_publication()))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|publication| !matches!(delivery(publication), Delivery::Other))
-        .collect();
+        .unwrap_or_default();
     let selections: Vec<bool> = rows
         .iter()
         .filter_map(|publication| match delivery(publication) {
@@ -224,10 +221,17 @@ fn platform_cell<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Mess
     cell.into()
 }
 
+/// Rows still awaiting DeviantArt; a sent one only when opened from Calendar (`target`).
 pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
     super::revealed_rows(
-        rows.iter()
-            .filter(|row| matches!(phase(row), Ok(Phase::Described | Phase::Appeared))),
+        rows.iter().filter(|row| {
+            matches!(phase(row), Ok(Phase::Described | Phase::Appeared))
+                && match delivery(row) {
+                    Delivery::Pending(_) => true,
+                    Delivery::Locked => row.get("uuid").and_then(Value::as_str) == target,
+                    Delivery::Other => false,
+                }
+        }),
         target,
     )
 }
@@ -467,5 +471,25 @@ mod tests {
         ];
         let ordered = ordered_rows(&rows, Some("target"));
         assert_eq!(ordered[0]["uuid"], "target");
+    }
+
+    #[test]
+    fn only_pending_deliveries_are_listed_unless_opened_from_calendar() {
+        let da = |state: &str| serde_json::json!([{"platformName":"deviantart","state":state}]);
+        let rows = vec![
+            serde_json::json!({"uuid":"pending","state":"DESCRIBED","apparitions":da("unpublished")}),
+            serde_json::json!({"uuid":"sent","state":"APPEARED","apparitions":da("published_or_scheduled")}),
+            serde_json::json!({"uuid":"deselected","state":"DESCRIBED","apparitions":[]}),
+            serde_json::json!({"uuid":"odd","state":"DESCRIBED","apparitions":da("bogus")}),
+        ];
+        let uuids = |target| {
+            ordered_rows(&rows, target)
+                .iter()
+                .map(|row| row["uuid"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(uuids(None), ["pending", "deselected"]);
+        let opened = uuids(Some("sent"));
+        assert_eq!((opened[0], opened.len()), ("sent", 3));
     }
 }

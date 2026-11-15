@@ -53,6 +53,7 @@ CHIP_HOVER = (0x33, 0x33, 0x33)
 PROMPT_EXACT = (0xEE, 0xF4, 0xEE)
 RAIL = (0x32, 0x32, 0x32)  # scrollbar rail; also an unchecked checkbox
 THUMB = (0x4C, 0x4C, 0x4C)
+TABLE = (0x55, 0x55, 0x55)  # the Publish table's border
 PARIS = zoneinfo.ZoneInfo("Europe/Paris")
 KIRITIMATI = zoneinfo.ZoneInfo("Pacific/Kiritimati")
 
@@ -469,13 +470,15 @@ def press_footer(app, index):
 
 
 def list_view(img):
-    """The scrolled list's region (from its vertical scrollbar) and the scrollbar thumb; the
-    whole content area and no thumb when everything fits."""
+    """The scrolled list's region (from its vertical scrollbar) and the scrollbar thumb; when
+    everything fits, no thumb and the content area, from the Publish table's top if shown."""
     strip = (img.w - 60, 60, img.w, content(img)[3])
     thumb = img.boxes(THUMB, strip, 6, 10) + [b for b in img.boxes(HOVER, strip, 6, 10) if b[2] <= 12]
     parts = img.boxes(RAIL, strip, 6, 20) + thumb
     if not parts:
-        return content(img), None
+        region = content(img)
+        table = img.boxes(TABLE, region, 1, 20)  # its left border; the top one anti-aliases
+        return ((0, table[0][1] - 1, region[2], region[3]) if table else region), None
     top = min(y for _, y, _, _ in parts)
     bottom = max(y + h for _, y, _, h in parts)
     right = max(x + w for x, _, w, _ in parts)
@@ -744,13 +747,17 @@ def phase_names(app, states):
     return [row["files"][0]["basename"] for row in app.rows() if row["state"] in states]
 
 
-SMOKE = {
-    # scenario: (tab, states whose artwork that tab lists)
-    "empty": ("Schedule", ()),
-    "history": ("Publish", ("DESCRIBED", "APPEARED")),
-    "mixed": ("Describe", ("SCHEDULED",)),
-    "publish": ("Publish", ("DESCRIBED", "APPEARED")),
-}
+TAB_STATES = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
+              "Publish": ("DESCRIBED", "APPEARED")}
+
+
+def listed_names(app, tab):
+    """The artwork a workflow tab lists, in store order; Publish skips sent DeviantArt cells."""
+    return [row["files"][0]["basename"] for row in app.rows() if row["state"] in TAB_STATES[tab]
+            and (tab != "Publish" or (da(row) or {}).get("state", "unpublished") == "unpublished")]
+
+
+SMOKE = {"empty": "Schedule", "history": "Publish", "mixed": "Describe", "publish": "Publish"}
 
 
 @story
@@ -762,9 +769,9 @@ def launch_and_close_every_scenario(ctx):
         app = ctx.launch(scenario, fixture=scenario)
         before = app.digest()
         if scenario in SMOKE:
-            tab, states = SMOKE[scenario]
+            tab = SMOKE[scenario]
             navigate(app, tab)
-            expected = phase_names(app, states)
+            expected = listed_names(app, tab)
             palette = Palette.files(app.fixture.glob("art/*.png"))
             if expected:
                 app.look(lambda img: (names := [n for n, _ in palette.blocks(img, content(img))])
@@ -1460,8 +1467,6 @@ def every_visible_card_loads_its_own_image(ctx):
     into its neighbour."""
     app = ctx.launch("gallery", size=SIZES[0])
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
-    orders = {"Schedule": ("PICKED", "SCHEDULED"), "Describe": ("SCHEDULED",),
-              "Publish": ("DESCRIBED", "APPEARED")}
     search(app, limit_index=2)
     for size in SIZES:
         app.resize(*size)
@@ -1471,8 +1476,8 @@ def every_visible_card_loads_its_own_image(ctx):
                 what = f"{tab} at {size} {fraction:.0%}"
                 jump(app, fraction)
                 img, region, blocks = previews(app, palette, what)
-                if tab in orders:
-                    assert_order(blocks, phase_names(app, orders[tab]), tab)
+                if tab in TAB_STATES:
+                    assert_order(blocks, listed_names(app, tab), tab)
                     continue
                 if not blocks:
                     # Pick cards are about as tall as the view, so a stop can fall between two

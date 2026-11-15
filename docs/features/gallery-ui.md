@@ -28,7 +28,7 @@ Pick scans configured roots and supports a runtime subset. Candidate limits are 
 
 Thumbnails load lazily: each pending placeholder reports when it comes within one thumbnail of the visible list (an Iced sensor on the rendered layout, so any row height, column count, resize or scroll jump loads exactly the cards on screen), at most four at a time, and loading keeps filling as previews finish; calendar events are compact chips whose artwork loads when expanded.
 
-Publish selection is separate from submission. Only registered platform cells are executable; completed sends remain locked and retries skip persisted successes. Calendar is read-only and navigates to the relevant workflow phase.
+Publish selection is separate from submission. Only registered platform cells are executable. Publish and its tab count list only publications whose DeviantArt delivery is still pending; a completed send leaves the list (Calendar still shows it), except when opened from Calendar, where it shows locked. Retries skip persisted successes. Calendar is read-only and navigates to the relevant workflow phase.
 
 ## Invariants
 
