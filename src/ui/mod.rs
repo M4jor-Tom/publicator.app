@@ -280,6 +280,8 @@ pub enum Message {
         result: Result<PathBuf, String>,
     },
     ToggleCalendarEvent(String),
+    /// Show or hide a Pick card's prompt text (collapsed by default).
+    TogglePickPrompt(PathBuf),
     UrlOpened {
         url: String,
         result: Result<(), String>,
@@ -365,6 +367,8 @@ pub struct App {
     prompt_archive: Option<Arc<PromptArchive>>,
     prompt_archive_error: Option<String>,
     prompt_matches: HashMap<PathBuf, PromptMatch>,
+    /// Pick cards whose prompt text is shown.
+    pick_prompts_open: HashSet<PathBuf>,
     calendar_preparing: bool,
     calendar_prepared: bool,
     calendar_error: Option<String>,
@@ -462,6 +466,7 @@ impl App {
             prompt_archive,
             prompt_archive_error,
             prompt_matches: HashMap::new(),
+            pick_prompts_open: HashSet::new(),
             calendar_preparing: false,
             calendar_prepared: false,
             calendar_error: None,
@@ -750,6 +755,7 @@ impl App {
             | Message::SearchPath(..)
             | Message::PromptQueryChanged(..)
             | Message::PromptLineageChanged(..)
+            | Message::TogglePickPrompt(..)
             | Message::Search => self.update_search(message),
             Message::SearchFinished { .. }
             | Message::PromptSearchFinished { .. }
@@ -1122,6 +1128,7 @@ impl App {
                     self.prompt_lineage = lineage;
                 }
             }
+            Message::TogglePickPrompt(path) => toggle(&mut self.pick_prompts_open, path),
             Message::Search => return self.on_search(),
             _ => unreachable!("message routed to search handler"),
         }
@@ -1202,9 +1209,7 @@ impl App {
                 return calendar::preview_tasks(self);
             }
             Message::ToggleCalendarEvent(key) => {
-                if !self.calendar_expanded.remove(&key) {
-                    self.calendar_expanded.insert(key);
-                }
+                toggle(&mut self.calendar_expanded, key);
                 return calendar::preview_tasks(self);
             }
             // Each finished preview frees a slot: keep filling the on-screen placeholders.
@@ -2868,6 +2873,13 @@ fn scroll_to_publication(id: &'static str) -> Task<Message> {
     )
 }
 
+/// Remove `key` from `set` if present, else insert it.
+fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, key: T) {
+    if !set.remove(&key) {
+        set.insert(key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3820,6 +3832,19 @@ done
         assert!(!app.prompt_matches.contains_key(&data_dir.join("old.png")));
         assert!(app.prompt_matches.contains_key(&data_dir.join("new.png")));
         assert!(app.calendar_prepared && !app.calendar_preparing);
+    }
+
+    /// Pick prompt text starts hidden; each card's toggle opens and closes only that card.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pick_prompts_start_closed_and_toggle_per_card() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = loaded_offline_app(root.path(), &[]).await;
+        let (one, two) = (root.path().join("one.png"), root.path().join("two.png"));
+        assert!(app.pick_prompts_open.is_empty());
+        let _ = app.update(Message::TogglePickPrompt(one.clone()));
+        assert!(app.pick_prompts_open.contains(&one) && !app.pick_prompts_open.contains(&two));
+        let _ = app.update(Message::TogglePickPrompt(one.clone()));
+        assert!(app.pick_prompts_open.is_empty());
     }
 
     /// A Calendar thumbnail requested before a Refresh cannot fill the reloaded Calendar's slot,

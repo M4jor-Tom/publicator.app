@@ -51,6 +51,7 @@ DAY = (0x22, 0x22, 0x22)
 TODAY = (0x4C, 0xAF, 0x50)  # the current month's heading; today's outline
 CHIP_HOVER = (0x33, 0x33, 0x33)
 PROMPT_EXACT = (0xEE, 0xF4, 0xEE)
+PROMPT_TEXT = (0xF7, 0xF7, 0xF7)  # a prompt panel's text lines
 RAIL = (0x32, 0x32, 0x32)  # scrollbar rail; also an unchecked checkbox
 THUMB = (0x4C, 0x4C, 0x4C)
 TABLE = (0x55, 0x55, 0x55)  # the Publish table's border
@@ -1434,6 +1435,14 @@ def prompt_search_exact_and_missing_archive(ctx):
     img, region, blocks = previews(app, palette, "Pick")
     check(len(blocks) == 3, f"prompt-search listed {len(blocks)}")
     app.look(lambda img: img.boxes(PROMPT_EXACT, content(img), 40, 20), "an exact prompt label")
+    # Pick prompt text starts collapsed under its heading; Show opens it, Hide closes it again.
+    text_lines = lambda img: img.boxes(PROMPT_TEXT, content(img), 40, 20)
+    check(not text_lines(app.last), "Pick prompt text open by default")
+    for state in ("open", "close"):
+        toggle = app.look(lambda img: buttons(img, area(img.boxes(PROMPT_EXACT, content(img), 40, 20)[0]))[:1],
+                          "the prompt Show/Hide button")[0]
+        app.click(center(toggle))
+        app.look(lambda img: bool(text_lines(img)) == (state == "open"), f"the Pick prompt text to {state}")
     query = app.look(lambda img: inputs(img, (0, 0, 400, img.h))[:1], "prompt query input")[0]
     type_into(app, query, "MOONLIT EXACT PROMPT — <literal> 雪")
     search(app)

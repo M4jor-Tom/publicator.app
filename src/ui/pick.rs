@@ -336,7 +336,11 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
     .spacing(8);
     if state.prompt_archive.is_some() || state.prompt_archive_error.is_some() {
         content = content.push(match state.prompt_match(&candidate.path) {
-            Some(match_) => super::prompt::view(match_),
+            Some(match_) => super::prompt::collapsible(
+                match_,
+                state.pick_prompts_open.contains(&candidate.path),
+                Message::TogglePickPrompt(candidate.path.clone()),
+            ),
             None => text("Resolving prompt…").color(style::MUTED).into(),
         });
     }

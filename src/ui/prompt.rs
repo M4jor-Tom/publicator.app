@@ -1,25 +1,52 @@
 use super::{Message, style};
 use crate::prompts::{Lineage, PromptMatch};
 use iced::{
-    Element, Length,
-    widget::{column, container, text},
+    Alignment, Element, Length,
+    widget::{button, column, container, row, text},
 };
 
+/// The whole prompt panel, always open (Calendar: the event chip already collapses it).
 pub fn view(match_: &PromptMatch) -> Element<'_, Message> {
+    panel(match_, None)
+}
+
+/// The prompt panel with only its heading shown until `toggle` opens it (Pick cards).
+pub fn collapsible(match_: &PromptMatch, open: bool, toggle: Message) -> Element<'_, Message> {
+    panel(match_, Some((open, toggle)))
+}
+
+fn panel(match_: &PromptMatch, toggle: Option<(bool, Message)>) -> Element<'_, Message> {
     let mut lines = plain_text(match_).into_iter();
     let heading = text(lines.next().unwrap_or_default()).size(13);
     if let PromptMatch::Unknown(_) = match_ {
         return heading.color(style::MUTED).into();
     }
-    let body = column(lines.map(|line| {
-        container(text(line).size(13))
-            .padding(6)
-            .width(Length::Fill)
-            .style(style::prompt_text)
-            .into()
-    }))
-    .spacing(4);
-    let block = column![heading, body].spacing(4);
+    let open = toggle.as_ref().is_none_or(|(open, _)| *open);
+    let heading: Element<'_, Message> = match toggle {
+        Some((open, toggle)) => row![
+            heading.width(Length::Fill),
+            button(text(if open { "Hide" } else { "Show" }).size(12))
+                .padding([2, 8])
+                .on_press(toggle),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into(),
+        None => heading.into(),
+    };
+    let mut block = column![heading].spacing(4);
+    if open {
+        block = block.push(
+            column(lines.map(|line| {
+                container(text(line).size(13))
+                    .padding(6)
+                    .width(Length::Fill)
+                    .style(style::prompt_text)
+                    .into()
+            }))
+            .spacing(4),
+        );
+    }
     match match_ {
         PromptMatch::Exact(_) => container(block).style(style::prompt_exact),
         _ => container(block).style(style::notice),
