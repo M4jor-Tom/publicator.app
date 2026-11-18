@@ -137,15 +137,33 @@ def _pick_schedule(page, s):
 
 
 def _pick_combo(page, combo, labels, what):
-    # Clicking an option toggles it: pick only unselected labels, then check every one stuck.
+    # The combobox shows its selection as one comma-joined text (seen live 2026-11-18), so the only
+    # exact state is its aria-controls listbox: one <label> per option wrapping a checkbox. A click
+    # toggles an option: pick only unchecked labels, then check every one stuck.
     combo.scroll_into_view_if_needed()
-    for label in labels:
-        if label not in _combo_labels(combo):
+    listbox_id = combo.get_attribute("aria-controls")
+    if not listbox_id:
+        raise RuntimeError(f"{what} dropdown is not linked to its combobox")
+    listbox = page.locator(f'[role="listbox"][id="{listbox_id}"]')
+    options = listbox.locator("label")
+
+    def states():
+        if combo.get_attribute("aria-expanded") != "true":
             combo.click(); page.wait_for_timeout(500)
-            page.get_by_text(label, exact=True).first.click()
-            combo.click(); page.wait_for_timeout(200)
-    selected = set(_combo_labels(combo))
-    if missing := [label for label in labels if label not in selected]:
+        if listbox.count() != 1:
+            raise RuntimeError(f"{what} dropdown is not unique")
+        return options.evaluate_all(_OPTION_STATES)
+
+    for label in labels:
+        current = states()  # re-read per label: the live listbox may close or re-render after a click
+        texts = [text for text, _ in current]
+        if texts.count(label) != 1:
+            raise RuntimeError(f"{what} option {label!r} is not offered exactly once")
+        if not current[texts.index(label)][1]:
+            options.nth(texts.index(label)).click(); page.wait_for_timeout(300)
+    checked = {text for text, on in states() if on}
+    combo.click(); page.wait_for_timeout(200)
+    if missing := [label for label in labels if label not in checked]:
         raise RuntimeError(f"{what} did not stay selected: {missing}")
 
 
@@ -153,16 +171,11 @@ def _commit_reply(response):
     return response.request.method == "POST" and response.url.split("?")[0] == COMMIT_URL
 
 
-def _combo_labels(combo):
-    # Exact selected labels, one per text node: aggregate text would let a selected "Artwork" satisfy "Art".
-    return combo.evaluate(r"""el => {
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), labels = [];
-        while (walker.nextNode()) {
-            const label = walker.currentNode.data.replace(/\s+/g, " ").trim();
-            if (label) labels.push(label);
-        }
-        return labels;
-    }""")
+# [exact label, checked] per option: aggregate combobox text would let a selected "Artwork" satisfy "Art".
+_OPTION_STATES = r"""options => options.map(option => [
+    option.textContent.replace(/\s+/g, " ").trim(),
+    Boolean(option.querySelector('input[type="checkbox"]')?.checked),
+])"""
 
 
 def _clear_tags(page):

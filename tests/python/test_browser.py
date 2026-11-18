@@ -393,14 +393,20 @@ class FormLocator:
     def fill(self, value): pass
     def type(self, value, delay=0): self.page.typed.append(value)
     def set_files(self, path): pass
-    def count(self): return self.page.chips
+    def count(self):
+        return int(self.page.open_combo is not None) if self.kind == "listbox" else self.page.chips
     def scroll_into_view_if_needed(self): pass
-    def locator(self, selector): return FormLocator(self.page, "tiers")
-    def evaluate(self, expression): return list(self.page.selected[self.kind])
+    def locator(self, selector): return self if self.kind == "listbox" else FormLocator(self.page, "tiers")
+    def get_attribute(self, name):
+        return {"aria-expanded": str(self.page.open_combo == self.kind).lower(), "aria-controls": self.kind}.get(name)
+    def nth(self, index): return FormLocator(self.page, "option", self.page.OFFERED[index])
+    def evaluate_all(self, expression):
+        return [[label, label in self.page.selected[self.page.open_combo]] for label in self.page.OFFERED]
 
 
 class FormPage(CheckboxPage):
     """One stateful submit form whose Schedule click is answered by `answer` (None: no reply; an exception is raised)."""
+    OFFERED = ["Art", "Artwork"]  # each combo's listbox options
 
     def __init__(self, answer=reply(), sticks_after=1, chips=0, chip_click="removes", galleries=(), tiers=(),
                  sticky=True):
@@ -418,7 +424,7 @@ class FormPage(CheckboxPage):
     def get_by_label(self, label, **kwargs): return self.ask("label", label)
     def get_by_text(self, text, **kwargs): return self.ask("text", text)
     def locator(self, selector):
-        kind = "chips" if "data-tag" in selector else "galleries" if "Gallery" in selector else "field"
+        kind = "chips" if "data-tag" in selector else "galleries" if "Gallery" in selector else "listbox" if 'role="listbox"' in selector else "field"
         return self.ask(kind, selector)
 
     def ask(self, kind, text):

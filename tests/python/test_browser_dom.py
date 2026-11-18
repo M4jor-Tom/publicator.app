@@ -65,10 +65,12 @@ def storage(page):
     return page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage).map(([k, v]) => [k, JSON.parse(v)]))")
 
 
-def submit(page, tmp_path):
+def submit(page, tmp_path, **changes):
     image = tmp_path / "art.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
-    return browser.BrowserSession.submit(SimpleNamespace(page=page), {**JOB, "image_path": str(image)})
+    return browser.BrowserSession.submit(SimpleNamespace(page=page), {
+        **JOB, "image_path": str(image), **changes,
+    })
 
 
 @pytest.mark.parametrize("outcome, expected", [
@@ -102,6 +104,16 @@ def test_submit_fails_without_commit_when_a_checkbox_will_not_stick(open_form, t
 def pick(page, timezone, year, month, day, hour):
     page.goto("https://www.deviantart.com/submit")
     browser._pick_schedule(page, {"timezone": timezone, "year": year, "month": month, "day": day, "hour": hour})
+
+
+def test_combo_selection_ignores_same_label_outside_open_listbox(open_form, tmp_path):
+    tiers = ["Exclusive Content", "Patreon Time Traveler"]
+    page = open_form(decoys=tiers, offered_tiers=tiers)
+
+    event = submit(page, tmp_path, tiers=tiers, galleries=[])
+
+    assert event["type"] == "scheduled", event
+    assert storage(page)["submitted"]["tiers"] == tiers
 
 
 @pytest.mark.parametrize("timezone, start, epoch, wall", [
