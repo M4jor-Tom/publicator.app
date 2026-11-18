@@ -36,7 +36,11 @@ and complexity/duplication analysis. It runs every check even if an earlier chec
 Rust files under `src/`, `tests/`, and `examples/` are scanned, including inline tests;
 build output and external publication data are outside these roots.
 
-A separate CI job runs `nix flake check -L`. It builds the CLI and desktop packages and runs
+Pre-push and CI run three gates: `nix run .#quality`, `nix run .#native-acceptance`
+(see [testing](testing.md)) and `nix flake check -L`. The hook runs all three even after a
+failure and fails with the first failing status; CI runs each as its own job.
+
+`nix flake check -L` builds the CLI and desktop packages and runs
 `checks.x86_64-linux.package-smoke`. From an unrelated temporary directory with an empty
 environment, that check runs the wrapped `publicator validate` and `check-steps` and
 `publicator-ui --help`. It also has the desktop wrapper's own `xdg-open` hand a URL to a fake

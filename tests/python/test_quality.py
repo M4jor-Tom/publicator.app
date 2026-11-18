@@ -154,11 +154,14 @@ class PrePushTests(unittest.TestCase):
         )
 
     def test_checks_clean_head_and_propagates_failure(self):
+        every = "run .#quality\nrun .#native-acceptance\nflake check -L\n"
         result = self.hook()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls.read_text(), "run .#quality\n")
+        self.assertEqual(self.calls.read_text(), every)
+        self.calls.unlink()
         self.env["RESULT"] = "7"
         self.assertEqual(self.hook().returncode, 7)
+        self.assertEqual(self.calls.read_text(), every, "a failure skipped later checks")
 
     def test_dirty_tracked_or_untracked_code_is_not_substituted_for_commit(self):
         for path in ("file", "untracked.rs"):

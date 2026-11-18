@@ -22,7 +22,7 @@ nix run .#quality
 nix flake check
 ```
 
-Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta`, `vision-models`, `validate`, `echo-first`, `prompt-audit`, `check-steps`, `login`, and `pw-daemon`. Dev-only apps: `quality` (the full gate; `.githooks/pre-push` runs it) and `native-acceptance` (Xvfb replay of the UI stories against `examples/ui_acceptance.rs` fakes). Run `nix run .#native-acceptance` before pushing any commit that touches `src/ui/`, `examples/ui_acceptance.rs` or `scripts/native-ui-replay.py`, and report its result; rerun a failure in isolation before blaming the change. `login` opens real Firefox for human sign-in; `pw-daemon` is the explicit Python Playwright DOM prober. The GUI is Iced, not an HTTP server. Do not run the real login/publisher for tests.
+Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta`, `vision-models`, `validate`, `echo-first`, `prompt-audit`, `check-steps`, `login`, and `pw-daemon`. Dev-only apps: `quality` (the full gate) and `native-acceptance` (Xvfb replay of the UI stories against `examples/ui_acceptance.rs` fakes). `.githooks/pre-push` and CI both run `quality`, `native-acceptance` and `nix flake check -L`; report their results, and rerun a failure in isolation before blaming the change. `login` opens real Firefox for human sign-in; `pw-daemon` is the explicit Python Playwright DOM prober. The GUI is Iced, not an HTTP server. Do not run the real login/publisher for tests.
 
 ## Code and data
 

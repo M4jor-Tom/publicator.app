@@ -1,7 +1,7 @@
 # Behaviour-to-gate map
 
 Which runnable check guards each retained safety transition. **Automated** rows run in
-`nix run .#quality` (Rust suites, `pytest tests/python`) and CI's `nix flake check`
+`nix run .#quality` (Rust suites, `pytest tests/python`), `nix run .#native-acceptance` and `nix flake check`
 (`checks.x86_64-linux.package-smoke`). **Supervised** rows need a human and real services; no
 test stands in for them. `tests/docs.rs` fails if a test named here no longer exists.
 
@@ -30,7 +30,7 @@ compilation and a green gate say nothing about unlisted paths (see [Unmeasured](
 | Real DeviantArt login (`nix run .#login`, human Firefox; PerimeterX blocks automation) | none | supervised |
 | Real publish against live DeviantArt (`nix run .#da-publish`): live DOM, remote draft/schedule effect | none | supervised |
 | Manual recovery and reconciliation evidence per `.claude/skills/publish-deviantart/SKILL.md` | none | supervised |
-| Native window replay (`nix run .#native-acceptance [STORY ...]` runs `scripts/native-ui-replay.py` on a private Xvfb against `examples/ui_acceptance.rs` fakes): focus, keyboard, scroll, visible images, long names kept inside cards, persisted edits, close routes, tile deletion | replay stories; `scripts/native-ui-smoke.sh` stays the supervised human tool | unattended; required before pushing UI changes (AGENTS.md); not in the pre-push gate or `nix flake check` |
+| Native window replay (`nix run .#native-acceptance [STORY ...]` runs `scripts/native-ui-replay.py` on a private Xvfb against `examples/ui_acceptance.rs` fakes): focus, keyboard, scroll, visible images, long names kept inside cards, persisted edits, close routes, tile deletion | replay stories; `scripts/native-ui-smoke.sh` stays the supervised human tool | automated: pre-push and CI's `native-acceptance` job |
 
 ## Unmeasured
 

@@ -18,4 +18,10 @@ if [[ -n "$(git status --porcelain)" ]]; then
     echo "Quality checks require a clean working tree; commit or stash changes before pushing." >&2
     exit 1
 fi
-exec nix run .#quality
+# Every check runs even after a failure; the push fails with the first failing status.
+status=0
+for check in "run .#quality" "run .#native-acceptance" "flake check -L"; do
+    # shellcheck disable=SC2086 # each entry is a fixed nix argument list
+    nix $check || { code=$?; echo "pre-push: nix $check failed ($code)" >&2; ((status)) || status=$code; }
+done
+exit "$status"
