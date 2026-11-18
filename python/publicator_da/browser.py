@@ -42,6 +42,9 @@ class BrowserSession:
             "cache2", "startupCache", "thumbnails", "*.log",
             "lock", ".parentlock", "parent.lock", "compatibility.ini",
         ))
+        # Read the work copy before Firefox opens it: recent logins live only in the WAL, which an
+        # immutable read of the source ignores, and reading the source normally would write beside it.
+        cookies = self._cookies()
         self.playwright = None
         self.context = None
         try:
@@ -49,7 +52,7 @@ class BrowserSession:
             self.context = self.playwright.firefox.launch_persistent_context(
                 str(self.work), headless=open_command["headless"], timezone_id=open_command["timezone"])
             self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-            self.context.add_cookies(self._cookies())
+            self.context.add_cookies(cookies)
             self.page.goto("https://www.deviantart.com/studio?new=1", wait_until="domcontentloaded", timeout=45000)
             self.page.wait_for_timeout(2000)
             if "/users/login" in self.page.url:
@@ -59,10 +62,10 @@ class BrowserSession:
             raise
 
     def _cookies(self):
-        db = self.source / "cookies.sqlite"
+        db = self.work / "cookies.sqlite"
         if not db.exists():
             return []
-        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+        con = sqlite3.connect(db)
         try:
             rows = con.execute("select name,value,host,path,isSecure,isHttpOnly from moz_cookies where host like '%deviantart%'").fetchall()
         finally:
