@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -120,7 +121,10 @@ class QualityMetricsTests(unittest.TestCase):
                 self.assertNotEqual(self.scan(env=env).returncode, 0)
 
 
-class PrePushTests(unittest.TestCase):
+HOOKS = ROOT / ".githooks"
+
+
+class GitHookTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -130,64 +134,119 @@ class PrePushTests(unittest.TestCase):
         local_vars = subprocess.check_output(["git", "rev-parse", "--local-env-vars"], text=True).splitlines()
         self.env = {key: value for key, value in os.environ.items() if key not in local_vars}
         self.git("init", "-q", "-b", "main")
-        (self.repo / "file").write_text("committed\n")
-        self.git("add", "file")
-        self.git("-c", "core.hooksPath=/dev/null", "-c", "user.name=Quality Test",
-                 "-c", "user.email=quality@example.invalid", "commit", "-qm", "fixture")
-        self.head = self.git("rev-parse", "HEAD").strip()
+        self.head = self.commit("committed")
+        self.gates = self.repo / ".git/quality-gate"
         self.calls = root / "calls"
+        self.slow = root / "slow"
         bin_dir = root / "bin"
         bin_dir.mkdir()
+        # Records where it ran, the checked-out file, any leaked Git index and its arguments.
         nix = bin_dir / "nix"
-        nix.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit "${RESULT:-0}"\n')
+        nix.write_text('#!/bin/sh\nwhile [ -e "$SLOW" ]; do sleep 0.1; done\n'
+                       'printf "%s|%s|%s|%s\\n" "$PWD" "$(cat file)" "${GIT_INDEX_FILE:-}" "$*" >> "$CALLS"\n'
+                       'exit "${RESULT:-0}"\n')
         nix.chmod(0o755)
-        self.env.update(PATH=f"{bin_dir}:{self.env['PATH']}", CALLS=str(self.calls))
+        self.env.update(PATH=f"{bin_dir}:{self.env['PATH']}", CALLS=str(self.calls), SLOW=str(self.slow))
 
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.repo, env=self.env, text=True)
 
-    def hook(self, oid=None):
-        return subprocess.run(
-            ["bash", str(ROOT / ".githooks/pre-push")], cwd=self.repo, env=self.env,
-            input=f"refs/heads/main {oid or self.head} refs/heads/main {'0' * 40}\n",
-            text=True, capture_output=True, timeout=10,
-        )
+    def commit(self, content):
+        (self.repo / "file").write_text(content + "\n")
+        self.git("add", "file")
+        self.git("-c", "core.hooksPath=/dev/null", "-c", "user.name=Quality Test",
+                 "-c", "user.email=quality@example.invalid", "commit", "-qm", content)
+        return self.git("rev-parse", "HEAD").strip()
 
-    def test_checks_clean_head_and_propagates_failure(self):
-        every = "run .#quality\nrun .#native-acceptance\nflake check -L\n"
-        result = self.hook()
+    def run_hook(self, name, *args, stdin="", env=None):
+        return subprocess.run(["bash", str(HOOKS / name), *args], cwd=self.repo, env=env or self.env,
+                              input=stdin, text=True, capture_output=True, timeout=10)
+
+    def push(self, oid=None):
+        return self.run_hook("pre-push", stdin=f"refs/heads/main {oid or self.head} refs/heads/main {'0' * 40}\n")
+
+    def gate(self, sha, latest=None):
+        self.gates.mkdir(exist_ok=True)
+        (self.gates / "latest").write_text((latest or sha) + "\n")
+        return self.run_hook("quality-gate", sha)
+
+    def verdict(self, sha):
+        path = self.gates / sha
+        return path.read_text().strip() if path.exists() else None
+
+    def wait_for(self, sha, wanted, timeout=10):
+        deadline = time.monotonic() + timeout
+        while self.verdict(sha) != wanted and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.verdict(sha), wanted)
+
+    def calls_made(self):
+        return self.calls.read_text().splitlines() if self.calls.exists() else []
+
+    def test_pre_commit_flake_checks_the_checkout_without_hook_git_paths(self):
+        env = dict(self.env, GIT_INDEX_FILE=str(self.repo / ".git/index"))
+        result = self.run_hook("pre-commit", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls.read_text(), every)
+        self.assertEqual(self.calls_made(), [f"{self.repo}|committed||flake check -L"])
+        self.env["RESULT"] = "7"
+        self.assertEqual(self.run_hook("pre-commit").returncode, 7)
+
+    def test_gate_checks_the_commit_not_later_edits_and_records_the_verdict(self):
+        (self.repo / "file").write_text("uncommitted\n")
+        worktree = self.gates / "worktree"
+        every = [f"{worktree}|committed||run .#quality", f"{worktree}|committed||run .#native-acceptance"]
+        self.assertEqual(self.gate(self.head).returncode, 0)
+        self.assertEqual(self.verdict(self.head), "ok")
+        self.assertEqual(self.calls_made(), every)
         self.calls.unlink()
         self.env["RESULT"] = "7"
-        self.assertEqual(self.hook().returncode, 7)
-        self.assertEqual(self.calls.read_text(), every, "a failure skipped later checks")
+        self.assertEqual(self.gate(self.head).returncode, 7)
+        self.assertEqual(self.verdict(self.head), "failed 7")
+        self.assertEqual(self.calls_made(), every, "a failure skipped a later check")
+        self.assertIn("native-acceptance failed (7)", (self.gates / f"{self.head}.log").read_text())
 
-    def test_dirty_tracked_or_untracked_code_is_not_substituted_for_commit(self):
-        for path in ("file", "untracked.rs"):
-            with self.subTest(path=path):
-                (self.repo / path).write_text("uncommitted\n")
-                result = self.hook()
+    def test_superseded_gate_checks_nothing(self):
+        self.assertEqual(self.gate(self.head, latest="f" * 40).returncode, 0)
+        self.assertIsNone(self.verdict(self.head))
+        self.assertEqual(self.calls_made(), [])
+
+    def test_post_commit_gates_in_background_and_cancels_the_earlier_commit(self):
+        self.slow.touch()
+        result = self.run_hook("post-commit")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{self.head}.log", result.stderr)
+        self.wait_for(self.head, "running")
+        second = self.commit("second")
+        self.assertEqual(self.run_hook("post-commit").returncode, 0)
+        self.wait_for(self.head, "cancelled")
+        self.slow.unlink()
+        self.wait_for(second, "ok")
+        self.assertEqual([call.split("|")[1] for call in self.calls_made()], ["second", "second"])
+
+    def test_pre_push_needs_a_passing_gate_for_every_pushed_commit(self):
+        self.gates.mkdir()
+        for verdict, message in ((None, "post-commit " + self.head), ("running", "still running"),
+                                 ("failed 7", "failed 7"), ("cancelled", "cancelled")):
+            with self.subTest(verdict=verdict):
+                if verdict:
+                    (self.gates / self.head).write_text(verdict + "\n")
+                result = self.push()
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("clean", result.stderr)
-                self.assertFalse(self.calls.exists())
-                self.git("checkout", "--", "file")
-
-    def test_pushing_a_different_commit_is_rejected(self):
-        result = self.hook("1" * 40)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("checked-out", result.stderr)
-        self.assertFalse(self.calls.exists())
+                self.assertIn(message, result.stderr)
+        (self.gates / self.head).write_text("ok\n")
+        self.assertEqual(self.push().returncode, 0)
+        self.assertNotEqual(self.push("1" * 40).returncode, 0, "an unknown object was pushed")
+        self.assertEqual(self.calls_made(), [], "pre-push ran a check itself")
 
     def test_deletion_only_push_needs_no_checks(self):
-        self.assertEqual(self.hook("0" * 40).returncode, 0)
+        self.assertEqual(self.push("0" * 40).returncode, 0)
         self.assertFalse(self.calls.exists())
 
     def test_fixture_git_does_not_modify_an_inherited_repository(self):
         # Only the disposable outer repo can be touched even before the fix.
         with patch.dict(os.environ, GIT_DIR=str(self.repo / ".git"),
                         GIT_WORK_TREE=str(self.repo), GIT_INDEX_FILE=str(self.repo / ".git/index")):
-            nested = PrePushTests("test_deletion_only_push_needs_no_checks")
+            nested = GitHookTests("test_deletion_only_push_needs_no_checks")
             result = unittest.TestResult()
             nested.run(result)
         self.assertEqual(result.errors + result.failures, [])

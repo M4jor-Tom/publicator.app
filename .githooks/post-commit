@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Gates the new commit (or COMMIT) in the background with quality-gate, cancelling the gate of
+# any earlier commit. pre-push reads the verdict. Usage: .githooks/post-commit [COMMIT]
+set -euo pipefail
+dir=$(git rev-parse --path-format=absolute --git-common-dir)/quality-gate
+sha=$(git rev-parse --verify "${1:-HEAD}^{commit}")
+mkdir -p "$dir"
+# A waiting gate checks this after taking the lock, so writing it first closes the race with the kill.
+echo "$sha" > "$dir/latest"
+pid=$(cat "$dir/pid" 2>/dev/null) || pid=
+if [[ -n "$pid" && "$(ps -o args= -p "$pid" 2>/dev/null)" == *quality-gate* ]]; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+fi
+setsid -f "${BASH_SOURCE[0]%/*}/quality-gate" "$sha" </dev/null >/dev/null 2>&1
+echo "quality-gate: checking ${sha:0:12} in the background; log: $dir/$sha.log" >&2

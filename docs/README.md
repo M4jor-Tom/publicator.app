@@ -63,11 +63,20 @@ git config --get core.hooksPath
 git config --local core.hooksPath .githooks
 ```
 
-The pre-push hook requires a clean working tree and checks pushes of the current
-HEAD only, so uncommitted fixes cannot disguise failures in the commit being
-pushed. Check out other branches before pushing them. Deletion-only pushes skip
-checks; pushes of other objects, including annotated tag objects, are rejected.
-Hook setup is repository-local, never global. CI does not depend on hook setup.
+- `pre-commit` runs `nix flake check -L` on the checkout.
+- `post-commit` starts `.githooks/quality-gate` in the background: `quality` and
+  `native-acceptance` on the new commit, in a private worktree
+  (`.git/quality-gate/worktree`), so later edits cannot disguise failures in the
+  commit. A new commit cancels the previous commit's gate. The verdict
+  (`running`, `ok`, `failed N`, `cancelled`) and log are
+  `.git/quality-gate/<sha>[.log]`.
+- `pre-push` runs no checks: it accepts only commits whose gate passed, so the
+  remote connection never waits on them. Deletion-only pushes pass; tags are
+  checked through the commit they point at. To gate a commit made without the
+  hook (a fast-forward merge, for example), run `.githooks/post-commit [COMMIT]`.
+
+Hook setup is repository-local, never global. CI does not depend on hook setup
+and always runs every check.
 
 To inspect only duplication and complexity: `nix develop -c bash scripts/check-metrics.sh`.
 To test the gates: `nix develop -c python -m unittest discover -s tests/python -p test_quality.py -v`.

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Runs quality and native-acceptance on COMMIT in a private worktree, so later edits in the checkout
+# cannot leak into the verdict, and records it as quality-gate/COMMIT: running, ok, failed N or
+# cancelled. Started by post-commit as its own process group; one gate runs at a time.
+set -uo pipefail
+# Hooks inherit Git paths for the main checkout; they would redirect the worktree's Git commands.
+# shellcheck disable=SC2046 # one variable name per line
+unset $(git rev-parse --local-env-vars)
+dir=$(git rev-parse --path-format=absolute --git-common-dir)/quality-gate
+sha=$1
+exec 9>"$dir/lock"
+flock 9
+echo "$$" > "$dir/pid"
+[[ "$(cat "$dir/latest")" == "$sha" ]] || exit 0  # superseded while waiting for the lock
+
+result="$dir/$sha"
+exec >"$dir/$sha.log" 2>&1
+echo running > "$result"
+trap 'echo cancelled > "$result"; exit 143' TERM INT HUP
+find "$dir" -maxdepth 1 -type f -mtime +30 ! -name lock ! -name latest ! -name pid -delete
+
+wt="$dir/worktree"
+if [[ ! -e "$wt/.git" ]]; then
+    git worktree prune
+    git worktree add --detach "$wt" "$sha" || { echo "failed worktree" > "$result"; exit 1; }
+fi
+# The worktree keeps its ignored target/ between gates so builds stay incremental.
+if ! { git -C "$wt" checkout -q --detach --force "$sha" && git -C "$wt" clean -ffdq; }; then
+    echo "failed checkout" > "$result"
+    exit 1
+fi
+cd "$wt" || exit 1
+
+status=0
+for app in quality native-acceptance; do
+    printf '\n=== nix run .#%s ===\n' "$app"
+    nix run ".#$app" || { code=$?; echo "quality-gate: $app failed ($code)"; ((status)) || status=$code; }
+done
+if ((status)); then echo "failed $status" > "$result"; else echo ok > "$result"; fi
+exit "$status"
