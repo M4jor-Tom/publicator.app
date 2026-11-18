@@ -973,6 +973,37 @@ def schedule_custom_preset_refresh_and_persistence(ctx):
     close_and_wait(app)
 
 
+@story
+def schedule_and_describe_tiles_delete_their_publication(ctx):
+    app = ctx.launch("gallery", size=(1580, 1550))  # tall: whole cards, Delete… included
+    palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    for tab in ("Schedule", "Describe"):
+        navigate(app, tab)
+        jump(app, 0.0)
+        img, region, _ = previews(app, palette, tab)
+        name = listed_names(app, tab)[0]
+        row = next(r for r in app.rows() if r["files"][0]["basename"] == name)
+        artwork = next(app.fixture.rglob(name))
+        before = app.digest()
+        for confirm in (False, True):
+            card = card_of(app.shot(), region, name, palette)
+            check(card, f"{tab} shows no card for {name}")
+            app.click(center(wide_buttons(app.shot(), card)[-1]))  # Delete…, the last button
+            banner, found = app.look(lambda img: (n := notice(img)) and len(n[1]) == 2 and n,
+                                     f"{tab} delete confirmation")
+            confirm_button, cancel_button = found
+            app.click(center(confirm_button if confirm else cancel_button))
+            app.look(lambda img: not notice(img), f"the {tab} confirmation to close")
+            if not confirm:
+                stays(lambda: app.digest() == before, f"{tab} cancel left publications.json")
+        wait_until(lambda: all(r["uuid"] != row["uuid"] for r in app.rows()),
+                   f"{tab} deletion of {name} to persist")
+        check(artwork.exists(), f"deleting the {tab} entry removed its artwork {artwork}")
+        app.look(lambda img: name not in [n for n, _ in palette.blocks(img, content(img))],
+                 f"deleted {name} to leave {tab}")
+    close_and_wait(app)
+
+
 def crop(img, box):
     x, y, w, h = box
     return b"".join(img.data[((y + r) * img.w + x) * 3:((y + r) * img.w + x + w) * 3] for r in range(h))

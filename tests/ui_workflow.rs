@@ -292,3 +292,41 @@ fn zero_search_limit_returns_no_candidates() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn confirmed_tile_deletion_removes_the_publication_and_its_draft() {
+    let (mut app, _application, store, _root) = app_with_rows(json!([
+        common::row(1, "SCHEDULED"),
+        common::row(2, "PICKED")
+    ]));
+    let uuid = common::id(1);
+    let _ = app.update(Message::Edited {
+        uuid: uuid.clone(),
+        field: publicator::ui::drafts::Field::Title,
+        text: "Unsaved".into(),
+    });
+    let _ = app.update(Message::AskDeletePublication(uuid.clone()));
+    let _ = app.update(Message::CancelDeletePublication);
+    let cancelled = common::ui::run(app.update(Message::ConfirmDeletePublication)).await;
+    assert!(cancelled.messages.is_empty(), "{cancelled:?}");
+    assert_eq!(store.read().unwrap().len(), 2);
+
+    let _ = app.update(Message::AskDeletePublication(uuid.clone()));
+    let _: Element<'_, Message> = schedule::view(&app);
+    let task = app.update(Message::ConfirmDeletePublication);
+    let completion = common::ui::first_output(task).await;
+    assert!(
+        matches!(
+            &completion,
+            Message::PublicationDeleted { result: Ok(()), .. }
+        ),
+        "{completion:?}"
+    );
+    let _ = app.update(completion);
+    let rows = store.read().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["uuid"], common::id(2));
+    // The deleted row's unsaved draft went with it: closing has nothing left to save.
+    let close = common::ui::send(&mut app, Message::CloseRequested).await;
+    assert_eq!(close.exits, 1, "{close:?}");
+}

@@ -78,6 +78,25 @@ impl Application {
         }
         f(&self.store)
     }
+    /// Deletes an undelivered publication entry. Holds the publisher lock so no batch or
+    /// reconciliation runs meanwhile, and refuses a publication an unresolved attempt names:
+    /// its receipt must stay reconcilable against the row.
+    pub fn delete_publication(&self, uuid: &str, now: i64) -> Result<()> {
+        let data_dir = &self.store.paths().data_dir;
+        let _lock = crate::publish_journal::publisher_lock(data_dir)?;
+        if crate::publish_journal::PublishJournal::new(data_dir)?
+            .blocked_attempts_locked(&self.store)?
+            .iter()
+            .any(|attempt| attempt.uuid == uuid)
+        {
+            return Err(Error::ReconciliationRequired(
+                "unresolved publish attempt blocks deletion".into(),
+            ));
+        }
+        self.mutate(Some(uuid), |store| {
+            workflow::delete_publication(store, uuid, now)
+        })
+    }
     pub async fn generate_one(&self, uuid: &str, request: GenerationRequest) -> Result<Generated> {
         validate_request(&request)?;
         let deadline = Instant::now() + request.timeout;

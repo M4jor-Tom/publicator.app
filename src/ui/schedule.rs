@@ -104,6 +104,54 @@ pub(super) fn return_task(app: &mut App, uuid: String) -> Task<Message> {
     )
 }
 
+pub(super) fn delete_task(app: &mut App) -> Task<Message> {
+    let Some(uuid) = app.pending_publication_delete.take() else {
+        return Task::none();
+    };
+    if app.drafts.get(&uuid).is_some_and(|draft| draft.is_saving()) {
+        app.result = Some("Wait for the draft save to finish before deleting".into());
+        return Task::none();
+    }
+    let application = app.application.clone();
+    app.busy = true;
+    Task::perform(
+        async move {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let deleted = uuid.clone();
+            let result =
+                tokio::task::spawn_blocking(move || application.delete_publication(&deleted, now))
+                    .await
+                    .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                    .map_err(|error| error.to_string());
+            (uuid, result)
+        },
+        |(uuid, result)| Message::PublicationDeleted { uuid, result },
+    )
+}
+
+/// The confirmation for a tile's Delete…, shown above the Schedule and Describe lists.
+pub(super) fn delete_banner(state: &App) -> Option<Element<'_, Message>> {
+    let uuid = state.pending_publication_delete.as_deref()?;
+    let title = state
+        .publication(uuid)
+        .and_then(|row| row.get("title")?.as_str())
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Untitled");
+    Some(style::confirmation(
+        format!("Delete publication {title} ({uuid})? Its artwork returns to Pick."),
+        Message::ConfirmDeletePublication,
+        Message::CancelDeletePublication,
+    ))
+}
+
+/// A tile's button asking to delete its publication entry.
+pub(super) fn delete_button<'a>(uuid: String) -> iced::widget::Button<'a, Message> {
+    style::wide("Delete…").on_press(Message::AskDeletePublication(uuid))
+}
+
 pub(super) fn date_parts(state: &App, row: &Value) -> (String, String) {
     let uuid = row.get("uuid").and_then(Value::as_str).unwrap_or_default();
     if let Some(parts) = state.custom_dates.get(uuid) {
@@ -160,14 +208,15 @@ pub fn view(state: &App) -> Element<'_, Message> {
             picked_card(state, row, uuid, title, &configured_profiles)
         });
     }
-    column![
-        text("Schedule dates are shown in the configured timezone.").color(style::MUTED),
-        scrollable(style::cards(cards))
-            .id(SCROLL_ID)
-            .height(Length::Fill),
-    ]
-    .spacing(8)
-    .into()
+    column![text("Schedule dates are shown in the configured timezone.").color(style::MUTED)]
+        .push(delete_banner(state))
+        .push(
+            scrollable(style::cards(cards))
+                .id(SCROLL_ID)
+                .height(Length::Fill),
+        )
+        .spacing(8)
+        .into()
 }
 
 fn scheduled_card<'a>(
@@ -184,8 +233,11 @@ fn scheduled_card<'a>(
     if state.revealed_publication() == Some(uuid.as_str()) {
         card = card.push(style::warning("Opened from Calendar"));
     }
-    style::card(card.push(style::wide("Return to Pick").on_press(Message::ReturnToPick(uuid))))
-        .into()
+    style::card(
+        card.push(style::wide("Return to Pick").on_press(Message::ReturnToPick(uuid.clone())))
+            .push(delete_button(uuid)),
+    )
+    .into()
 }
 
 fn picked_card<'a>(
@@ -250,7 +302,7 @@ fn picked_card<'a>(
     if effective_schedule(row).is_some() {
         card = card
             .push(style::wide("Use suggestion").on_press(Message::SuggestedDate(uuid.clone())))
-            .push(style::wide("Approve date").on_press(Message::ApproveDate(uuid)))
+            .push(style::wide("Approve date").on_press(Message::ApproveDate(uuid.clone())))
             .push(text("Suggested date available"));
     } else {
         card = card
@@ -260,7 +312,7 @@ fn picked_card<'a>(
                 "No suggestion available; approval is disabled",
             ));
     }
-    style::card(card).into()
+    style::card(card.push(delete_button(uuid))).into()
 }
 
 pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {

@@ -3,7 +3,7 @@ use common::{Fixture, epoch, row};
 use publicator::{
     images::{Candidate, file_sha512},
     model::Phase,
-    workflow::{DateEdit, approve_date, edit_date, pick, return_to_scheduling},
+    workflow::{DateEdit, approve_date, delete_publication, edit_date, pick, return_to_scheduling},
 };
 use serde_json::{Value, json};
 
@@ -210,4 +210,48 @@ fn return_to_scheduling_clears_approval_but_preserves_manual_custom_date() {
         1_800_000_000
     );
     assert_eq!(publicator::model::phase(saved).unwrap(), Phase::Picked);
+}
+
+#[test]
+fn deleting_an_undelivered_publication_returns_its_artwork_to_pick() {
+    let f = common::configured(&["art"]);
+    let path = f.colored("art/new.png", "red");
+    let c = Candidate {
+        sha512: file_sha512(&path).unwrap(),
+        path,
+    };
+    assert_eq!(common::found(&f, &["art"]).unwrap(), vec![c.path.clone()]);
+    let uuid = pick(&f.store, &c, 1_800_000_000).unwrap();
+    let mut kept = row(2, "SCHEDULED");
+    kept["files"][0]["basename"] = json!("kept.png");
+    let mut rows = f.read();
+    rows.as_array_mut().unwrap().push(kept);
+    f.write(rows);
+    assert!(common::found(&f, &["art"]).unwrap().is_empty());
+    delete_publication(&f.store, &uuid, 1_800_000_000).unwrap();
+    let rows = f.store.read().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["uuid"], common::id(2));
+    assert_eq!(common::found(&f, &["art"]).unwrap(), vec![c.path.clone()]);
+    assert!(matches!(
+        delete_publication(&f.store, &uuid, 1_800_000_000),
+        Err(publicator::error::Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn delivered_publication_history_cannot_be_deleted() {
+    let f = Fixture::new();
+    let mut partial = row(1, "DESCRIBED");
+    partial["apparitions"] =
+        json!([{"platformName": "deviantart", "state": "published_or_scheduled"}]);
+    f.write(json!([partial, row(2, "APPEARED")]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    for n in [1, 2] {
+        assert!(matches!(
+            delete_publication(&f.store, &common::id(n), 1_800_000_000),
+            Err(publicator::error::Error::InvalidState(_))
+        ));
+    }
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
 }

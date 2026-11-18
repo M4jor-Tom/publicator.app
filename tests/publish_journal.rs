@@ -590,3 +590,31 @@ fn resolved_receipts_accept_only_their_own_decision_and_terminal() {
         .unwrap();
     assert_eq!(durable(&applied), before);
 }
+
+#[test]
+fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
+    let f = publish_fixture();
+    let (job, snap) = job_for(&f);
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    journal.begin(&job, &snap).unwrap();
+    let store = std::sync::Arc::new(
+        publicator::store::Store::new(f.store.paths().clone(), f.store.config().clone()).unwrap(),
+    );
+    let application = common::offline_app(store.clone());
+    assert!(matches!(
+        application.delete_publication(&id(1), 1_800_000_000),
+        Err(publicator::error::Error::ReconciliationRequired(_))
+    ));
+    assert_eq!(store.read().unwrap().len(), 1);
+    journal
+        .reconcile(
+            &store,
+            &job.attempt_id,
+            publicator::publish_journal::ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap();
+    application
+        .delete_publication(&id(1), 1_800_000_000)
+        .unwrap();
+    assert!(store.read().unwrap().is_empty());
+}

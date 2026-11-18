@@ -5,7 +5,7 @@
 - **Code:** `src/ui/`, `src/application.rs`, `src/workflow.rs`, `src/store.rs`, `src/calendar.rs`.
 - **Tests:** `tests/ui*.rs`, `tests/calendar.rs`, `tests/application*.rs`, `tests/docs.rs`.
 - **Config:** Search uses a runtime subset of configured `publicable` roots; schedule and prompt options come from the data-dir config. `--openrouter-model NAME` (with or without the `openrouter/` prefix) selects the initial supported vision model; an unsupported name fails at startup.
-- **Data:** `publications.json` is authoritative on refresh/reopen; `.thumbs/` is persistent preview cache. Deletion applies only to unpicked candidate files.
+- **Data:** `publications.json` is authoritative on refresh/reopen; `.thumbs/` is persistent preview cache. Pick's Delete… removes an unpicked candidate file; a Schedule or Describe tile's Delete… removes only its publication entry, never the artwork file (see [publications store](publications-store.md#deleting-a-publication)).
 - **Decisions:** Native Iced controls replace the retired HTTP/HTML UI and keep its look (`src/ui/style.rs`: dark page, #111 header with tab counts, card grid, browser-grey buttons, bordered Publish table, month grids). App operations own state changes; no RAM-only queue or browser clock.
 - **Verify:** `nix develop -c cargo test --features desktop --test ui_workflow --test ui_publish_calendar --test calendar`
 
@@ -27,6 +27,8 @@ from `scripts/dummy-data.sh` does **not** replace real provider/publishing servi
 Pick scans configured roots and supports a runtime subset. Candidate limits are Empty/0, 25, 50, 75, or 100; startup defaults to 25 and all configured `publicable` paths selected. A candidate's file name, and the path in its delete confirmation, wraps between glyphs where it has no word break (a digest), so the whole name stays inside its card or column. A candidate's prompt panel shows only its heading (Archived prompt, or the NOT archived candidate warning) until its Show button opens the prompt text; Hide closes it, per card. Calendar prompts are unaffected: the event chip already collapses them. The four workflow phases have distinct actions. UI actions call Rust application operations, which persist validated state. Refresh and restart reconstruct the workflow and history from disk.
 
 Thumbnails load lazily: each pending placeholder reports when it comes within one thumbnail of the visible list (an Iced sensor on the rendered layout, so any row height, column count, resize or scroll jump loads exactly the cards on screen), at most four at a time, and loading keeps filling as previews finish; calendar events are compact chips whose artwork loads when expanded.
+
+Every Schedule (PICKED and SCHEDULED) and Describe tile has a Delete… button; it opens a confirmation banner above the list, and Confirm delete removes the entry through the shared application operation, drops that row's unsaved draft and reloads, so the artwork is offered in Pick again. A DESCRIBED row returns to Describe before it can be deleted from a tile; the CLI deletes it directly.
 
 Publish selection is separate from submission. Only registered platform cells are executable. Publish and its tab count list only publications whose DeviantArt delivery is still pending; a completed send leaves the list (Calendar still shows it), except when opened from Calendar or while an unresolved attempt awaits reconciliation, where it shows locked. Retries skip persisted successes. Calendar is read-only and navigates to the relevant workflow phase.
 

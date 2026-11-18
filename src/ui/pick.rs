@@ -251,24 +251,11 @@ pub fn view(state: &App) -> Element<'_, Message> {
     controls = controls.push(button("Search").on_press(Message::Search));
     let mut content = column![].spacing(16);
     if let Some(candidate) = &state.pending_delete {
-        content = content.push(
-            container(
-                row![
-                    // Wraps, inside a digest-style name too, so a long path never pushes the
-                    // buttons out of the window or runs under them.
-                    text(format!("Delete {}?", candidate.path.display()))
-                        .wrapping(text::Wrapping::WordOrGlyph)
-                        .width(Length::Fill),
-                    button("Confirm delete").on_press(Message::ConfirmDelete),
-                    button("Cancel").on_press(Message::CancelDelete)
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .padding(8)
-            .width(Length::Fill)
-            .style(style::notice),
-        );
+        content = content.push(style::confirmation(
+            format!("Delete {}?", candidate.path.display()),
+            Message::ConfirmDelete,
+            Message::CancelDelete,
+        ));
     }
     content = candidate_groups(state, content, controls.into());
     scrollable(content).height(Length::Fill).into()

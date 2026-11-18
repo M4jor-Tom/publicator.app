@@ -1211,3 +1211,54 @@ fn dummy_data_initializes_a_fresh_valid_root_and_refuses_to_reinitialize_it() {
     assert!(!rerun.status.success());
     assert_eq!(fs::read(data.join("publications.json")).unwrap(), saved);
 }
+
+#[test]
+fn delete_publication_removes_only_the_named_undelivered_entry() {
+    let root = tempdir().unwrap();
+    let data_dir = root.path().to_str().unwrap();
+    fs::write(
+        root.path().join("publications.json"),
+        serde_json::to_vec(&serde_json::json!([
+            common::row(1, "PICKED"),
+            common::row(2, "APPEARED")
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let deleted = cli(
+        root.path(),
+        &[
+            "delete-publication",
+            "--data-dir",
+            data_dir,
+            "--uuid",
+            &common::id(1),
+        ],
+    );
+    assert!(
+        deleted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&deleted.stdout).trim(),
+        format!("deleted {}", common::id(1))
+    );
+    for uuid in [common::id(1), common::id(2)] {
+        let refused = cli(
+            root.path(),
+            &[
+                "delete-publication",
+                "--data-dir",
+                data_dir,
+                "--uuid",
+                &uuid,
+            ],
+        );
+        assert!(!refused.status.success(), "{uuid}");
+    }
+    let rows: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join("publications.json")).unwrap()).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["uuid"], common::id(2));
+}

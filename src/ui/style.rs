@@ -111,6 +111,26 @@ pub fn wide<'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Message> {
     button(text(label).center().width(Length::Fill)).width(Length::Fill)
 }
 
+/// A delete confirmation banner: the prompt wraps, inside a digest-style name too, so a long
+/// path never pushes the buttons out of the window or runs under them.
+pub fn confirmation<'a>(prompt: String, confirm: Message, cancel: Message) -> Element<'a, Message> {
+    container(
+        iced::widget::row![
+            text(prompt)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            button("Confirm delete").on_press(confirm),
+            button("Cancel").on_press(cancel)
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(8)
+    .width(Length::Fill)
+    .style(notice)
+    .into()
+}
+
 pub fn warning<'a>(content: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     text(content).color(WARNING).into()
 }

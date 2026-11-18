@@ -1,7 +1,7 @@
 # Publications store (`publications.json`)
 
 - **Does:** Validated, locked JSON persistence for publication phases, shared content, schedules, platform choices and delivery outcomes.
-- **Run:** `nix run .#validate -- --data-dir DIR`; `nix run .#echo-first -- --data-dir DIR`.
+- **Run:** `nix run .#validate -- --data-dir DIR`; `nix run .#echo-first -- --data-dir DIR`; `publicator delete-publication --data-dir DIR --uuid UUID`.
 - **Code:** `src/store.rs`, `src/model.rs`, `src/workflow.rs`, `src/application.rs`, `src/migration.rs`, `assets/publicationsSchema.json`, `src/bin/publicator.rs`.
 - **Tests:** `tests/store.rs`, `tests/config.rs`, `tests/migration.rs`, `tests/workflow*.rs`, `tests/publishing.rs`.
 - **Config:** DeviantArt option allow-lists and schedule profiles are resolved from the data directory.
@@ -14,6 +14,10 @@
 Store reads validate the complete document. A mutation obtains the per-store thread and advisory file locks, rereads current bytes, applies one operation, validates and atomically replaces the file. Locks are persistent; do not unlink them while another process could be using them. Long provider/browser operations happen outside the Store lock and merge results into fresh state.
 
 Publication state records completed phases PICKED, SCHEDULED, DESCRIBED and APPEARED. Apparitions retain delivery states/options and actual URLs. Successful delivery is saved per target. `.publicator/` contains durable send intents, receipts and staged uploads used to recover or reconcile publishing across restarts.
+
+## Deleting a publication
+
+`Application::delete_publication` (UI tiles and `publicator delete-publication --uuid UUID`) removes one entry from `publications.json` and repacks the automatic suggestions it no longer occupies; the artwork file stays and becomes a Pick candidate again. It holds the publisher lock and refuses while publishing or generating for that row, when an unresolved attempt names the UUID (reconcile first), and for delivered history: any `published_or_scheduled` apparition or APPEARED. Resolved receipts for a deleted UUID stay in `.publicator/`.
 
 ## Invariants
 

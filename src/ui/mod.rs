@@ -199,6 +199,13 @@ pub enum Message {
     SuggestedDate(String),
     ApproveDate(String),
     ReturnToPick(String),
+    AskDeletePublication(String),
+    ConfirmDeletePublication,
+    CancelDeletePublication,
+    PublicationDeleted {
+        uuid: String,
+        result: Result<(), String>,
+    },
     SaveDraft(String),
     ApproveMetadata(String),
     ReturnToSchedule(String),
@@ -338,6 +345,7 @@ pub struct App {
     description_editors: HashMap<String, iced::widget::text_editor::Content>,
 
     pending_delete: Option<Candidate>,
+    pending_publication_delete: Option<String>,
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
@@ -437,6 +445,7 @@ impl App {
             shown_previews: HashSet::new(),
             description_editors: HashMap::new(),
             pending_delete: None,
+            pending_publication_delete: None,
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
@@ -779,6 +788,10 @@ impl App {
             | Message::SuggestedDate(..)
             | Message::ApproveDate(..)
             | Message::ReturnToPick(..) => self.update_schedule(message),
+            Message::AskDeletePublication(..)
+            | Message::ConfirmDeletePublication
+            | Message::CancelDeletePublication
+            | Message::PublicationDeleted { .. } => self.update_publication_delete(message),
             Message::LoadFinished(..)
             | Message::PublishLocksFinished(..)
             | Message::PublishStatusesFinished(..)
@@ -1303,6 +1316,25 @@ impl App {
             Message::ApproveDate(uuid) => return schedule::approve_task(self, uuid),
             Message::ReturnToPick(uuid) => return schedule::return_task(self, uuid),
             _ => unreachable!("message routed to schedule handler"),
+        }
+        Task::none()
+    }
+
+    fn update_publication_delete(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::AskDeletePublication(uuid) => self.pending_publication_delete = Some(uuid),
+            Message::ConfirmDeletePublication => return schedule::delete_task(self),
+            Message::CancelDeletePublication => self.pending_publication_delete = None,
+            Message::PublicationDeleted { uuid, result } => {
+                if result.is_ok() {
+                    // The confirmed deletion discards the row's unsaved input with it.
+                    self.drafts.remove(&uuid);
+                    self.description_editors.remove(&uuid);
+                    self.custom_dates.remove(&uuid);
+                }
+                return self.on_workflow_finished("Deleted publication".into(), result);
+            }
+            _ => unreachable!("message routed to publication delete handler"),
         }
         Task::none()
     }

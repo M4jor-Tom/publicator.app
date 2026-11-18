@@ -106,12 +106,14 @@ pub fn view(state: &App) -> Element<'_, Message> {
         };
         cards.push(metadata_card(state, row, uuid));
     }
-    let mut content = column![
-        scrollable(style::cards(cards))
-            .id(SCROLL_ID)
-            .height(Length::Fill)
-    ]
-    .spacing(12);
+    let mut content = column![]
+        .push(super::schedule::delete_banner(state))
+        .push(
+            scrollable(style::cards(cards))
+                .id(SCROLL_ID)
+                .height(Length::Fill),
+        )
+        .spacing(12);
     if state.local_install_consent_pending() {
         content = content.push(
             container(
@@ -224,7 +226,8 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
             .push(
                 style::wide("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
             )
-            .push(style::wide("Save draft").on_press(Message::SaveDraft(uuid)))
+            .push(style::wide("Save draft").on_press(Message::SaveDraft(uuid.clone())))
+            .push(super::schedule::delete_button(uuid))
             .push(style::warning(status)),
     )
     .into()

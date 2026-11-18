@@ -47,6 +47,15 @@ enum Command {
         data_dir: Option<PathBuf>,
     },
     DaPublish(DaPublishArgs),
+    /// Delete an undelivered publication entry; its artwork becomes a Pick candidate again.
+    DeletePublication {
+        #[arg(long)]
+        uuid: String,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
     CheckSteps,
 }
 #[derive(Args)]
@@ -144,6 +153,11 @@ async fn run() -> Result<()> {
         Command::VisionModels => vision_models().await,
         Command::PromptAudit { data_dir } => prompt_audit(data_dir),
         Command::DaPublish(args) => da_publish(args).await,
+        Command::DeletePublication {
+            uuid,
+            data_dir,
+            json,
+        } => delete_publication(&uuid, data_dir, json),
         Command::CheckSteps => until_interrupted(check_steps()).await,
     }
 }
@@ -191,6 +205,16 @@ fn echo_first(data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
     } else {
         return Err(Error::NotFound("no unpublished publication".into()));
     }
+    Ok(())
+}
+fn delete_publication(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
+    let (_, _, store) = paths(data_dir, json)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    Application::new(store, metadata_client()).delete_publication(uuid, now)?;
+    println!("deleted {uuid}");
     Ok(())
 }
 async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {

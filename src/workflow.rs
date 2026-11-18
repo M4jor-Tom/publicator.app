@@ -536,6 +536,21 @@ pub fn return_to_scheduling(store: &Store, uuid: &str) -> Result<()> {
     })
 }
 
+/// Removes an undelivered publication, so its artwork becomes a Pick candidate again, and
+/// repacks the suggestions it no longer occupies. Delivered history is never deleted.
+pub fn delete_publication(store: &Store, uuid: &str, now: i64) -> Result<()> {
+    store.mutate(|rows| {
+        let row = find_mut(rows, uuid)?;
+        if has_delivery_success(row) || phase(row)? == Phase::Appeared {
+            return Err(Error::InvalidState(
+                "delivered publications cannot be deleted".into(),
+            ));
+        }
+        rows.retain(|row| row.get("uuid").and_then(Value::as_str) != Some(uuid));
+        repack(rows, store.config(), now)
+    })
+}
+
 #[cfg(test)]
 mod pick_delete_race_tests {
     use super::pick_with_hooks;
