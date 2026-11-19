@@ -5,11 +5,9 @@ use crate::{
 };
 use iced::{
     Element, Length, Task,
-    widget::{button, column, container, row, scrollable, text, text_input},
+    widget::{button, column, container, row, text, text_input},
 };
 use serde_json::Value;
-
-const SCROLL_ID: &str = "describe-publications";
 
 /// Publication thumbnails for the on-screen placeholders of the Schedule, Describe and Publish
 /// lists, which report row UUIDs (Pick's report candidate paths and match no row).
@@ -107,12 +105,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
         cards.push(metadata_card(state, row, uuid));
     }
     let mut content = column![]
-        .push(super::schedule::delete_banner(state))
-        .push(
-            scrollable(style::cards(cards))
-                .id(SCROLL_ID)
-                .height(Length::Fill),
-        )
+        .push(super::floating(
+            super::tab_scrollable(super::Tab::Describe, style::cards(cards)),
+            super::schedule::delete_banner(state),
+        ))
         .spacing(12);
     if state.local_install_consent_pending() {
         content = content.push(
@@ -239,10 +235,6 @@ pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&
             .filter(|row| phase(row).ok() == Some(Phase::Scheduled)),
         target,
     )
-}
-
-pub(super) fn scroll_to_target() -> Task<Message> {
-    super::scroll_to_publication(SCROLL_ID)
 }
 
 #[cfg(test)]

@@ -50,6 +50,34 @@ impl Tab {
         (Self::Publish, "Publish"),
         (Self::Calendar, "Calendar"),
     ];
+
+    /// The tab's list widget id: its unique label.
+    fn scroll_id(self) -> &'static str {
+        Self::ALL[self as usize].1
+    }
+}
+
+/// The tab's list: it reports its offset so returning to the tab resumes there. Nothing
+/// optional may precede it in its parent: `push` skips a `None`, which shifts the list's tree
+/// slot and resets its scroll. Optional lines go inside a fixed header child, or [`floating`].
+fn tab_scrollable<'a>(
+    tab: Tab,
+    content: impl Into<Element<'a, Message>>,
+) -> iced::widget::Scrollable<'a, Message> {
+    iced::widget::scrollable(content)
+        .id(tab.scroll_id())
+        .height(Length::Fill)
+        .on_scroll(move |viewport| Message::Scrolled(tab, viewport.absolute_offset()))
+}
+
+/// Floats `banner` over the top of `list`, in view however far it is scrolled.
+fn floating<'a>(
+    list: impl Into<Element<'a, Message>>,
+    banner: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    iced::widget::stack![list.into()]
+        .push(banner.map(iced::widget::opaque))
+        .into()
 }
 
 fn publish_keyboard_event(
@@ -128,6 +156,7 @@ pub enum Message {
     /// A store snapshot, stamped with the reload generation that requested it.
     LoadFinished(u64, Result<Loaded, String>),
     Navigate(Tab),
+    Scrolled(Tab, iced::widget::scrollable::AbsoluteOffset),
     Edited {
         uuid: String,
         field: Field,
@@ -346,6 +375,7 @@ pub struct App {
 
     pending_delete: Option<Candidate>,
     pending_publication_delete: Option<String>,
+    scroll_offsets: HashMap<Tab, iced::widget::scrollable::AbsoluteOffset>,
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
@@ -446,6 +476,7 @@ impl App {
             description_editors: HashMap::new(),
             pending_delete: None,
             pending_publication_delete: None,
+            scroll_offsets: HashMap::new(),
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
@@ -744,6 +775,10 @@ impl App {
             | Message::CloseCancelPublish
             | Message::CloseWait
             | Message::PublishFinished(..) => self.update_selection(message),
+            Message::Scrolled(tab, offset) => {
+                self.scroll_offsets.insert(tab, offset);
+                Task::none()
+            }
             message => self.update_workflow(message),
         }
     }
@@ -796,6 +831,7 @@ impl App {
             | Message::PublishLocksFinished(..)
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
+            | Message::Scrolled(..)
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -1261,7 +1297,6 @@ impl App {
             Message::Pick(candidate) => return pick::pick_task(self, candidate),
             Message::PickFinished(Ok(())) => {
                 self.busy = false;
-                self.active_tab = Tab::Schedule;
                 self.result = Some("Picked candidate".into());
                 return self.reload_task();
             }
@@ -2073,13 +2108,16 @@ impl App {
         self.active_tab = tab;
         // The new tab's placeholders report themselves; the old tab's never report hiding.
         self.shown_previews.clear();
+        // A revealed publication is moved first in its list, so it shows at the top.
+        let offset = match reveal {
+            Some(_) => Default::default(),
+            None => self.scroll_offsets.get(&tab).copied().unwrap_or_default(),
+        };
         self.revealed_publication = reveal;
-        match (tab, self.revealed_publication.is_some()) {
-            (Tab::Calendar, _) => calendar::prepare_task(self),
-            (Tab::Schedule, true) => schedule::scroll_to_target(),
-            (Tab::Describe, true) => describe::scroll_to_target(),
-            (Tab::Publish, true) => publish::scroll_to_target(),
-            _ => Task::none(),
+        let scroll = iced::widget::operation::scroll_to(tab.scroll_id(), offset);
+        match tab {
+            Tab::Calendar => Task::batch([calendar::prepare_task(self), scroll]),
+            _ => scroll,
         }
     }
 
@@ -2416,7 +2454,8 @@ impl App {
             return self.save_task(uuid, sent);
         }
         if let Some(tab) = self.pending_navigation.take() {
-            self.active_tab = tab;
+            let reveal = self.pending_jump.take();
+            return self.activate_tab(tab, reveal);
         }
         Task::none()
     }
@@ -2893,16 +2932,6 @@ fn revealed_rows<'a>(
         rows.swap(0, index);
     }
     rows
-}
-
-fn scroll_to_publication(id: &'static str) -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        id,
-        iced::widget::operation::AbsoluteOffset {
-            x: None,
-            y: Some(0.0),
-        },
-    )
 }
 
 /// Remove `key` from `set` if present, else insert it.

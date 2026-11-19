@@ -8,7 +8,7 @@ use crate::{
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use iced::{
     Element, Length, Task,
-    widget::{button, column, container, row, scrollable, space, stack, text},
+    widget::{button, column, container, row, space, stack, text},
 };
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -18,8 +18,6 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-
-const SCROLL_ID: &str = "calendar-events";
 
 #[derive(Clone, Debug)]
 pub struct Preparation {
@@ -66,10 +64,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         }
         Err(error) => content = content.push(text(error.to_string())),
     }
-    scrollable(content)
-        .id(SCROLL_ID)
-        .height(Length::Fill)
-        .into()
+    super::tab_scrollable(super::Tab::Calendar, content).into()
 }
 
 pub(super) fn month_view<'a>(
@@ -349,16 +344,6 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
         ));
     }
     Task::batch(tasks)
-}
-
-pub fn scroll_to_target() -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        SCROLL_ID,
-        iced::widget::operation::AbsoluteOffset {
-            x: None,
-            y: Some(0.0),
-        },
-    )
 }
 
 pub fn actual_http_url(value: &str) -> Result<url::Url, String> {

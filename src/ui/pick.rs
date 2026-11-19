@@ -6,7 +6,7 @@ use crate::{
 };
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{button, checkbox, column, container, pick_list, row, scrollable, text, text_input},
+    widget::{button, checkbox, column, container, pick_list, row, text, text_input},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -249,16 +249,17 @@ pub fn view(state: &App) -> Element<'_, Message> {
             );
     }
     controls = controls.push(button("Search").on_press(Message::Search));
-    let mut content = column![].spacing(16);
-    if let Some(candidate) = &state.pending_delete {
-        content = content.push(style::confirmation(
-            format!("Delete {}?", candidate.path.display()),
-            Message::ConfirmDelete,
-            Message::CancelDelete,
-        ));
-    }
-    content = candidate_groups(state, content, controls.into());
-    scrollable(content).height(Length::Fill).into()
+    let content = candidate_groups(state, column![].spacing(16), controls.into());
+    super::floating(
+        super::tab_scrollable(super::Tab::Pick, content),
+        state.pending_delete.as_ref().map(|candidate| {
+            style::confirmation(
+                format!("Delete {}?", candidate.path.display()),
+                Message::ConfirmDelete,
+                Message::CancelDelete,
+            )
+        }),
+    )
 }
 
 /// The search controls lead the first grid, as the web page's first grid cell.

@@ -952,16 +952,17 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     pick_button, delete_button = wide_buttons(img, card)[:2]
     app.click(center(pick_button))
     wait_until(lambda: name in phase_names(app, ("PICKED",)), f"{name} to be picked")
-    app.look(lambda img: tabs(img)[1][1], "Pick to open Schedule")
-    navigate(app, "Pick")
+    app.look(lambda img: tabs(img)[0][1], "Pick to stay open after a pick")
     jump(app, 0.0)
     img, region, blocks = previews(app, palette, "Pick")
     check(name not in [n for n, _ in blocks], f"picked {name} is still offered in Pick")
     # Delete: cancel keeps the file; confirm removes it and its card. Narrower, the banner's long
     # path must wrap rather than push its buttons out of the window or run under them.
+    # From the list's end, the confirmation must still show: it stays above the scrolled list.
     app.resize(1100, 1000)
+    jump(app, 1.0)
     img, region, blocks = previews(app, palette, "Pick")
-    name = blocks[0][0]
+    name = next(n for n, _ in reversed(blocks) if card_of(img, region, n, palette))
     target = app.fixture / ("art" if name in art else "more") / name
     before = app.digest()
     for confirm in (False, True):
@@ -984,6 +985,15 @@ def pick_search_limit_subset_selection_and_delete(ctx):
     app.look(lambda img: name not in [n for n, _ in palette.blocks(img, content(img))],
              f"deleted {name} to leave the list")
     check(app.digest() == before, "deleting an unpicked file changed publications.json")
+    # Each tab keeps its own scroll: Pick resumes where it was left after visiting Schedule.
+    jump(app, 0.5)
+    previews(app, palette, "Pick")
+    app.park()
+    thumb = list_view(app.shot())[1]
+    navigate(app, "Schedule")
+    navigate(app, "Pick")
+    app.park()
+    app.look(lambda img: list_view(img)[1] == thumb, "Pick to resume its scroll")
     close_and_wait(app)
 
 

@@ -187,7 +187,7 @@ async fn pick_dispatch_persists_candidate_before_refreshing_phase() {
     let rows = store.read().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["state"], "PICKED");
-    assert_eq!(app.current_tab(), publicator::ui::Tab::Schedule);
+    assert_eq!(app.current_tab(), publicator::ui::Tab::Pick);
 }
 
 #[test]

@@ -9,12 +9,10 @@ use crate::{
 use chrono::{DateTime, Utc};
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{column, pick_list, row, scrollable, text, text_input},
+    widget::{column, pick_list, row, text, text_input},
 };
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const SCROLL_ID: &str = "schedule-publications";
 
 pub fn edit_date(application: &Application, uuid: &str, edit: DateEdit, now: i64) -> Result<()> {
     application.mutate(Some(uuid), |store| {
@@ -132,7 +130,7 @@ pub(super) fn delete_task(app: &mut App) -> Task<Message> {
     )
 }
 
-/// The confirmation for a tile's Delete…, shown above the Schedule and Describe lists.
+/// The confirmation for a tile's Delete…, floating over the Schedule and Describe lists.
 pub(super) fn delete_banner(state: &App) -> Option<Element<'_, Message>> {
     let uuid = state.pending_publication_delete.as_deref()?;
     let title = state
@@ -209,12 +207,10 @@ pub fn view(state: &App) -> Element<'_, Message> {
         });
     }
     column![text("Schedule dates are shown in the configured timezone.").color(style::MUTED)]
-        .push(delete_banner(state))
-        .push(
-            scrollable(style::cards(cards))
-                .id(SCROLL_ID)
-                .height(Length::Fill),
-        )
+        .push(super::floating(
+            super::tab_scrollable(super::Tab::Schedule, style::cards(cards)),
+            delete_banner(state),
+        ))
         .spacing(8)
         .into()
 }
@@ -321,10 +317,6 @@ pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&
             .filter(|row| matches!(phase(row), Ok(Phase::Picked | Phase::Scheduled))),
         target,
     )
-}
-
-pub(super) fn scroll_to_target() -> Task<Message> {
-    super::scroll_to_publication(SCROLL_ID)
 }
 
 #[cfg(test)]

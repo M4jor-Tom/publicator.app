@@ -5,13 +5,11 @@ use crate::{
     publishing::{PublishCellOutcome, PublishCellState},
 };
 use iced::{
-    Element, Length, Task,
-    widget::{button, checkbox, column, container, row, scrollable, table, text, text_input},
+    Element, Length,
+    widget::{button, checkbox, column, container, row, table, text, text_input},
 };
 use serde_json::Value;
 use std::collections::HashSet;
-
-const SCROLL_ID: &str = "publish-publications";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionState {
@@ -98,10 +96,13 @@ pub fn view(state: &App) -> Element<'_, Message> {
                 .style(style::notice),
         );
     }
-    content = publish_actions(state, content, &selections);
-    content
-        .push(scrollable(list).id(SCROLL_ID).height(Length::Fill))
-        .into()
+    // The optional status lines stay inside one header child, so the list keeps its slot.
+    column![
+        publish_actions(state, content, &selections),
+        super::tab_scrollable(super::Tab::Publish, list),
+    ]
+    .spacing(10)
+    .into()
 }
 
 fn publish_actions<'a>(
@@ -250,10 +251,6 @@ pub(super) fn ordered_rows<'a>(
         }),
         target,
     )
-}
-
-pub(super) fn scroll_to_target() -> Task<Message> {
-    super::scroll_to_publication(SCROLL_ID)
 }
 
 fn attempt_view<'a>(state: &'a App, attempt: &'a AttemptStatus) -> Element<'a, Message> {
