@@ -212,6 +212,42 @@ class Display:
         self.spawn(["openbox", "--sm-disable"], work / "openbox", env=self.env())
         wait_until(lambda: self.ok("wmctrl", "-m"), "window manager", 60)
         self.map_typed_characters()
+        self.wait_for_mapping()
+
+    def wait_for_mapping(self):
+        """Wait until openbox maps a probe window. `wmctrl -m` answers once openbox claims the
+        screen, which on a slow machine comes before it handles map requests: the first app's
+        window then stays unmapped for good. A probe whose request was dropped is replaced."""
+        x11 = ctypes.CDLL("libX11.so.6")
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XCreateSimpleWindow.restype = ctypes.c_ulong
+        x11.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_int] * 2 \
+            + [ctypes.c_uint] * 3 + [ctypes.c_ulong] * 2
+        for name in ("XMapWindow", "XDestroyWindow"):
+            getattr(x11, name).argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XFlush.argtypes = x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        display = x11.XOpenDisplay(self.name.encode())
+        check(display, "cannot open the display for the mapping probe")
+        try:
+            def mapped():
+                window = x11.XCreateSimpleWindow(display, x11.XDefaultRootWindow(display),
+                                                 0, 0, 10, 10, 0, 0, 0)
+                x11.XMapWindow(display, window)
+                x11.XFlush(display)
+                try:
+                    return wait_until(lambda: b"IsViewable" in tool(
+                        "xwininfo", "-id", hex(window), env=self.env()), "a mapped probe", 5)
+                except Failure:
+                    return False
+                finally:
+                    x11.XDestroyWindow(display, window)
+                    x11.XFlush(display)
+            wait_until(mapped, "the window manager to map windows", 60)
+        finally:
+            x11.XCloseDisplay(display)
 
     def map_typed_characters(self):
         """Bind every non-ASCII character this replay types to its own keycode. Otherwise
