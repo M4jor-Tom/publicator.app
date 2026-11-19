@@ -654,14 +654,17 @@ def previews(app, palette, what, timeout=90):
     such as an unknown-prompt label or a placeholder, is legitimate."""
 
     def loaded(img):
-        region, _ = list_view(img)
+        region, thumb = list_view(img)
         listed = cards(img, region)
         blocks = palette.blocks(img, region)
         if not listed:  # a table (Publish) keeps its previews in the left column
             left = (region[0], region[1], region[0] + (region[2] - region[0]) // 4, region[3])
             return (img, region, blocks) if blocks and not img.stems(MUTED, left) else None
+        # A card scrolled partly out starts on the region's top edge, and so does the first row
+        # of a list scrolled to its top; only the thumb tells them apart.
+        top = region[1] - 1 if thumb and thumb[1] <= region[1] + 1 else region[1] + 3
         for card in listed:
-            if card[1] > region[1] + 3 and card[1] + 40 < region[3]:  # top not clipped
+            if card[1] > top and card[1] + 40 < region[3]:  # top not clipped
                 if not any(within(box, area(card)) for _, box in blocks):
                     return None
         return img, region, blocks
