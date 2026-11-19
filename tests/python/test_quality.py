@@ -238,6 +238,17 @@ class GitHookTests(unittest.TestCase):
         self.assertNotEqual(self.push("1" * 40).returncode, 0, "an unknown object was pushed")
         self.assertEqual(self.calls_made(), [], "pre-push ran a check itself")
 
+    def test_factory_branches_skip_the_hooks_because_factory_checks_gate_them(self):
+        self.git("checkout", "-q", "-b", "factory/001-job")
+        for hook in ("pre-commit", "post-commit"):
+            self.assertEqual(self.run_hook(hook).returncode, 0, hook)
+        ref = "refs/heads/factory/001-job"
+        result = self.run_hook("pre-push", stdin=f"{ref} {self.head} {ref} {'0' * 40}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.gates.exists(), "post-commit started a gate")
+        self.assertEqual(self.calls_made(), [])
+        self.assertNotEqual(self.push().returncode, 0, "a non-factory push skipped its gate")
+
     def test_deletion_only_push_needs_no_checks(self):
         self.assertEqual(self.push("0" * 40).returncode, 0)
         self.assertFalse(self.calls.exists())

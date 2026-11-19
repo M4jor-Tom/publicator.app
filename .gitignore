@@ -3,3 +3,4 @@ __pycache__
 .worktrees/
 /target/
 result
+/factory/jobs/

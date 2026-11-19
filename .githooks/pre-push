@@ -3,8 +3,10 @@
 set -euo pipefail
 dir=$(git rev-parse --path-format=absolute --git-common-dir)/quality-gate
 status=0
-while read -r _local_ref local_oid _remote_ref _remote_oid; do
+while read -r _local_ref local_oid remote_ref _remote_oid; do
     [[ "$local_oid" =~ ^0+$ ]] && continue
+    # Software-factory branches are gated by factory/checks.sh before review and before merge.
+    [[ "$remote_ref" == refs/heads/factory/* ]] && continue
     if ! sha=$(git rev-parse --verify --quiet "$local_oid^{commit}"); then
         echo "pre-push: $local_oid is not a commit; nothing can gate it." >&2
         status=1

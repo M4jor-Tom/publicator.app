@@ -43,3 +43,44 @@ Read the owning file in `docs/features/` and relevant Rust callers before changi
 AI generation supports OpenRouter and local Ollama. A local service URL override is available only to the CLI via `PUBLICATOR_OLLAMA_URL`; it is a dependency endpoint, not a fake/test mode. Tests use loopback fixtures. Never install a model, spend provider credentials, access the real profile, or publish real artwork as part of validation.
 
 See [docs/README.md](docs/README.md) for feature ownership and ADRs. Task plans/reports and test artifacts stay in `/tmp`, not Git; `docs/ROADMAP.md` lists open work only, so remove an item when it lands.
+
+## Software factory
+
+`/factory run` builds every open GitHub issue labeled `factory` through
+intake → spec → build → gate → review → approve, one PR per issue. State is in
+`factory/jobs/` (gitignored); `factory/bin/job` is its only writer. Checks:
+`factory/checks.sh` (`nix run .#quality`, `nix run .#native-acceptance`,
+`nix flake check -L`, as in CI). Dashboard: `cd factory && python3 -m http.server`,
+then open http://localhost:8000/dashboard.html.
+
+Each job works in its own git worktree, a full checkout of the repo at
+`.worktrees/<job-id>` (gitignored). A tool run from the repo root that doesn't
+read `.gitignore` sees those copies too; exclude `.worktrees/` in its config.
+A fresh worktree needs no setup: Nix provides every dependency, and the first
+build in it is cold. The `.githooks` skip `factory/*` branches, because the gate
+runs the same checks; push them without waiting for a quality-gate verdict.
+Job commits and PR titles are Conventional Commits, `<type>[(scope)][!]: <description>`
+(`feat`, `fix`, `refactor`, `test`, `docs`, …); the squash merge keeps the PR title.
+
+**Seeing the UI.** There is no dev server or browser, and job ports are unused:
+the UI is a native Iced window. Run the `ui_acceptance` fixtures (fake services
+only; scenarios in `docs/features/gallery-ui.md`) on a private Xvfb display,
+screenshot it to `/tmp/factory-<job-id>-<agent>-*.png`, and read the PNGs. Never
+launch the real `ui`, `login` or publisher.
+
+```sh
+nix develop -c cargo build --locked --release --example ui_acceptance --features desktop
+timeout 180 nix develop -c xvfb-run -a -s '-screen 0 1440x900x24' bash -c '
+  unset WAYLAND_DISPLAY  # else the window opens on the real desktop
+  openbox --sm-disable >/dev/null 2>&1 &
+  target/release/examples/ui_acceptance --scenario SCENARIO \
+    --fixture-dir "$(mktemp -d /tmp/publicator-ui.XXXXXX)" >/dev/null 2>&1 & app=$!
+  win=; for _ in $(seq 60); do win=$(xdotool search --onlyvisible --pid $app | head -1); [ -n "$win" ] && break; sleep 1; done
+  [ -n "$win" ] || { echo "no window"; kill $app; exit 1; }
+  sleep 4; import -window "$win" OUT.png
+  kill $app' </dev/null
+```
+
+For a narrow window or a click, add `xdotool windowsize "$win" W H` or
+`xdotool mousemove --window "$win" X Y click 1`, then another `import`. Never call
+`import` without a window id: it then waits for a mouse click forever.

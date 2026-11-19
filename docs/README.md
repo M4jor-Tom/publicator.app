@@ -74,6 +74,8 @@ git config --local core.hooksPath .githooks
   remote connection never waits on them. Deletion-only pushes pass; tags are
   checked through the commit they point at. To gate a commit made without the
   hook (a fast-forward merge, for example), run `.githooks/post-commit [COMMIT]`.
+- All three skip `factory/*` branches: the software factory gates them with
+  `factory/checks.sh`, which runs the same checks (see AGENTS.md).
 
 Hook setup is repository-local, never global. CI does not depend on hook setup
 and always runs every check.

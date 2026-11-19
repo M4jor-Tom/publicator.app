@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Cheap whole-flake check before each commit; post-commit gates the commit with the slow checks.
 set -euo pipefail
+# Software-factory jobs are gated by factory/checks.sh (the same checks) instead.
+[[ "$(git symbolic-ref -q --short HEAD)" == factory/* ]] && exit 0
 cd "$(git rev-parse --show-toplevel)"
 # Git exports index paths to hooks; Nix and package tests must see the plain checkout.
 # shellcheck disable=SC2046 # one variable name per line

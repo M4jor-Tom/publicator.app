@@ -2,6 +2,8 @@
 # Gates the new commit (or COMMIT) in the background with quality-gate, cancelling the gate of
 # any earlier commit. pre-push reads the verdict. Usage: .githooks/post-commit [COMMIT]
 set -euo pipefail
+# Software-factory jobs are gated by factory/checks.sh; their commits must not cancel this gate.
+[[ -z "${1:-}" && "$(git symbolic-ref -q --short HEAD)" == factory/* ]] && exit 0
 dir=$(git rev-parse --path-format=absolute --git-common-dir)/quality-gate
 sha=$(git rev-parse --verify "${1:-HEAD}^{commit}")
 mkdir -p "$dir"
