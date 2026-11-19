@@ -36,7 +36,6 @@ from pathlib import Path
 
 WAIT = 30.0  # default bound, in seconds, for any wait on the app
 STORY_BUDGET = 900  # hard bound for one story, including its launches and exits
-WARM_UP = 600  # bound for the first window on a fresh machine, whose caches are still cold
 CONTROL = (0xE9, 0xE9, 0xED)  # browser-grey buttons, pick lists and checked boxes
 CONTROL_PRESSED = (0xD0, 0xD0, 0xD7)  # active tab or choice; hovered pick list
 HOVER = (0xC7, 0xC7, 0xD9)  # hovered button, checkbox or scrollbar thumb
@@ -330,7 +329,11 @@ class App:
         self.wid = None
 
     def ready(self, size=None):
-        self.wid = wait_until(self.find_window, f"{self.scenario} window", 90)
+        try:
+            self.wid = wait_until(self.find_window, f"{self.scenario} window", 90)
+        except Failure:
+            self.report_no_window()
+            raise
         self.x("windowactivate", "--sync", self.wid)
         if size:
             self.resize(*size)
@@ -346,6 +349,32 @@ class App:
                                env=self.display.env(), stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, timeout=15).stdout.split()
         return found[0].decode() if found else None
+
+    def report_no_window(self):
+        """Record what X and the process show when no window turned visible: whether the app
+        created an unmapped window, what the window manager manages, and where its threads wait."""
+        env, pid = self.display.env(), self.process.pid
+        sections = [("own windows", ["xdotool", "search", "--pid", str(pid)]),
+                    ("managed windows", ["wmctrl", "-l", "-p"]),
+                    ("window tree", ["xwininfo", "-root", "-tree"])]
+        with open(self.fixture.parent / f"{self.fixture.name}-no-window.txt", "w") as out:
+            for title, command in sections:
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+                out.write(f"== {title}\n{result.stdout}{result.stderr}\n")
+                if title == "own windows":
+                    for wid in result.stdout.split():
+                        info = subprocess.run(["xwininfo", "-id", wid], env=env,
+                                              capture_output=True, text=True, timeout=15)
+                        out.write(info.stdout + info.stderr)
+            out.write("== threads (name state wchan)\n")
+            for task in sorted(Path(f"/proc/{pid}/task").glob("*")):
+                try:
+                    status = dict(line.split(":\t", 1) for line in
+                                  (task / "status").read_text().splitlines() if ":\t" in line)
+                    wchan = (task / "wchan").read_text()
+                except OSError:
+                    continue
+                out.write(f"{task.name} {status.get('Name')} {status.get('State')} {wchan}\n")
 
     def geometry(self):
         values = dict(line.split("=", 1) for line in self.x("getwindowgeometry", "--shell", self.wid).split())
@@ -1550,15 +1579,6 @@ def build(repo):
     return target / "release" / "examples" / "ui_acceptance"
 
 
-def warm_up(ctx):
-    """Open and close one window before the stories, so no story deadline measures a fresh
-    machine's cold first launch."""
-    app = App(ctx.display, ctx.binary, ctx.root / "fixture", "empty")
-    ctx.apps.append(app)
-    app.wid = wait_until(app.find_window, "the warm-up window", WARM_UP)
-    close_and_wait(app)
-
-
 def alarm(signum, frame):
     raise Failure(f"story exceeded its {STORY_BUDGET}s budget")
 
@@ -1581,7 +1601,7 @@ def main():
     display = Display(root)
     try:
         display.start()
-        for function in [warm_up, *selected]:
+        for function in selected:
             ctx = Context(display, binary, root / function.__name__)
             started = time.monotonic()
             error = None
@@ -1608,7 +1628,7 @@ def main():
         if remaining:
             failures.append("cleanup")
             print(f"FAIL cleanup: {remaining}")
-    print(f"{len(selected) + 1 - len([f for f in failures if f != 'cleanup'])} passed, "
+    print(f"{len(selected) - len([f for f in failures if f != 'cleanup'])} passed, "
           f"{len(failures)} failed")
     if failures or args.keep:
         print(f"artifacts kept: {root}")
