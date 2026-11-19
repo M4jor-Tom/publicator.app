@@ -51,6 +51,13 @@ jobs:
           key: native-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix') }}
       - name: Replay the native UI stories on a private Xvfb
         run: nix run .#native-acceptance
+      - name: Keep the replay screenshots and logs of a failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-replay
+          path: /tmp/publicator-native-replay.*
+          retention-days: 14
   packages:
     runs-on: ubuntu-24.04
     timeout-minutes: 60

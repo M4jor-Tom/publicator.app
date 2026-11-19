@@ -36,6 +36,7 @@ from pathlib import Path
 
 WAIT = 30.0  # default bound, in seconds, for any wait on the app
 STORY_BUDGET = 900  # hard bound for one story, including its launches and exits
+WARM_UP = 600  # bound for the first window on a fresh machine, whose caches are still cold
 CONTROL = (0xE9, 0xE9, 0xED)  # browser-grey buttons, pick lists and checked boxes
 CONTROL_PRESSED = (0xD0, 0xD0, 0xD7)  # active tab or choice; hovered pick list
 HOVER = (0xC7, 0xC7, 0xD9)  # hovered button, checkbox or scrollbar thumb
@@ -1549,6 +1550,15 @@ def build(repo):
     return target / "release" / "examples" / "ui_acceptance"
 
 
+def warm_up(ctx):
+    """Open and close one window before the stories, so no story deadline measures a fresh
+    machine's cold first launch."""
+    app = App(ctx.display, ctx.binary, ctx.root / "fixture", "empty")
+    ctx.apps.append(app)
+    app.wid = wait_until(app.find_window, "the warm-up window", WARM_UP)
+    close_and_wait(app)
+
+
 def alarm(signum, frame):
     raise Failure(f"story exceeded its {STORY_BUDGET}s budget")
 
@@ -1571,7 +1581,7 @@ def main():
     display = Display(root)
     try:
         display.start()
-        for function in selected:
+        for function in [warm_up, *selected]:
             ctx = Context(display, binary, root / function.__name__)
             started = time.monotonic()
             error = None
@@ -1598,7 +1608,7 @@ def main():
         if remaining:
             failures.append("cleanup")
             print(f"FAIL cleanup: {remaining}")
-    print(f"{len(selected) - len([f for f in failures if f != 'cleanup'])} passed, "
+    print(f"{len(selected) + 1 - len([f for f in failures if f != 'cleanup'])} passed, "
           f"{len(failures)} failed")
     if failures or args.keep:
         print(f"artifacts kept: {root}")
