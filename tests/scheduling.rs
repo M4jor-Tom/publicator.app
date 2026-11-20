@@ -8,6 +8,7 @@ fn config(text: &str) -> Config {
     Config {
         schedule: toml::from_str(text).unwrap(),
         tiers: vec!["gold".into()],
+        galleries: vec!["art".into()],
         ..Config::default()
     }
 }
@@ -40,11 +41,12 @@ fn flat_and_named_profiles_normalize_with_defaults() {
             hour: 18,
             per_slot: 1,
             default_tiers: vec![],
+            default_galleries: vec![],
             default_price: None
         }]
     );
     let named = profiles(&config(
-        "[[profiles]]\nname='paid'\nday='wednesday'\ndefault_tiers=['gold']\ndefault_price=0.0",
+        "[[profiles]]\nname='paid'\nday='wednesday'\ndefault_tiers=['gold']\ndefault_galleries=['art']\ndefault_price=0.0",
     ))
     .unwrap();
     assert_eq!(
@@ -55,6 +57,7 @@ fn flat_and_named_profiles_normalize_with_defaults() {
             hour: 20,
             per_slot: 2,
             default_tiers: vec!["gold".into()],
+            default_galleries: vec!["art".into()],
             default_price: Some(0.0)
         }]
     );
@@ -73,6 +76,9 @@ fn profiles_reject_empty_collision_invalid_values_and_unknown_tiers() {
         "day = 4",
         "name = 7",
         "[[profiles]]\ndefault_tiers=['silver']",
+        "[[profiles]]\ndefault_galleries=['nope']",
+        "default_galleries = 'art'",
+        "default_galleries = [1]",
     ] {
         assert!(profiles(&config(text)).is_err(), "accepted {text}");
     }
@@ -86,6 +92,7 @@ fn slots_keep_local_wall_clock_across_dst_and_are_bounded_to_52() {
         hour: 20,
         per_slot: 2,
         default_tiers: vec![],
+        default_galleries: vec![],
         default_price: None,
     };
     let out = slots(
@@ -179,6 +186,7 @@ fn repack_clears_automatic_suggestions_after_the_52_slot_horizon() {
             hour: 20,
             per_slot: 1,
             default_tiers: vec![],
+            default_galleries: vec![],
             default_price: None,
         },
         chrono_tz::UTC,
