@@ -789,14 +789,6 @@ impl App {
                 self.scroll_offsets.insert(tab, offset);
                 Task::none()
             }
-            Message::OpenViewer(path) => {
-                self.viewer = Some(path);
-                Task::none()
-            }
-            Message::CloseViewer => {
-                self.viewer = None;
-                Task::none()
-            }
             message => self.update_workflow(message),
         }
     }
@@ -827,7 +819,9 @@ impl App {
             | Message::RowPreviewFinished { .. }
             | Message::CalendarPrepared(..)
             | Message::CalendarPreviewFinished { .. }
-            | Message::ToggleCalendarEvent(..) => self.update_previews(message),
+            | Message::ToggleCalendarEvent(..)
+            | Message::OpenViewer(..)
+            | Message::CloseViewer => self.update_previews(message),
             Message::Pick(..)
             | Message::PickFinished(..)
             | Message::AskDelete(..)
@@ -850,8 +844,6 @@ impl App {
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
             | Message::Scrolled(..)
-            | Message::OpenViewer(..)
-            | Message::CloseViewer
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -1265,6 +1257,14 @@ impl App {
         Task::batch([pick::preview_tasks(self), describe::preview_tasks(self)])
     }
 
+    fn update_viewer(&mut self, message: Message) -> Task<Message> {
+        self.viewer = match message {
+            Message::OpenViewer(path) => Some(path),
+            _ => None,
+        };
+        Task::none()
+    }
+
     fn update_previews(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::CalendarPrepared(_, Ok(prepared)) => {
@@ -1302,6 +1302,7 @@ impl App {
                 self.row_previews.insert(uuid, Some(result));
                 return describe::preview_tasks(self);
             }
+            Message::OpenViewer(..) | Message::CloseViewer => return self.update_viewer(message),
             _ => unreachable!("message routed to previews handler"),
         }
         Task::none()
