@@ -1,4 +1,4 @@
-use super::{App, Message, style};
+use super::{App, BatchProgress, GenerationState, Message, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
     model::{GENERATE_MARKER, Phase, phase},
@@ -92,6 +92,9 @@ pub fn view(state: &App) -> Element<'_, Message> {
             state.source, state.model.ollama_name
         )))
         .push(style::wide("Generate marked").on_press(Message::GenerateMarked));
+    if let Some(summary) = batch_summary(state) {
+        controls = controls.push(text(summary));
+    }
     if state.source == Source::Local {
         controls = controls.push(local_fit_view(state));
     }
@@ -130,6 +133,33 @@ pub fn view(state: &App) -> Element<'_, Message> {
     content.into()
 }
 
+/// The summary line under "Generate marked".
+pub fn batch_summary(state: &App) -> Option<String> {
+    Some(match state.batch.as_ref()? {
+        BatchProgress::Running {
+            ids, active: None, ..
+        } => format!("Preparing {}…", ids.len()),
+        BatchProgress::Running {
+            ids,
+            active: Some(active),
+            done,
+            failed,
+        } => format!(
+            "Generating {} of {} · {done} done · {failed} failed",
+            active + 1,
+            ids.len()
+        ),
+        BatchProgress::Finished { succeeded, failed } => {
+            let mut summary = format!("Generated {succeeded} of {}", succeeded + failed);
+            if *failed > 0 {
+                summary.push_str(&format!(" · {failed} failed"));
+            }
+            summary
+        }
+        BatchProgress::Failed(error) => format!("Generation failed: {error}"),
+    })
+}
+
 fn local_fit_view(state: &App) -> Element<'_, Message> {
     let Some(status) = state.local_fit_status() else {
         return text("Checking local model fit…").into();
@@ -157,6 +187,24 @@ fn local_fit_view(state: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A card's one generation state line; `Generating…` alone is boxed, so the active card
+/// stands out.
+fn generation_line<'a>(state: &App, uuid: &str, marked: bool) -> Option<Element<'a, Message>> {
+    Some(match state.generation_state(uuid) {
+        Some(GenerationState::Queued) => text("Queued").color(style::MUTED).into(),
+        Some(GenerationState::Generating) => container(text("Generating…"))
+            .padding([2, 8])
+            .style(style::active)
+            .into(),
+        Some(GenerationState::Generated) => text("Generated").color(style::TODAY).into(),
+        Some(GenerationState::Failed(error)) => {
+            text(format!("Failed: {error}")).color(style::ERROR).into()
+        }
+        None if marked => style::warning("Marked for generation"),
+        None => return None,
+    })
+}
+
 fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
     let saved = crate::workflow::Metadata::of(row);
     let (title, description) = state
@@ -164,17 +212,15 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
         .get(&uuid)
         .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
         .unwrap_or((saved.title, saved.description));
-    let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![
         state.row_art(&uuid, 240.0),
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);
-    if busy {
-        card = card.push(style::warning("Generating and saving…"));
-    } else if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
-        card = card.push(style::warning("Marked for generation"));
+    let marked = title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER);
+    if let Some(line) = generation_line(state, &uuid, marked) {
+        card = card.push(line);
     }
     if state.revealed_publication() == Some(uuid.as_str()) {
         card = card.push(style::warning("Opened from Calendar"));

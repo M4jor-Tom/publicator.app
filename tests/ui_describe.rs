@@ -9,8 +9,9 @@ use common::{
 use iced::Element;
 use publicator::{
     application::Application,
+    application::BatchEvent,
     metadata::{Endpoints, MetadataClient, Source, VISION_MODELS, available_sources},
-    ui::{App, Message, Tab, UiOptions, describe},
+    ui::{App, GenerationState, Message, Tab, UiOptions, describe},
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -1034,12 +1035,21 @@ async fn failed_single_generation_can_be_retried_from_describe() {
     ]);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
 
-    let failed = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
+    let started = app.update(Message::GenerateOne(id(1)));
+    assert_eq!(
+        app.generation_state(&id(1)),
+        Some(&GenerationState::Generating)
+    );
+    let failed = common::ui::first_output(started).await;
     assert!(matches!(
         failed,
         Message::GenerationFinished { result: Err(_), .. }
     ));
     let _ = app.update(failed);
+    assert!(matches!(
+        app.generation_state(&id(1)),
+        Some(GenerationState::Failed(_))
+    ));
     assert_eq!(f.read()[0]["state"], "SCHEDULED");
     assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
     assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
@@ -1050,6 +1060,10 @@ async fn failed_single_generation_can_be_retried_from_describe() {
         Message::GenerationFinished { result: Ok(_), .. }
     ));
     let _ = app.update(retried);
+    assert_eq!(
+        app.generation_state(&id(1)),
+        Some(&GenerationState::Generated)
+    );
     assert_eq!(f.read()[0]["title"], "Generated");
     assert_eq!(
         f.read()[0]["description"],
@@ -1078,12 +1092,14 @@ async fn batch_dispatch_uses_reverse_order_and_persists_each_record() {
         .collect();
     let server = Server::start(replies);
     let (mut app, _) = fixture_app(&f, server.url().to_owned());
-    let completion = common::ui::first_output(app.update(Message::GenerateMarked)).await;
-    assert!(matches!(
-        &completion,
-        Message::GenerationFinished { result: Ok(_), .. }
-    ));
-    let _ = app.update(completion);
+    let effects = common::ui::send(&mut app, Message::GenerateMarked).await;
+    assert!(
+        effects.any(|message| matches!(message, Message::GenerationFinished { result: Ok(_), .. }))
+    );
+    assert_eq!(
+        describe::batch_summary(&app).as_deref(),
+        Some("Generated 3 of 3")
+    );
     assert_eq!(
         server
             .requests()
@@ -1145,5 +1161,209 @@ async fn native_multiline_description_editor_keeps_unicode_and_literal_markup() 
     assert_eq!(
         fixture.read()[0]["description"],
         "first line\n雪 <script>alert('literal')</script>"
+    );
+}
+
+/// The generation states of cards 1..=3, in id order, with any failure's error elided.
+fn card_states(app: &App) -> Vec<&'static str> {
+    (1..=3)
+        .map(|n| match app.generation_state(&id(n)) {
+            None => "-",
+            Some(GenerationState::Queued) => "queued",
+            Some(GenerationState::Generating) => "generating",
+            Some(GenerationState::Generated) => "generated",
+            Some(GenerationState::Failed(error)) => {
+                assert!(!error.is_empty());
+                "failed"
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn batch_reports_each_card_and_the_summary_in_processing_order() {
+    let f = Fixture::new();
+    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
+    f.write(json!(rows));
+    // OpenRouter runs 3, 2, 1; record 2's model and rescue catalogue both fail.
+    let failure = |path: &str| Reply::new(path, 500, "fixture failure");
+    let server = common::http::Server::start(vec![
+        completion("title-3"),
+        failure("/chat/completions"),
+        failure("/models"),
+        completion("title-1"),
+    ]);
+    let (mut app, _) = fixture_app(&f, server.url().to_owned());
+    let task = app.update(Message::GenerateMarked);
+    assert_eq!(card_states(&app), ["queued"; 3]);
+    assert_eq!(
+        describe::batch_summary(&app).as_deref(),
+        Some("Preparing 3…")
+    );
+    let mut actions = iced_runtime::task::into_stream(task).unwrap();
+    let mut step = async |app: &mut App| {
+        let message = common::ui::next_output(&mut actions).await;
+        let event = match &message {
+            Message::GenerationProgress(event) => Some(event.clone()),
+            _ => None,
+        };
+        common::ui::send(app, message).await;
+        event
+    };
+    assert_eq!(
+        step(&mut app).await,
+        Some(BatchEvent::Admitted(vec![id(3), id(2), id(1)]))
+    );
+    assert_eq!(card_states(&app), ["queued"; 3]);
+    let expected = [
+        (
+            3,
+            ["queued", "queued", "generating"],
+            "Generating 1 of 3 · 0 done · 0 failed",
+        ),
+        (
+            3,
+            ["queued", "queued", "generated"],
+            "Generating 1 of 3 · 1 done · 0 failed",
+        ),
+        (
+            2,
+            ["queued", "generating", "generated"],
+            "Generating 2 of 3 · 1 done · 0 failed",
+        ),
+        (
+            2,
+            ["queued", "failed", "generated"],
+            "Generating 2 of 3 · 1 done · 1 failed",
+        ),
+        (
+            1,
+            ["generating", "failed", "generated"],
+            "Generating 3 of 3 · 1 done · 1 failed",
+        ),
+        (
+            1,
+            ["generated", "failed", "generated"],
+            "Generating 3 of 3 · 2 done · 1 failed",
+        ),
+    ];
+    for (index, (n, states, summary)) in expected.into_iter().enumerate() {
+        let event = step(&mut app).await;
+        if index % 2 == 0 {
+            assert_eq!(event, Some(BatchEvent::Started(id(n))));
+        } else {
+            assert!(
+                matches!(&event, Some(BatchEvent::Finished(result)) if result.uuid == id(n)),
+                "unexpected event {event:?}"
+            );
+        }
+        assert_eq!(card_states(&app), states);
+        assert_eq!(describe::batch_summary(&app).as_deref(), Some(summary));
+        if index == 2 {
+            assert_eq!(
+                f.read()[2]["title"],
+                "title-3",
+                "persisted before the next start"
+            );
+        }
+    }
+    assert_eq!(step(&mut app).await, None, "the run's end");
+    assert_eq!(card_states(&app), ["generated", "failed", "generated"]);
+    assert_eq!(
+        describe::batch_summary(&app).as_deref(),
+        Some("Generated 2 of 3 · 1 failed")
+    );
+    server.finish();
+    assert_eq!(f.read()[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+}
+
+#[tokio::test]
+async fn busy_card_refuses_every_action_with_a_message() {
+    let blocked = [
+        Message::GenerateOne(id(1)),
+        Message::ApproveMetadata(id(1)),
+        Message::ReturnToSchedule(id(1)),
+        Message::SaveDraft(id(1)),
+        Message::Edited {
+            uuid: id(1),
+            field: publicator::ui::drafts::Field::Title,
+            text: "blocked".into(),
+        },
+        Message::DescriptionAction {
+            uuid: id(1),
+            action: iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('x'),
+            ),
+        },
+        Message::AskDeletePublication(id(1)),
+    ];
+    for message in blocked {
+        let f = Fixture::new();
+        f.write(json!([f.marked_row(1), marker_row(2)]));
+        let before = std::fs::read(&f.store.paths().json).unwrap();
+        let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+        // The batch task is never polled: its cards stay Queued.
+        let _held = app.update(Message::GenerateMarked);
+        assert_eq!(app.generation_state(&id(1)), Some(&GenerationState::Queued));
+        let what = format!("{message:?}");
+        let effects = common::ui::run(app.update(message)).await;
+        assert!(effects.messages.is_empty(), "{what} started a task");
+        assert_eq!(
+            app.status_message(),
+            Some("Wait for this image's generation to finish"),
+            "{what}"
+        );
+        // No delete banner is pending, and no draft reached the store.
+        common::ui::run(app.update(Message::ConfirmDeletePublication)).await;
+        common::ui::run(app.update(Message::SaveDraft(id(1)))).await;
+        assert_eq!(app.generation_state(&id(1)), Some(&GenerationState::Queued));
+        assert_eq!(
+            std::fs::read(&f.store.paths().json).unwrap(),
+            before,
+            "{what}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn generate_marked_during_a_running_batch_starts_nothing() {
+    let f = Fixture::new();
+    f.write(json!([f.marked_row(1), marker_row(2)]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let _held = app.update(Message::GenerateMarked);
+    let effects = common::ui::run(app.update(Message::GenerateMarked)).await;
+    assert!(effects.messages.is_empty());
+    assert_eq!(
+        app.status_message(),
+        Some("A batch generation is already running")
+    );
+    assert_eq!(
+        describe::batch_summary(&app).as_deref(),
+        Some("Preparing 2…")
+    );
+}
+
+#[tokio::test]
+async fn batch_level_failure_clears_its_queued_cards_and_reports_the_error() {
+    let f = Fixture::new();
+    f.write(json!([f.marked_row(1), marker_row(2)]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    let task = app.update(Message::GenerateMarked);
+    assert_eq!(app.generation_state(&id(2)), Some(&GenerationState::Queued));
+    // Admission reads an invalid document and fails the whole batch.
+    std::fs::write(&f.store.paths().json, "not json").unwrap();
+    let finished = common::ui::first_output(task).await;
+    assert!(matches!(
+        finished,
+        Message::GenerationFinished { result: Err(_), .. }
+    ));
+    let _ = app.update(finished);
+    assert_eq!(app.generation_state(&id(1)), None);
+    assert_eq!(app.generation_state(&id(2)), None);
+    assert!(
+        describe::batch_summary(&app)
+            .is_some_and(|summary| summary.starts_with("Generation failed: ")),
+        "{:?}",
+        describe::batch_summary(&app)
     );
 }
