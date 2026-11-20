@@ -108,7 +108,7 @@ fn profile_defaults_apply_once_to_new_deviantart_target_not_custom() {
         tiers: vec!["Gold".into()],
         galleries: vec!["Art".into()],
         schedule: toml::from_str::<toml::Table>(
-            r#"profiles = [{name="Standard", day="tuesday", default_tiers=["Gold"], default_price=3.5}]"#,
+            r#"profiles = [{name="Standard", day="tuesday", default_tiers=["Gold"], default_galleries=["Art"], default_price=3.5}]"#,
         )
         .unwrap(),
         ..Config::default()
@@ -124,7 +124,9 @@ fn profile_defaults_apply_once_to_new_deviantart_target_not_custom() {
     let saved = f.read();
     assert_eq!(saved[0]["apparitions"][0]["tiers"], json!(["Gold"]));
     assert_eq!(saved[0]["apparitions"][0]["priceIfNotFree"], json!(3.5));
+    assert_eq!(saved[0]["apparitions"][0]["galleries"], json!(["Art"]));
     assert!(saved[1]["apparitions"][0].get("tiers").is_none());
+    assert!(saved[1]["apparitions"][0].get("galleries").is_none());
     assert!(saved[1]["apparitions"][0].get("priceIfNotFree").is_none());
 }
 

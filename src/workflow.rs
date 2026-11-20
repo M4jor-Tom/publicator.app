@@ -461,6 +461,9 @@ fn new_apparition(
         if !profile.default_tiers.is_empty() {
             app["tiers"] = json!(profile.default_tiers);
         }
+        if !profile.default_galleries.is_empty() {
+            app["galleries"] = json!(profile.default_galleries);
+        }
         if let Some(price) = profile.default_price {
             app["priceIfNotFree"] = json!(price);
         }
