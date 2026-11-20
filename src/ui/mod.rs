@@ -2928,7 +2928,7 @@ impl App {
         let count = |tab| match tab {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
-            Tab::Describe => Some(describe::ordered_rows(rows, None).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, None, |_| false).len()),
             Tab::Publish => {
                 Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
             }

@@ -99,14 +99,25 @@ pub fn view(state: &App) -> Element<'_, Message> {
         controls = controls.push(local_fit_view(state));
     }
     let mut cards = vec![controls.into()];
+    let generated = |row: &Value| {
+        row.get("uuid")
+            .and_then(Value::as_str)
+            .and_then(|uuid| state.generation_state(uuid))
+            == Some(&GenerationState::Generated)
+    };
     for row in ordered_rows(
         state.publications.as_deref().unwrap_or_default(),
         state.revealed_publication(),
+        generated,
     ) {
         let Some(uuid) = row.get("uuid").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
-        cards.push(metadata_card(state, row, uuid));
+        cards.push(if phase(row).ok() == Some(Phase::Scheduled) {
+            metadata_card(state, row, uuid)
+        } else {
+            generated_card(state, row, uuid)
+        });
     }
     let mut content = column![]
         .push(super::floating(
@@ -197,12 +208,35 @@ fn generation_line<'a>(state: &App, uuid: &str, marked: bool) -> Option<Element<
             .style(style::active)
             .into(),
         Some(GenerationState::Generated) => text("Generated").color(style::TODAY).into(),
-        Some(GenerationState::Failed(error)) => {
-            text(format!("Failed: {error}")).color(style::ERROR).into()
-        }
+        Some(GenerationState::Failed(error)) => text(format!("Failed: {error}"))
+            .color(style::ERROR)
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .into(),
         None if marked => style::warning("Marked for generation"),
         None => return None,
     })
+}
+
+/// A card whose generation moved it on to DESCRIBED: read-only, it stays listed until Refresh
+/// so its `Generated` state remains in view; its actions belong to Publish now.
+fn generated_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
+    let saved = crate::workflow::Metadata::of(row);
+    let mut card = column![
+        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
+        text(super::schedule::date_label(state, row)),
+    ]
+    .spacing(8);
+    if let Some(line) = generation_line(state, &uuid, false) {
+        card = card.push(line);
+    }
+    style::card(
+        card.push(text("Title"))
+            .push(text(saved.title))
+            .push(text("Description"))
+            .push(text(saved.description))
+            .push(text("Described; listed here until Refresh").color(style::MUTED)),
+    )
+    .into()
 }
 
 fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
@@ -286,10 +320,15 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
     .into()
 }
 
-pub(super) fn ordered_rows<'a>(rows: &'a [Value], target: Option<&str>) -> Vec<&'a Value> {
+/// SCHEDULED rows, plus those `kept` (cards whose generation just described them).
+pub(super) fn ordered_rows<'a>(
+    rows: &'a [Value],
+    target: Option<&str>,
+    kept: impl Fn(&Value) -> bool,
+) -> Vec<&'a Value> {
     super::revealed_rows(
         rows.iter()
-            .filter(|row| phase(row).ok() == Some(Phase::Scheduled)),
+            .filter(|row| phase(row).ok() == Some(Phase::Scheduled) || kept(row)),
         target,
     )
 }
@@ -304,8 +343,20 @@ mod tests {
             serde_json::json!({"uuid":"first", "state":"SCHEDULED"}),
             serde_json::json!({"uuid":"target", "state":"SCHEDULED"}),
         ];
-        let ordered = ordered_rows(&rows, Some("target"));
+        let ordered = ordered_rows(&rows, Some("target"), |_| false);
         assert_eq!(ordered[0]["uuid"], "target");
         assert_eq!(rows[0]["uuid"], "first");
+    }
+
+    #[test]
+    fn only_kept_described_rows_join_the_scheduled_ones() {
+        let rows = vec![
+            serde_json::json!({"uuid":"scheduled", "state":"SCHEDULED"}),
+            serde_json::json!({"uuid":"generated", "state":"DESCRIBED"}),
+            serde_json::json!({"uuid":"other", "state":"DESCRIBED"}),
+        ];
+        let ordered = ordered_rows(&rows, None, |row| row["uuid"] == "generated");
+        let uuids: Vec<_> = ordered.iter().map(|row| row["uuid"].clone()).collect();
+        assert_eq!(uuids, ["scheduled", "generated"]);
     }
 }

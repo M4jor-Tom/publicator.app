@@ -1275,6 +1275,10 @@ async fn batch_reports_each_card_and_the_summary_in_processing_order() {
     );
     server.finish();
     assert_eq!(f.read()[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    // A successful Refresh clears every finished state and the summary.
+    common::ui::send(&mut app, Message::Refresh).await;
+    assert_eq!(card_states(&app), ["-"; 3]);
+    assert_eq!(describe::batch_summary(&app), None);
 }
 
 #[tokio::test]

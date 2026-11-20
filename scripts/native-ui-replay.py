@@ -1245,8 +1245,9 @@ def generating(img, region):
 
 @story
 def describe_batch_progress_per_card_and_summary(ctx):
-    settings = {"installed_models": ["gemma4:31b"], "local_delay_ms": 2000, "local_failures": 1}
-    app = ctx.launch("gallery", settings=settings, size=(1500, 1000))
+    # Each chat reply waits 1.5 s, well within the fixture's 3 s per-record deadline.
+    settings = {"installed_models": ["gemma4:31b"], "local_delay_ms": 1500, "local_failures": 1}
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1400))  # two card rows
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     marked = [row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"]]
     batch = [row["uuid"] for row in marked[:3]]
@@ -1262,7 +1263,7 @@ def describe_batch_progress_per_card_and_summary(ctx):
     names = [row["files"][0]["basename"] for row in marked[:3]]
     img, region, _ = previews(app, palette, "Describe")
     check(all(card_of(img, region, name, palette) for name in names), "a batch card is off screen")
-    openrouter, local, small, large, generate = describe_controls(img, region)
+    openrouter, local, small, large, generate = describe_controls(img, region)[:5]  # not row 2
     for choice in (local, large):  # the installed model
         app.click(center(choice))
         app.look(lambda img: pressed(img, choice), "provider/model choice")
@@ -1287,7 +1288,17 @@ def describe_batch_progress_per_card_and_summary(ctx):
 
     wait_until(persisted_early, "an earlier record persisted while the batch runs", 20)
     wait_until(lambda: app.row(batch[2])["state"] == "DESCRIBED", "the last record")
-    finished = app.look(lambda img: not generating(img, list_view(img)[0]) and img, "no card generating")
+
+    def settled(img):
+        """No card generating, and both described records still listed, labelled Generated,
+        as read-only cards (no inputs) once the last reload lands."""
+        region, _ = list_view(img)
+        done = [card_of(img, region, name, palette) for name in names[1:]]
+        return (not generating(img, region) and all(done)
+                and all(img.stems(TODAY, area(card)) and not inputs(img, area(card)) for card in done)
+                and img)
+
+    finished = app.look(settled, "no card generating and Generated cards kept until Refresh")
     finished.save(ctx.root / "finished.png")
     check(crop(finished, summary) != crop(running, summary), "the summary did not change")
     failed = app.row(batch[0])
