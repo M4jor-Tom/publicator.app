@@ -4,7 +4,7 @@
 - **Run:** `nix run .#validate -- --data-dir DIR`
 - **Code:** `src/config.rs`, `src/model.rs`, `src/store.rs`; consumers in `src/scheduling.rs`, `src/prompts.rs`, `src/bin/` and `src/ui/`.
 - **Tests:** `tests/config.rs`, `tests/store.rs`, `tests/cli.rs`, `tests/docs.rs`.
-- **Config:** `publicator.toml` is optional and resolved relative to `--data-dir` or CWD. It defines publicable image roots, DeviantArt allow-lists, schedule profiles, prompt grammar and tags.
+- **Config:** `publicator.toml` is optional and resolved relative to `--data-dir` or CWD. It defines publicable image roots, DeviantArt allow-lists, schedule profiles, prompt grammar, tags and `[browser].headless` (boolean, default `false`): when `true`, UI and CLI publishing run the browser headless; `da-publish --headless` can only force it on.
 - **Data:** Config and its paths belong to the separate data directory. `assets/publicationsSchema.json` is a code asset; it does not move with data.
 - **Decisions:** Rust `toml`/serde parsing and named prompt regex captures; unknown/invalid values fail at the boundary rather than falling back to a guessed convention.
 - **Verify:** `nix develop -c cargo test --test config --test store`
