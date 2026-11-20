@@ -9,7 +9,7 @@ pub mod schedule;
 pub mod style;
 
 use crate::{
-    application::Application as CoreApplication,
+    application::{Application as CoreApplication, BatchEvent},
     images::{BasenameIndex, Candidate},
     metadata::{GenerationRequest, LocalStatus, ModelOption, Source, VISION_MODELS},
     model::{Phase, phase},
@@ -151,6 +151,40 @@ impl From<Vec<Value>> for Loaded {
     }
 }
 
+/// A Describe card's place in the latest generation run that covered it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenerationState {
+    Queued,
+    Generating,
+    Generated,
+    Failed(String),
+}
+
+impl GenerationState {
+    pub fn busy(&self) -> bool {
+        matches!(self, Self::Queued | Self::Generating)
+    }
+}
+
+/// The marked batch behind the summary line under "Generate marked".
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BatchProgress {
+    Running {
+        ids: Vec<String>,
+        /// The active record's index in `ids`, from its start event.
+        active: Option<usize>,
+        done: usize,
+        failed: usize,
+    },
+    Finished {
+        succeeded: usize,
+        failed: usize,
+    },
+    Failed(String),
+}
+
+const WAIT_FOR_GENERATION: &str = "Wait for this image's generation to finish";
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A store snapshot, stamped with the reload generation that requested it.
@@ -248,9 +282,10 @@ pub enum Message {
     CancelLocalInstall,
     SelectSource(Source),
     SelectModel(ModelOption),
+    GenerationProgress(BatchEvent),
     GenerationFinished {
         uuid: Option<String>,
-        result: Result<String, String>,
+        result: Result<(), String>,
     },
     LocalFitFinished {
         request_id: u64,
@@ -387,7 +422,8 @@ pub struct App {
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
-    busy_uuids: HashSet<String>,
+    generation_states: HashMap<String, GenerationState>,
+    batch: Option<BatchProgress>,
     pending_generation: Option<String>,
     pending_generation_install: bool,
     pending_generation_batch: Option<Vec<String>>,
@@ -490,7 +526,8 @@ impl App {
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
-            busy_uuids: HashSet::new(),
+            generation_states: HashMap::new(),
+            batch: None,
             pending_generation: None,
             pending_generation_install: false,
             pending_generation_batch: None,
@@ -555,6 +592,25 @@ impl App {
     }
     pub fn local_fit_status(&self) -> Option<&LocalStatus> {
         self.local_fit.as_ref()
+    }
+    /// The header status line.
+    pub fn status_message(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
+    pub fn generation_state(&self, uuid: &str) -> Option<&GenerationState> {
+        self.generation_states.get(uuid)
+    }
+    fn generation_busy(&self, uuid: &str) -> bool {
+        self.generation_state(uuid)
+            .is_some_and(GenerationState::busy)
+    }
+    /// Refuses a user action on a card whose generation is queued or running, saying why.
+    fn generation_blocked(&mut self, uuid: &str) -> bool {
+        let busy = self.generation_busy(uuid);
+        if busy {
+            self.result = Some(WAIT_FOR_GENERATION.into());
+        }
+        busy
     }
     pub fn local_install_consent_pending(&self) -> bool {
         self.pending_local_consent.is_some()
@@ -769,6 +825,7 @@ impl App {
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
+            | Message::GenerationProgress(..)
             | Message::GenerationFinished { .. } => self.update_generation(message),
             Message::SaveDraft(..)
             | Message::ApproveMetadata(..)
@@ -860,6 +917,7 @@ impl App {
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
+            | Message::GenerationProgress(..)
             | Message::GenerationFinished { .. }
             | Message::SaveDraft(..)
             | Message::ApproveMetadata(..)
@@ -923,6 +981,10 @@ impl App {
             // the invalidated archive once the reload lands) and unsaved custom date inputs.
             self.prompt_matches.clear();
             self.custom_dates.clear();
+            self.generation_states.retain(|_, state| state.busy());
+            if !matches!(self.batch, Some(BatchProgress::Running { .. })) {
+                self.batch = None;
+            }
             return self.reload_invalidating(self.prompt_archive.clone());
         }
         Task::none()
@@ -1049,6 +1111,7 @@ impl App {
                     result,
                 );
             }
+            Message::GenerationProgress(event) => return self.on_generation_progress(event),
             Message::GenerationFinished { uuid, result } => {
                 return self.on_generation_finished(uuid, result);
             }
@@ -1059,7 +1122,7 @@ impl App {
 
     fn update_metadata(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SaveDraft(uuid) => self.save_uuid(&uuid),
+            Message::SaveDraft(uuid) => self.save_draft(&uuid),
             Message::ApproveMetadata(uuid) => self.approve_metadata(uuid),
             Message::ReturnToSchedule(uuid) => self.return_to_schedule(uuid),
             Message::GenerateOne(uuid) => self.request_generation(uuid),
@@ -1389,6 +1452,7 @@ impl App {
 
     fn update_publication_delete(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::AskDeletePublication(uuid) if self.generation_blocked(&uuid) => {}
             Message::AskDeletePublication(uuid) => self.pending_publication_delete = Some(uuid),
             Message::ConfirmDeletePublication => return schedule::delete_task(self),
             Message::CancelDeletePublication => self.pending_publication_delete = None,
@@ -1653,21 +1717,81 @@ impl App {
         Task::none()
     }
 
+    fn on_generation_progress(&mut self, event: BatchEvent) -> Task<Message> {
+        let Some(BatchProgress::Running {
+            ids,
+            active,
+            done,
+            failed,
+        }) = &mut self.batch
+        else {
+            return Task::none();
+        };
+        match event {
+            BatchEvent::Admitted(admitted) => {
+                for id in ids.iter().filter(|id| !admitted.contains(id)) {
+                    self.generation_states.remove(id);
+                }
+                for id in &admitted {
+                    self.generation_states
+                        .insert(id.clone(), GenerationState::Queued);
+                }
+                *ids = admitted;
+            }
+            BatchEvent::Started(uuid) => {
+                *active = ids.iter().position(|id| *id == uuid);
+                self.generation_states
+                    .insert(uuid, GenerationState::Generating);
+            }
+            BatchEvent::Finished(record) => {
+                let state = match record.error {
+                    Some(error) => {
+                        *failed += 1;
+                        GenerationState::Failed(error)
+                    }
+                    None => {
+                        *done += 1;
+                        GenerationState::Generated
+                    }
+                };
+                self.generation_states.insert(record.uuid, state);
+                return self.reload_task();
+            }
+        }
+        Task::none()
+    }
+
+    /// Ends a run, touching only the cards it covered: a single generation's card, or the
+    /// batch's admitted cards, whose unfinished ones lose their state when the batch aborts.
     fn on_generation_finished(
         &mut self,
         uuid: Option<String>,
-        result: Result<String, String>,
+        result: Result<(), String>,
     ) -> Task<Message> {
         if let Some(uuid) = uuid {
-            self.busy_uuids.remove(&uuid);
-        } else {
-            self.busy_uuids.clear();
+            let state = match result {
+                Ok(()) => GenerationState::Generated,
+                Err(error) => GenerationState::Failed(error),
+            };
+            self.generation_states.insert(uuid, state);
+        } else if let Some(BatchProgress::Running {
+            ids, done, failed, ..
+        }) = self.batch.take()
+        {
+            for id in &ids {
+                if self.generation_busy(id) {
+                    self.generation_states.remove(id);
+                }
+            }
+            self.batch = Some(match result {
+                Ok(()) => BatchProgress::Finished {
+                    succeeded: done,
+                    failed,
+                },
+                Err(error) => BatchProgress::Failed(error),
+            });
         }
         self.busy = false;
-        self.result = Some(match result {
-            Ok(message) => message,
-            Err(error) => format!("Generation failed: {error}"),
-        });
         self.reload_task()
     }
 
@@ -1676,7 +1800,10 @@ impl App {
         uuid: String,
         action: iced::widget::text_editor::Action,
     ) -> Task<Message> {
-        if self.busy_uuids.contains(&uuid) {
+        if self.generation_busy(&uuid) {
+            if action.is_edit() {
+                self.result = Some(WAIT_FOR_GENERATION.into());
+            }
             return Task::none();
         }
         let Some(editor) = self.description_editors.get_mut(&uuid) else {
@@ -1692,7 +1819,7 @@ impl App {
     }
 
     fn on_edited(&mut self, uuid: String, field: Field, text: String) -> Task<Message> {
-        if self.busy_uuids.contains(&uuid) {
+        if self.generation_blocked(&uuid) {
             return Task::none();
         }
         let current = self
@@ -2516,8 +2643,16 @@ impl App {
         )
     }
 
+    /// The user's Save draft, refused on a card whose generation is queued or running.
+    fn save_draft(&mut self, uuid: &str) -> Task<Message> {
+        if self.generation_blocked(uuid) {
+            return Task::none();
+        }
+        self.save_uuid(uuid)
+    }
+
     fn save_uuid(&mut self, uuid: &str) -> Task<Message> {
-        if self.busy_uuids.contains(uuid) {
+        if self.generation_busy(uuid) {
             return Task::none();
         }
         let Some(draft) = self.drafts.get_mut(uuid) else {
@@ -2532,7 +2667,7 @@ impl App {
     }
 
     fn approve_metadata(&mut self, uuid: String) -> Task<Message> {
-        if self.busy_uuids.contains(&uuid) {
+        if self.generation_blocked(&uuid) {
             return Task::none();
         }
         if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
@@ -2560,7 +2695,7 @@ impl App {
     }
 
     fn return_to_schedule(&mut self, uuid: String) -> Task<Message> {
-        if self.busy_uuids.contains(&uuid) {
+        if self.generation_blocked(&uuid) {
             return Task::none();
         }
         if self.drafts.get(&uuid).is_some_and(Draft::is_dirty) {
@@ -2571,7 +2706,7 @@ impl App {
     }
 
     fn request_generation(&mut self, uuid: String) -> Task<Message> {
-        if self.pending_local_consent.is_some() || self.busy_uuids.contains(&uuid) {
+        if self.pending_local_consent.is_some() || self.generation_blocked(&uuid) {
             return Task::none();
         }
         if self.source == Source::Local {
@@ -2586,6 +2721,10 @@ impl App {
     }
 
     fn request_batch_generation(&mut self) -> Task<Message> {
+        if matches!(self.batch, Some(BatchProgress::Running { .. })) {
+            self.result = Some("A batch generation is already running".into());
+            return Task::none();
+        }
         if self.pending_local_consent.is_some() {
             return Task::none();
         }
@@ -2687,38 +2826,67 @@ impl App {
             install_missing,
         };
         let application = self.application.clone();
-        if let Some(uuid) = &selection {
-            self.busy_uuids.insert(uuid.clone());
-        } else {
-            self.busy_uuids.extend(self.marked_generation_ids());
-        }
         self.busy = true;
-        let completion_uuid = selection.clone();
-        Task::perform(
-            async move {
-                if let Some(uuid) = selection {
+        if let Some(uuid) = selection {
+            self.generation_states
+                .insert(uuid.clone(), GenerationState::Generating);
+            let completion_uuid = uuid.clone();
+            return Task::perform(
+                async move {
                     application
                         .generate_one(&uuid, request)
                         .await
-                        .map(|_| format!("Generated metadata for {uuid}"))
-                } else {
-                    let generation = if let Some(expected) = batch_selection.as_deref() {
-                        application
-                            .generate_marked_expected(&request, expected)
-                            .await
-                    } else {
-                        application.generate_marked(&request).await
-                    };
-                    generation.map(|report| {
-                        format!("Generated {}; {} failed", report.succeeded, report.failed)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+                move |result| Message::GenerationFinished {
+                    uuid: Some(completion_uuid),
+                    result,
+                },
+            );
+        }
+        // Cards another run holds keep their state; admission narrows the rest to the batch.
+        let ids: Vec<String> = self
+            .marked_generation_ids()
+            .into_iter()
+            .filter(|id| !self.generation_busy(id))
+            .collect();
+        for id in &ids {
+            self.generation_states
+                .insert(id.clone(), GenerationState::Queued);
+        }
+        self.batch = Some(BatchProgress::Running {
+            ids,
+            active: None,
+            done: 0,
+            failed: 0,
+        });
+        Task::run(
+            iced::stream::channel(1, async move |mut output| {
+                use iced::futures::{SinkExt, StreamExt, channel::mpsc};
+                let (events, mut received) = mpsc::unbounded();
+                let generation = application.generate_marked_with_events(
+                    &request,
+                    batch_selection.as_deref(),
+                    move |event| {
+                        let _ = events.unbounded_send(event);
+                    },
+                );
+                // The callback's sender drops with the finished generation, ending `forward`.
+                let forward = async {
+                    while let Some(event) = received.next().await {
+                        let _ = output.send(Message::GenerationProgress(event)).await;
+                    }
+                };
+                let (result, ()) = iced::futures::join!(generation, forward);
+                let _ = output
+                    .send(Message::GenerationFinished {
+                        uuid: None,
+                        result: result.map(|_| ()).map_err(|error| error.to_string()),
                     })
-                }
-                .map_err(|error| error.to_string())
-            },
-            move |result| Message::GenerationFinished {
-                uuid: completion_uuid,
-                result,
-            },
+                    .await;
+            }),
+            std::convert::identity,
         )
     }
 
@@ -2760,7 +2928,7 @@ impl App {
         let count = |tab| match tab {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
-            Tab::Describe => Some(describe::ordered_rows(rows, None).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, None, |_| false).len()),
             Tab::Publish => {
                 Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
             }

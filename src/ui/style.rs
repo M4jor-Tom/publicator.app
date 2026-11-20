@@ -184,6 +184,14 @@ pub fn cell(_: &Theme) -> container::Style {
     }
 }
 
+/// The active generation's label: the only accent-filled box on a Describe card.
+pub fn active(_: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(color!(0x111111)),
+        ..boxed(ACCENT, Border::default().rounded(3))
+    }
+}
+
 /// The amber banner: lineage hints, nearest prompts, pending confirmations.
 pub fn notice(_: &Theme) -> container::Style {
     container::Style {

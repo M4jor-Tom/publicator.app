@@ -1236,6 +1236,84 @@ def describe_model_install_consent(ctx):
     close_and_wait(app)
 
 
+def generating(img, region):
+    """Cards carrying the accent-filled `Generating…` label (an active choice's accent border
+    is hollow: its inside is the button grey)."""
+    labels = [box for box in img.boxes(ACCENT, region, 60, 14) if img.px(box[0] + 3, box[1] + box[3] // 2) == ACCENT]
+    return [card for card in cards(img, region) if any(within(box, area(card)) for box in labels)]
+
+
+@story
+def describe_batch_progress_per_card_and_summary(ctx):
+    # The first chat reply fails and the third waits for the release below, so the running
+    # state is checked while it cannot move; the long deadline keeps the held record alive.
+    settings = {"installed_models": ["gemma4:31b"], "local_failures": 1, "local_hold": 3,
+                "ai_timeout_ms": 60000}
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1400))  # two card rows
+    palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    marked = [row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"]]
+
+    def keep_three(rows):
+        for row in rows:
+            if row["uuid"] in {r["uuid"] for r in marked[3:]}:
+                row["title"], row["description"] = "Manual title", "Manual description"
+
+    app.edit_rows(keep_three)
+    navigate(app, "Describe")
+    press_footer(app, 0)  # Refresh shows the three-record batch
+    names = [row["files"][0]["basename"] for row in marked[:3]]
+    img, region, _ = previews(app, palette, "Describe")
+    check(all(card_of(img, region, name, palette) for name in names), "a batch card is off screen")
+    openrouter, local, small, large, generate = describe_controls(img, region)[:5]  # not row 2
+    for choice in (local, large):  # the installed model
+        app.click(center(choice))
+        app.look(lambda img: pressed(img, choice), "provider/model choice")
+    summary = (generate[0], generate[1] + generate[3] + 2, generate[2], 24)
+    idle = crop(app.shot(), summary)
+    app.click(center(generate))
+    app.park()
+    wait_until(lambda: (app.fixture / "local-chat-held").exists(), "the third chat reply held")
+    # The batch runs in its Admitted order, which its chat requests follow: the record held
+    # is the marked one not yet requested.
+    uuid_of = {row["files"][0]["basename"]: row["uuid"] for row in marked[:3]}
+    asked = [uuid_of[palette.name[tuple(call["image_rgb"])]]
+             for call in app.lines("http-calls.jsonl") if call["path"] == "/api/chat"]
+    check(len(asked) == 2, f"chat requests before the hold: {asked}")
+    batch = asked + [uuid for uuid in uuid_of.values() if uuid not in asked]
+    held = app.row(batch[2])["files"][0]["basename"]
+
+    def one_active(img):
+        region, _ = list_view(img)
+        active = generating(img, region)
+        return len(active) == 1 and card_of(img, region, held, palette) == active[0] and img
+
+    running = app.look(one_active, "exactly the held card generating")
+    running.save(ctx.root / "running.png")
+    check(crop(running, summary) != idle, "no batch summary while running")
+
+    second, third = (app.row(uuid) for uuid in batch[1:])
+    check(second["state"] == "DESCRIBED" and "TODO_GENERATE" in third["title"],
+          "an earlier record not persisted while the batch runs")
+    (app.fixture / "local-chat-release").write_text("release")
+    wait_until(lambda: app.row(batch[2])["state"] == "DESCRIBED", "the last record")
+
+    def settled(img):
+        """No card generating, and both described records still listed, labelled Generated,
+        as read-only cards (no inputs) once the last reload lands."""
+        region, _ = list_view(img)
+        done = [card_of(img, region, name, palette) for name in names[1:]]
+        return (not generating(img, region) and all(done)
+                and all(img.stems(TODAY, area(card)) and not inputs(img, area(card)) for card in done)
+                and img)
+
+    finished = app.look(settled, "no card generating and Generated cards kept until Refresh")
+    finished.save(ctx.root / "finished.png")
+    check(crop(finished, summary) != crop(running, summary), "the summary did not change")
+    failed = app.row(batch[0])
+    check(failed["state"] == "SCHEDULED" and "TODO_GENERATE" in failed["title"], f"failed record {failed}")
+    close_and_wait(app)
+
+
 def publish_row(img, palette, name):
     """The Publish table row (box) showing artwork `name`, from its thumbnail to the next one.
     Located per capture: editing options grows the row by its Save options button."""

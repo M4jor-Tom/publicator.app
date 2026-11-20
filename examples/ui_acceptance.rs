@@ -45,6 +45,9 @@ struct FixtureSettings {
     local_delay_ms: u64,
     openrouter_failures: usize,
     local_failures: usize,
+    /// Holds the Nth `/api/chat` reply (0: none) until `local-chat-release` exists.
+    local_hold: usize,
+    ai_timeout_ms: u64,
     worker_outcomes: Vec<String>,
     worker_gate: bool,
     tiers: Vec<String>,
@@ -62,6 +65,8 @@ impl Default for FixtureSettings {
             local_delay_ms: 0,
             openrouter_failures: 0,
             local_failures: 0,
+            local_hold: 0,
+            ai_timeout_ms: 3000,
             worker_outcomes: vec!["failed".into(), "scheduled".into(), "unknown".into()],
             worker_gate: false,
             tiers: vec!["Fixture Basic".into(), "Fixture Premium".into()],
@@ -75,6 +80,7 @@ struct FakeCallState {
     sequence: usize,
     openrouter_failures: usize,
     local_failures: usize,
+    local_chats: usize,
 }
 
 fn arg(name: &str) -> PathBuf {
@@ -773,6 +779,16 @@ fn fake_response(
 ) -> (u16, Value, String) {
     let parsed = serde_json::from_slice::<Value>(request_body).unwrap_or(Value::Null);
     let model = parsed.get("model").and_then(Value::as_str);
+    // Which artwork a local chat describes: its image's centre colour, as in the manifest.
+    let image_rgb = parsed
+        .pointer("/messages/0/images/0")
+        .and_then(Value::as_str)
+        .and_then(|image| openssl::base64::decode_block(image).ok())
+        .and_then(|bytes| image::load_from_memory(&bytes).ok())
+        .map(|image| {
+            let image = image.to_rgb8();
+            image.get_pixel(image.width() / 2, image.height() / 2).0
+        });
     response_delay(path, settings);
     let mut state = calls.lock().unwrap();
     state.sequence += 1;
@@ -784,6 +800,7 @@ fn fake_response(
         "method": method,
         "path": path,
         "model": model,
+        "image_rgb": image_rgb,
         "body_bytes": request_body.len(),
         "status": status
     });
@@ -898,6 +915,15 @@ fn respond(
             return;
         }
     };
+    if path == "/api/chat" {
+        let mut state = calls.lock().unwrap();
+        state.local_chats += 1;
+        let held = state.local_chats == settings.local_hold;
+        drop(state);
+        if held {
+            hold_reply(log.parent().unwrap());
+        }
+    }
     let (status, response, record) = fake_response(&method, &path, &request_body, settings, calls);
     let response = response.to_string();
     let mut file = fs::OpenOptions::new()
@@ -914,6 +940,19 @@ fn respond(
         "Not Found"
     };
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+}
+
+/// Announces the held reply and waits for the replay's release, at most 60 s so a missing
+/// release cannot strand the fixture.
+fn hold_reply(dir: &Path) {
+    fs::write(dir.join("local-chat-held"), "held").unwrap();
+    let release = dir.join("local-chat-release");
+    for _ in 0..1200 {
+        if release.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -1442,6 +1481,7 @@ fn main() -> iced::Result {
     let paths = Paths::resolve(Some(&dir), None).unwrap();
     initialize_publications_if_absent(&paths.json, &rows).unwrap();
     let store = Arc::new(Store::new(paths, config).unwrap());
+    let ai_timeout = Duration::from_millis(settings.ai_timeout_ms);
     let (endpoint, stop_http, http_thread) = http_fixture(&dir, settings);
     let llmfit = dir.join("llmfit");
     write_llmfit(&llmfit, &settings_path);
@@ -1464,7 +1504,7 @@ fn main() -> iced::Result {
         application,
         UiOptions {
             openrouter_model: None,
-            ai_timeout: Duration::from_secs(3),
+            ai_timeout,
         },
     );
     stop_http.store(true, Ordering::Release);
