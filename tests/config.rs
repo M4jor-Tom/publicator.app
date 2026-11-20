@@ -24,6 +24,23 @@ fn missing_config_uses_defaults_and_bad_toml_names_the_file() {
 }
 
 #[test]
+fn browser_headless_defaults_to_false_and_rejects_a_non_boolean() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!Config::load(dir.path()).unwrap().headless);
+    let toml = dir.path().join("publicator.toml");
+    for text in ["tags = \"tags.txt\"\n", "[browser]\n"] {
+        fs::write(&toml, text).unwrap();
+        assert!(!Config::load(dir.path()).unwrap().headless, "{text}");
+    }
+    fs::write(&toml, "[browser]\nheadless = true\n").unwrap();
+    assert!(Config::load(dir.path()).unwrap().headless);
+    fs::write(&toml, "[browser]\nheadless = \"yes\"\n").unwrap();
+    let error = Config::load(dir.path()).unwrap_err();
+    assert!(matches!(error, publicator::error::Error::Config(_)));
+    assert!(error.to_string().contains("publicator.toml"), "{error}");
+}
+
+#[test]
 fn config_loads_paths_flat_schedule_and_prompt_grammar_from_the_data_directory() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

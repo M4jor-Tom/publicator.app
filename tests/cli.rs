@@ -323,8 +323,25 @@ fn default_publish_is_first_pending_and_all_uuid_remain_explicit_batches() {
 
 #[test]
 fn headless_flag_reaches_the_publish_worker_open_command() {
+    assert_eq!(publish_open("", true)["headless"], true);
+}
+
+#[test]
+fn browser_headless_config_reaches_the_publish_worker_open_command() {
+    assert_eq!(
+        publish_open("[browser]\nheadless = true\n", false)["headless"],
+        true
+    );
+    assert_eq!(publish_open("", false)["headless"], false);
+}
+
+/// The worker `open` command of one `da-publish` run, with `extra` appended to `publicator.toml`.
+fn publish_open(extra: &str, flag: bool) -> Value {
     let root = tempdir().unwrap();
     publication_batch(root.path());
+    let config = root.path().join("publicator.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    fs::write(&config, base + extra).unwrap();
     let worker = root.path().join("headless-worker.sh");
     let open = root.path().join("open.json");
     common::executable::write_executable(
@@ -356,9 +373,9 @@ done
             "da-publish",
             "--uuid",
             "00000000-0000-4000-8000-000000000003",
-            "--headless",
-            "--data-dir",
         ])
+        .args(flag.then_some("--headless"))
+        .arg("--data-dir")
         .arg(root.path())
         .output()
         .unwrap();
@@ -367,8 +384,7 @@ done
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let open: Value = serde_json::from_slice(&fs::read(open).unwrap()).unwrap();
-    assert_eq!(open["headless"], true);
+    serde_json::from_slice(&fs::read(open).unwrap()).unwrap()
 }
 
 #[test]

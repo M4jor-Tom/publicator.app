@@ -58,6 +58,7 @@ pub struct Config {
     pub tags: Option<String>,
     pub schedule: toml::Table,
     pub prompts: Option<PromptConfig>,
+    pub headless: bool,
 }
 #[derive(Clone, Debug)]
 pub struct PromptConfig {
@@ -93,6 +94,13 @@ impl Config {
             #[serde(default)]
             deviantart: Da,
             prompts: Option<toml::Table>,
+            #[serde(default)]
+            browser: Browser,
+        }
+        #[derive(Deserialize, Default)]
+        struct Browser {
+            #[serde(default)]
+            headless: bool,
         }
         #[derive(Deserialize, Default)]
         struct Da {
@@ -136,6 +144,7 @@ impl Config {
             tags: raw.tags,
             schedule: raw.schedule,
             prompts,
+            headless: raw.browser.headless,
         };
         // The allocator's own validators, so every command rejects a bad [schedule] up front.
         crate::scheduling::profiles(&config).and(crate::scheduling::timezone(&config))?;
