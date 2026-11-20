@@ -63,14 +63,19 @@ pub fn card<'a>(content: impl Into<Element<'a, Message>>) -> Container<'a, Messa
 /// A thumbnail at most `height` tall, or the reason it is missing. A pending placeholder
 /// reports, under preview `key`, when it comes within one thumbnail of the visible list: the
 /// rendered layout decides what loads, at any window size, row height or scroll jump.
+/// A thumbnail of a known `original` opens it in the viewer.
 pub fn art<'a>(
     preview: Option<&Option<Result<std::path::PathBuf, String>>>,
+    original: Option<&Path>,
     missing: bool,
     height: f32,
     key: &str,
 ) -> Element<'a, Message> {
     match preview {
-        Some(Some(Ok(path))) => thumbnail(path, height),
+        Some(Some(Ok(path))) => match original {
+            Some(original) => opens(thumbnail(path, height), original, path),
+            None => thumbnail(path, height),
+        },
         Some(Some(Err(_))) if missing => text("Artwork missing").color(MUTED).into(),
         Some(Some(Err(error))) => text(format!("Preview unavailable: {error}"))
             .color(MUTED)
@@ -104,6 +109,26 @@ fn thumbnail<'a>(path: &Path, height: f32) -> Element<'a, Message> {
     )
     .max_height(height)
     .into()
+}
+
+/// `content` showing `thumb` of `original` opens the viewer on press.
+pub fn opens<'a>(
+    content: impl Into<Element<'a, Message>>,
+    original: &Path,
+    thumb: &Path,
+) -> Element<'a, Message> {
+    iced::widget::mouse_area(content)
+        .on_press(Message::OpenViewer(viewer_file(original, thumb)))
+        .into()
+}
+
+/// The file the viewer shows: the original, or its cached thumbnail for a video the image
+/// widget cannot decode.
+pub fn viewer_file(original: &Path, thumb: &Path) -> std::path::PathBuf {
+    let video = original
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"));
+    if video { thumb } else { original }.to_path_buf()
 }
 
 /// A full-width button, as the web cards stretched theirs.
@@ -145,6 +170,10 @@ fn boxed(background: Color, border: Border) -> container::Style {
 
 pub fn header(_: &Theme) -> container::Style {
     boxed(color!(0x111111), Border::default())
+}
+
+pub fn viewer(_: &Theme) -> container::Style {
+    boxed(Color::BLACK, Border::default())
 }
 
 /// A bordered table cell (Publish).

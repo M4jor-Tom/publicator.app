@@ -226,14 +226,15 @@ fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
     match state.calendar_artwork.get(&event.uuid) {
         None => text("Checking artwork…").into(),
         Some(Err(error)) => text(format!("Artwork unavailable: {error}")).into(),
-        Some(Ok(_)) => match state.calendar_previews.get(&event.uuid) {
+        Some(Ok((original, _))) => match state.calendar_previews.get(&event.uuid) {
             None | Some(None) => text("Loading thumbnail…").into(),
-            Some(Some(Ok(path))) => {
+            Some(Some(Ok(path))) => style::opens(
                 iced::widget::image(iced::widget::image::Handle::from_path(path))
                     .width(Length::Fixed(120.0))
-                    .height(Length::Fixed(120.0))
-                    .into()
-            }
+                    .height(Length::Fixed(120.0)),
+                original,
+                path,
+            ),
             Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
         },
     }

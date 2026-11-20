@@ -1590,6 +1590,47 @@ SIZES = ((700, 900), (1100, 760), (1500, 1000))
 
 
 @story
+def thumbnail_opens_the_viewer_and_closing_keeps_the_view(ctx):
+    """A loaded thumbnail shows its original file over the whole window; a click (Pick) or
+    Escape (Schedule) closes it on the same tab at the same scroll."""
+    app = ctx.launch("gallery")
+    palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    search(app)
+    for tab, close in (("Pick", "click"), ("Schedule", "Escape")):
+        navigate(app, tab)
+        jump(app, 0.45)
+        img, region, blocks = previews(app, palette, tab)
+        if not blocks:  # a Pick stop can fall between two rows of thumbnails
+            scroll_by(app, -40)
+            img, region, blocks = previews(app, palette, f"{tab} - 40 px")
+        app.park()
+        before = app.shot()
+        view = (tabs(before), list_view(before), palette.blocks(before, region))
+        name, box = view[2][0]
+        app.click(center(box))
+
+        def covered(img):
+            bars = [img.px(x, y) for x in (2, img.w // 2, img.w - 3) for y in (2, img.h - 3)]
+            shown = [b for n, b in palette.blocks(img, (0, 0, img.w, img.h)) if n == name]
+            return (all(px == (0, 0, 0) for px in bars) and not img.boxes(HEADER, None, 20, 20)
+                    and not img.boxes(CARD, None, 20, 20) and shown and shown[0])
+
+        # The 480x300 original, not its thumbnail, centred and never upscaled.
+        x, y, w, h = app.look(covered, f"{tab} viewer to cover the window with {name}")
+        check((w, h) == (480, 300) and abs(x + w // 2 - app.last.w // 2) <= 2,
+              f"{tab} viewer shows {name} at {(x, y, w, h)}")
+        if close == "click":
+            app.click((10, 10))
+        else:
+            app.key("Escape")
+        app.look(lambda img: not covered(img), f"{tab} viewer to close")
+        app.park()
+        app.look(lambda img: (tabs(img), list_view(img), palette.blocks(img, region)) == view,
+                 f"{tab} to keep its tab and scroll after the viewer")
+    close_and_wait(app)
+
+
+@story
 def every_visible_card_loads_its_own_image(ctx):
     """At narrow/default/wide sizes, jumps and resizes leave no visible card without its
     own image (pixel identity against the gallery manifest), and no Pick card's text crosses
