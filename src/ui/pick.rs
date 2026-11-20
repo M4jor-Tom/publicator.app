@@ -310,7 +310,13 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
     let preview = state.previews.get(&candidate.path);
     let missing = matches!(preview, Some(Some(Err(_)))) && !candidate.path.exists();
     let mut content = column![
-        style::art(preview, missing, 240.0, &preview_key(&candidate.path)),
+        style::art(
+            preview,
+            Some(&candidate.path),
+            missing,
+            240.0,
+            &preview_key(&candidate.path)
+        ),
         // A digest-style name has no word break: wrap between glyphs to keep it whole in the card.
         text(
             candidate

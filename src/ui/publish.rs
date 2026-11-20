@@ -183,7 +183,7 @@ fn summary<'a>(state: &'a App, publication: &'a Value) -> Element<'a, Message> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     column![
-        style::art(state.row_previews.get(uuid), false, 90.0, uuid),
+        state.row_art(uuid, 90.0),
         text(title).font(style::BOLD),
         text(super::schedule::date_label(state, publication)).font(style::BOLD),
     ]

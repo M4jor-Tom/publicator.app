@@ -199,10 +199,14 @@ pub enum Message {
         key: String,
         shown: bool,
     },
+    /// On success, the file the row previews from and its cached thumbnail.
     RowPreviewFinished {
         uuid: String,
-        result: Result<std::path::PathBuf, String>,
+        result: Result<(PathBuf, PathBuf), String>,
     },
+    /// Shows a file over the whole window until `CloseViewer`.
+    OpenViewer(PathBuf),
+    CloseViewer,
     Pick(Candidate),
     PickFinished(Result<(), String>),
     AskDelete(Candidate),
@@ -369,6 +373,10 @@ pub struct App {
     candidates: Vec<Candidate>,
     previews: HashMap<std::path::PathBuf, Option<Result<std::path::PathBuf, String>>>,
     row_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
+    /// Per row UUID with a thumbnail: the file it previews from (`artwork::preview_source`).
+    row_sources: HashMap<String, PathBuf>,
+    /// The file shown over the whole window (`OpenViewer`).
+    viewer: Option<PathBuf>,
     /// Preview keys (candidate paths, row UUIDs) whose placeholder is on screen.
     shown_previews: HashSet<String>,
     description_editors: HashMap<String, iced::widget::text_editor::Content>,
@@ -472,6 +480,8 @@ impl App {
             candidates: Vec::new(),
             previews: HashMap::new(),
             row_previews: HashMap::new(),
+            row_sources: HashMap::new(),
+            viewer: None,
             shown_previews: HashSet::new(),
             description_editors: HashMap::new(),
             pending_delete: None,
@@ -779,6 +789,14 @@ impl App {
                 self.scroll_offsets.insert(tab, offset);
                 Task::none()
             }
+            Message::OpenViewer(path) => {
+                self.viewer = Some(path);
+                Task::none()
+            }
+            Message::CloseViewer => {
+                self.viewer = None;
+                Task::none()
+            }
             message => self.update_workflow(message),
         }
     }
@@ -832,6 +850,8 @@ impl App {
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
             | Message::Scrolled(..)
+            | Message::OpenViewer(..)
+            | Message::CloseViewer
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -960,6 +980,13 @@ impl App {
     }
 
     fn update_keyboard(&mut self, message: Message) -> Task<Message> {
+        // Escape closes the viewer first; other keys would act on cells hidden under it.
+        if self.viewer.is_some() {
+            if matches!(message, Message::PublishKeyboardExit) {
+                self.viewer = None;
+            }
+            return Task::none();
+        }
         match message {
             Message::PublishKeyboardToggle => return self.on_publish_keyboard_toggle(),
             Message::PublishKeyboardNext { reverse } => {
@@ -1268,6 +1295,10 @@ impl App {
             }
             Message::PreviewShown { key, shown } => return self.on_preview_shown(key, shown),
             Message::RowPreviewFinished { uuid, result } => {
+                let result = result.map(|(source, thumb)| {
+                    self.row_sources.insert(uuid.clone(), source);
+                    thumb
+                });
                 self.row_previews.insert(uuid, Some(result));
                 return describe::preview_tasks(self);
             }
@@ -2694,6 +2725,17 @@ impl App {
         self.drafts.values().any(Draft::is_dirty)
     }
 
+    /// A row's thumbnail (`style::art`), opening the file it previews from.
+    fn row_art(&self, uuid: &str, height: f32) -> Element<'_, Message> {
+        style::art(
+            self.row_previews.get(uuid),
+            self.row_sources.get(uuid).map(PathBuf::as_path),
+            false,
+            height,
+            uuid,
+        )
+    }
+
     fn publication_exists(&self, uuid: &str) -> bool {
         self.publication(uuid).is_some()
     }
@@ -2767,7 +2809,7 @@ impl App {
             button("Discard drafts and close").on_press(Message::ConfirmDiscard),
         ]
         .spacing(8);
-        column![
+        let page = column![
             container(header.wrap())
                 .padding(12)
                 .width(Length::Fill)
@@ -2777,8 +2819,21 @@ impl App {
                 .padding(8)
                 .width(Length::Fill)
                 .style(style::header),
-        ]
-        .into()
+        ];
+        // The page keeps its tree slot whether or not the viewer covers it, so no scroll resets.
+        let viewer = self.viewer.as_deref().map(|path| {
+            iced::widget::mouse_area(
+                container(
+                    iced::widget::image(iced::widget::image::Handle::from_path(path))
+                        .content_fit(iced::ContentFit::ScaleDown),
+                )
+                .center(Length::Fill)
+                .style(style::viewer),
+            )
+            .on_press(Message::CloseViewer)
+            .into()
+        });
+        floating(page, viewer)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -3125,6 +3180,47 @@ mod tests {
         let _ = app.update(Message::PublishKeyboardExit);
         assert!(!app.publish_keyboard_mode);
         assert!(app.publish_keyboard_focus.is_none());
+    }
+
+    #[test]
+    fn viewer_opens_and_closes_on_the_same_tab() {
+        let (mut app, _root) = app();
+        app.active_tab = Tab::Schedule;
+        let _ = app.update(Message::OpenViewer(PathBuf::from("/art/a.png")));
+        assert_eq!(app.viewer.as_deref(), Some(Path::new("/art/a.png")));
+        let _ = app.update(Message::CloseViewer);
+        assert!(app.viewer.is_none());
+        assert_eq!(app.active_tab, Tab::Schedule);
+    }
+
+    #[test]
+    fn viewer_escape_closes_it_before_publish_keyboard_mode() {
+        let (mut app, _root) = app();
+        app.active_tab = Tab::Publish;
+        app.publish_keyboard_mode = true;
+        let _ = app.update(Message::OpenViewer(PathBuf::from("/art/a.png")));
+        let _ = app.update(Message::PublishKeyboardToggle);
+        assert!(app.publish_keyboard_mode);
+        let _ = app.update(Message::PublishKeyboardExit);
+        assert!(app.viewer.is_none());
+        assert!(app.publish_keyboard_mode);
+        let _ = app.update(Message::PublishKeyboardExit);
+        assert!(!app.publish_keyboard_mode);
+    }
+
+    #[test]
+    fn viewer_shows_the_original_or_a_video_thumbnail() {
+        let thumb = Path::new("/cache/t.png");
+        for (original, shown) in [
+            ("/art/a.png", "/art/a.png"),
+            ("/art/v.mp4", "/cache/t.png"),
+            ("/art/v.MP4", "/cache/t.png"),
+        ] {
+            assert_eq!(
+                style::viewer_file(Path::new(original), thumb),
+                Path::new(shown)
+            );
+        }
     }
 
     #[test]

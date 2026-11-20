@@ -48,7 +48,8 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
                     let index = super::artwork_index(&index, &root)?;
                     crate::artwork::preview_source(index, &row)
                         .and_then(|(source, sha512)| {
-                            crate::images::ensure_thumb(&source, &cache, &sha512)
+                            let thumb = crate::images::ensure_thumb(&source, &cache, &sha512)?;
+                            Ok((source, thumb))
                         })
                         .map_err(|error| error.to_string())
                 })
@@ -166,7 +167,7 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
     let busy = state.busy_uuids.contains(&uuid);
     let title_uuid = uuid.clone();
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
+        state.row_art(&uuid, 240.0),
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);
