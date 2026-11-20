@@ -26,7 +26,7 @@ route (script)     → reviewers + models from risk/surfaces via config.json
 worktree           → factory/<job-id> from origin/<base>
 spec-writer (opus) → spec.md
 builder (opus)     → commits; the first push opens a draft PR "Closes #<n>"
-gate (script)      → checks.sh; FAIL → builder gets the log, no reviewers spawned
+gate (script)      → merge origin/<base> + push, then checks.sh; FAIL/conflict → builder gets the log, no reviewers spawned
 reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers
 approver (opus)    → APPROVE: sync origin/<base>, gate, gh pr merge
                      ESCALATE: PR ready, decision as PR comment, label factory:needs-human
@@ -46,7 +46,7 @@ through the scripts. `factory/jobs/` is gitignored runtime state.
 <repo>/factory/config.json                     concurrency, rounds, labels, routing, prices
 <repo>/factory/checks.sh                       the repo's checks; the gate runs it
 <repo>/factory/bin/job                         the only writer of job.json
-<repo>/factory/bin/gate                        runs checks.sh in a worktree → round-N/checks.md
+<repo>/factory/bin/gate                        merges origin/<base>, pushes, runs checks.sh → round-N/checks.md
 <repo>/factory/bin/route                       risk + surfaces → the job's agents
 <repo>/factory/jobs/<job-id>/job.json          the job's state; the dashboard reads it
 <repo>/factory/jobs/<job-id>/issue.md          the issue, quoted as data

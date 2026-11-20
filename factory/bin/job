@@ -608,17 +608,12 @@ def cmd_merge(job):
         save(advance(sync(job), "needs-human"))
         print(f"{job['id']}: needs-human: {why.splitlines()[0]}")
 
-    git(job, "fetch", "origin", BASE)
-    merged = git(job, "merge", "--no-edit", f"origin/{BASE}", check=False)
-    if merged.returncode != 0:
-        git(job, "merge", "--abort", check=False)
-        return fail(f"The branch conflicts with {BASE}:\n\n```\n{merged.stdout.strip()}\n```")
+    # The gate merges origin/<base> into the branch and pushes it first.
     gate = subprocess.run([str(BIN / "gate"), job["id"], "--merge"], capture_output=True, text=True)
     if gate.returncode != 0:
         return fail(f"The gate failed after syncing with {BASE}. "
                     f"See round-{job['round']}/merge-checks.md.\n\n{gate.stdout.strip()}")
     try:
-        git(job, "push", "origin", job["branch"])
         if gh_json("pr", "view", str(job["pr"]), "--json", "isDraft")["isDraft"]:
             gh("pr", "ready", str(job["pr"]))
         gh("pr", "merge", str(job["pr"]), f"--{CONFIG['merge_method']}")

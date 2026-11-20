@@ -7,7 +7,11 @@ Usage:
   gate --hook              builder SubagentStop hook: run the checks once, exit 2 on failure
 
 The gate runs the main checkout's factory/checks.sh inside the job's worktree,
-so a branch can't change the checks it is judged by. It also fails when the
+so a branch can't change the checks it is judged by. Before the checks it
+merges the latest origin/<base> into the branch and pushes it, so every round
+is judged (and reviewed) against the current base: a call to a function whose
+definition changed on the base breaks the build without a git conflict. A merge
+conflict fails the gate; the builder resolves it next round. It also fails when the
 branch modifies or deletes a file matching config.json `protected_paths`
 (fnmatch patterns, where `*` also matches `/`). Adding new files is fine.
 """
@@ -52,6 +56,19 @@ def protected_changes(worktree):
     return hits
 
 
+def sync_with_base(worktree, branch):
+    """Merge origin/<base> into the branch and push. Returns the conflict output, or None."""
+    base = CONFIG["base_branch"]
+    git(worktree, "fetch", "origin", base)
+    res = subprocess.run(["git", "merge", "--no-edit", f"origin/{base}"],
+                         cwd=worktree, capture_output=True, text=True)
+    if res.returncode != 0:
+        subprocess.run(["git", "merge", "--abort"], cwd=worktree, capture_output=True)
+        return (res.stdout + res.stderr).strip()
+    git(worktree, "push", "origin", branch)
+    return None
+
+
 def run_checks(worktree):
     start = time.monotonic()
     res = subprocess.run(["bash", str(CHECKS)], cwd=worktree, capture_output=True, text=True)
@@ -64,17 +81,28 @@ def gate(job_id, merge):
     if job["round"] < 1:
         die(f"{job_id} hasn't started a build round")
     round_dir = FACTORY / "jobs" / job_id / f"round-{job['round']}"
+    name = "merge-checks" if merge else "checks"
+    base = CONFIG["base_branch"]
+    conflict = sync_with_base(worktree, job["branch"])
     commit = git(worktree, "rev-parse", "HEAD").strip()
+    if conflict:
+        (round_dir / f"{name}.log").write_text(conflict + "\n")
+        (round_dir / f"{name}.md").write_text(
+            f"GATE: FAIL\nCOMMIT: {commit}\n\n## Summary\n"
+            f"- The branch conflicts with origin/{base}; checks.sh didn't run\n"
+            f"- Merge origin/{base} into the branch, resolve the conflicts, and push\n\n"
+            f"## Merge\n\n```\n{conflict}\n```\n")
+        print(f"GATE: FAIL ({job_id} round {job['round']}, conflicts with origin/{base})")
+        sys.exit(1)
     protected = protected_changes(worktree)
     code, log, seconds = run_checks(worktree)
     verdict = "PASS" if code == 0 and not protected else "FAIL"
-    name = "merge-checks" if merge else "checks"
     (round_dir / f"{name}.log").write_text(log)
     tail = "\n".join(log.rstrip().splitlines()[-TAIL:])
     summary = [
         f"checks.sh {'passed' if code == 0 else f'failed with exit {code}'} in {seconds}s",
         f"Protected paths: {'changed: ' + ', '.join(protected) if protected else 'none changed'}",
-        f"Commit {commit[:7]}" + (", synced with the latest main before merging" if merge else ""),
+        f"Commit {commit[:7]}, synced with origin/{base}" + (" before merging" if merge else ""),
     ]
     (round_dir / f"{name}.md").write_text(
         f"GATE: {verdict}\nCOMMIT: {commit}\n\n"
