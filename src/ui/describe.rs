@@ -222,7 +222,7 @@ fn generation_line<'a>(state: &App, uuid: &str, marked: bool) -> Option<Element<
 fn generated_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
     let saved = crate::workflow::Metadata::of(row);
     let mut card = column![
-        style::art(state.row_previews.get(&uuid), false, 240.0, &uuid),
+        state.row_art(&uuid, 240.0),
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);
