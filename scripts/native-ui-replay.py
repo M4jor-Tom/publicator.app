@@ -1236,6 +1236,65 @@ def describe_model_install_consent(ctx):
     close_and_wait(app)
 
 
+def generating(img, region):
+    """Cards carrying the accent-filled `Generating…` label (an active choice's accent border
+    is hollow: its inside is the button grey)."""
+    labels = [box for box in img.boxes(ACCENT, region, 60, 14) if img.px(box[0] + 3, box[1] + box[3] // 2) == ACCENT]
+    return [card for card in cards(img, region) if any(within(box, area(card)) for box in labels)]
+
+
+@story
+def describe_batch_progress_per_card_and_summary(ctx):
+    settings = {"installed_models": ["gemma4:31b"], "local_delay_ms": 2000, "local_failures": 1}
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1000))
+    palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    marked = [row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"]]
+    batch = [row["uuid"] for row in marked[:3]]
+
+    def keep_three(rows):
+        for row in rows:
+            if row["uuid"] in {r["uuid"] for r in marked[3:]}:
+                row["title"], row["description"] = "Manual title", "Manual description"
+
+    app.edit_rows(keep_three)
+    navigate(app, "Describe")
+    press_footer(app, 0)  # Refresh shows the three-record batch
+    names = [row["files"][0]["basename"] for row in marked[:3]]
+    img, region, _ = previews(app, palette, "Describe")
+    check(all(card_of(img, region, name, palette) for name in names), "a batch card is off screen")
+    openrouter, local, small, large, generate = describe_controls(img, region)
+    for choice in (local, large):  # the installed model
+        app.click(center(choice))
+        app.look(lambda img: pressed(img, choice), "provider/model choice")
+    summary = (generate[0], generate[1] + generate[3] + 2, generate[2], 24)
+    idle = crop(app.shot(), summary)
+    app.click(center(generate))
+    app.park()
+
+    def one_active(img):
+        region, _ = list_view(img)
+        active = generating(img, region)
+        return (len(active) == 1 and any(card_of(img, region, name, palette) == active[0] for name in names)
+                and img)
+
+    running = app.look(one_active, "exactly one card generating")
+    running.save(ctx.root / "running.png")
+    check(crop(running, summary) != idle, "no batch summary while running")
+
+    def persisted_early():
+        first, second, third = (app.row(uuid) for uuid in batch)
+        return second["state"] == "DESCRIBED" and "TODO_GENERATE" in third["title"]
+
+    wait_until(persisted_early, "an earlier record persisted while the batch runs", 20)
+    wait_until(lambda: app.row(batch[2])["state"] == "DESCRIBED", "the last record")
+    finished = app.look(lambda img: not generating(img, list_view(img)[0]) and img, "no card generating")
+    finished.save(ctx.root / "finished.png")
+    check(crop(finished, summary) != crop(running, summary), "the summary did not change")
+    failed = app.row(batch[0])
+    check(failed["state"] == "SCHEDULED" and "TODO_GENERATE" in failed["title"], f"failed record {failed}")
+    close_and_wait(app)
+
+
 def publish_row(img, palette, name):
     """The Publish table row (box) showing artwork `name`, from its thumbnail to the next one.
     Located per capture: editing options grows the row by its Save options button."""
