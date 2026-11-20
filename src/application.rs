@@ -26,6 +26,14 @@ pub struct BatchReport {
     pub failed: usize,
     pub results: Vec<RecordResult>,
 }
+/// A marked batch's progress, reported in order: the admitted ids once, then each record's start
+/// and finish.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BatchEvent {
+    Admitted(Vec<String>),
+    Started(String),
+    Finished(RecordResult),
+}
 
 pub struct Application {
     store: Arc<Store>,
@@ -126,7 +134,8 @@ impl Application {
             .await
     }
     pub async fn generate_marked(&self, request: &GenerationRequest) -> Result<BatchReport> {
-        self.generate_marked_inner(request, None).await
+        self.generate_marked_with_events(request, None, |_| {})
+            .await
     }
 
     pub async fn generate_marked_expected(
@@ -134,29 +143,34 @@ impl Application {
         request: &GenerationRequest,
         expected_ids: &[String],
     ) -> Result<BatchReport> {
-        self.generate_marked_inner(request, Some(expected_ids))
+        self.generate_marked_with_events(request, Some(expected_ids), |_| {})
             .await
     }
 
-    async fn generate_marked_inner(
+    /// Runs the marked batch, reporting its progress to `on_event`. Each record's reservation is
+    /// released as soon as it finishes, before its `Finished` event.
+    pub async fn generate_marked_with_events(
         &self,
         request: &GenerationRequest,
         expected_ids: Option<&[String]>,
+        mut on_event: impl FnMut(BatchEvent),
     ) -> Result<BatchReport> {
         validate_request(request)?;
         let ids = self.admit_marked(request.source, expected_ids)?;
         if ids.is_empty() {
             return Ok(BatchReport::default());
         }
-        let _lease = Lease {
+        let mut lease = Lease {
             busy: &self.busy,
             ids: ids.clone(),
         };
+        on_event(BatchEvent::Admitted(ids.clone()));
         self.preflight_local(request, Instant::now() + request.timeout)
             .await?;
         let mut report = BatchReport::default();
         let mut preferred: Option<String> = None;
         for uuid in ids {
+            on_event(BatchEvent::Started(uuid.clone()));
             let result = self
                 .generate_marked_record(&uuid, request, &mut preferred)
                 .await;
@@ -164,13 +178,15 @@ impl Application {
                 Ok(()) => {
                     report.succeeded += 1;
                     report.results.push(RecordResult {
-                        uuid,
+                        uuid: uuid.clone(),
                         saved: true,
                         error: None,
                     });
                 }
-                Err(error) => record_batch_error(&mut report, uuid, error)?,
+                Err(error) => record_batch_error(&mut report, uuid.clone(), error)?,
             }
+            lease.release(&uuid);
+            on_event(BatchEvent::Finished(report.results.last().unwrap().clone()));
         }
         Ok(report)
     }
@@ -337,6 +353,12 @@ impl Drop for PublishingLease<'_> {
 struct Lease<'a> {
     busy: &'a Mutex<HashSet<String>>,
     ids: Vec<String>,
+}
+impl Lease<'_> {
+    fn release(&mut self, id: &str) {
+        self.ids.retain(|held| held != id);
+        self.busy.lock().unwrap().remove(id);
+    }
 }
 impl Drop for Lease<'_> {
     fn drop(&mut self) {

@@ -291,6 +291,67 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
 }
 
 #[tokio::test]
+async fn batch_reports_progress_and_releases_each_finished_record() {
+    use publicator::application::{BatchEvent, RecordResult};
+    let f = Fixture::new();
+    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
+    f.write(json!(rows));
+    // The second record's request is held while the first record's uuid is edited.
+    let replies = vec![
+        completion("title-3"),
+        completion("title-2"),
+        completion("title-1"),
+    ];
+    let (server, started, release) = Server::start_paused_at(replies, 1);
+    let app = Arc::new(Application::new(
+        Arc::new(f.store.clone()),
+        client(server.url().to_owned()),
+    ));
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let batch = {
+        let (app, events) = (Arc::clone(&app), Arc::clone(&events));
+        tokio::spawn(async move {
+            app.generate_marked_with_events(&request(Source::OpenRouter), None, |event| {
+                events.lock().unwrap().push(event)
+            })
+            .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)).unwrap())
+        .await
+        .unwrap();
+    app.mutate(Some(&id(3)), |_| Ok(()))
+        .expect("a finished record accepts edits");
+    assert!(app.mutate(Some(&id(2)), |_| Ok(())).is_err());
+    assert!(app.mutate(Some(&id(1)), |_| Ok(())).is_err());
+    assert!(app.begin_publishing().is_err());
+    release.send(()).unwrap();
+    let report = batch.await.unwrap().unwrap();
+    server.finish();
+    let finished = |n| {
+        BatchEvent::Finished(RecordResult {
+            uuid: id(n),
+            saved: true,
+            error: None,
+        })
+    };
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            BatchEvent::Admitted(vec![id(3), id(2), id(1)]),
+            BatchEvent::Started(id(3)),
+            finished(3),
+            BatchEvent::Started(id(2)),
+            finished(2),
+            BatchEvent::Started(id(1)),
+            finished(1),
+        ]
+    );
+    assert_eq!((report.succeeded, report.failed), (3, 0));
+    app.begin_publishing().unwrap();
+}
+
+#[tokio::test]
 async fn successful_batches_save_in_provider_order() {
     for (source, expected) in [
         (Source::OpenRouter, vec![3, 2, 1]),
