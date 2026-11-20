@@ -347,6 +347,47 @@ done"#,
     );
 }
 #[tokio::test]
+async fn ui_publish_takes_headless_from_config() {
+    for headless in [false, true] {
+        let f = configured_fixture();
+        let log = f.path("open.json");
+        let worker = fake_worker(
+            &f,
+            &format!(
+                r#"while IFS= read -r line; do
+case "$line" in
+*'"type":"open"'*) printf '%s' "$line" > '{}'; echo '{{"protocol":1,"type":"ready"}}' ;;
+*'"type":"submit"'*) printf '%s' "$line" | jq -c '{{protocol:1,type:"scheduled",attempt_id,uuid}}' ;;
+*'"type":"close"'*) exit 0 ;;
+esac
+done"#,
+                log.display()
+            ),
+        );
+        std::fs::write(f.path("tags.txt"), "one\n").unwrap();
+        let config = publicator::config::Config {
+            tags: Some("tags.txt".into()),
+            headless,
+            ..publicator::config::Config::default()
+        };
+        let paths = publicator::config::Paths::resolve(Some(f.root.path()), None).unwrap();
+        let app = common::offline_app(Arc::new(
+            publicator::store::Store::new(paths, config).unwrap(),
+        ))
+        .with_publisher(Publisher::new(worker, PathBuf::from("unused")));
+        let cells = vec![publicator::publishing::PublishCell {
+            uuid: common::id(1),
+            platform: "deviantart".into(),
+        }];
+        let completion = app
+            .publish_selected_with_diagnostics(cells, Arc::default())
+            .await;
+        assert_eq!(completion.result.unwrap().published, 1);
+        let open: serde_json::Value = serde_json::from_slice(&std::fs::read(log).unwrap()).unwrap();
+        assert_eq!(open["headless"], headless);
+    }
+}
+#[tokio::test]
 async fn worker_stderr_is_drained_under_pressure_and_retained_in_report() {
     let f = configured_fixture();
     // The worker leads its own group; the witness lets the watchdog kill it if the run stalls.

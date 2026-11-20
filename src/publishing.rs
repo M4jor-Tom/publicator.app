@@ -194,7 +194,7 @@ impl Publisher {
                     &journal,
                     store,
                     &batch.jobs,
-                    request.headless,
+                    request.headless | store.config().headless,
                     zone,
                     &cancel,
                 )
