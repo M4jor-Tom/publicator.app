@@ -18,6 +18,7 @@ pub struct Profile {
     pub hour: u32,
     pub per_slot: usize,
     pub default_tiers: Vec<String>,
+    pub default_galleries: Vec<String>,
     pub default_price: Option<f64>,
 }
 
@@ -87,6 +88,7 @@ pub fn profiles(config: &Config) -> Result<Vec<Profile>> {
             }
             slots_seen.push((weekday, hour));
             let default_tiers = profile_tiers(table, config, &name)?;
+            let default_galleries = profile_galleries(table, config, &name)?;
             let default_price = profile_price(table)?;
             Ok(Profile {
                 name,
@@ -94,6 +96,7 @@ pub fn profiles(config: &Config) -> Result<Vec<Profile>> {
                 hour,
                 per_slot: capacity,
                 default_tiers,
+                default_galleries,
                 default_price,
             })
         })
@@ -154,6 +157,34 @@ fn profile_tiers(table: &toml::Table, config: &Config, name: &str) -> Result<Vec
         )));
     }
     Ok(default_tiers)
+}
+
+fn profile_galleries(table: &toml::Table, config: &Config, name: &str) -> Result<Vec<String>> {
+    let default_galleries = match table.get("default_galleries") {
+        None => vec![],
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| config_error("default_galleries must contain only strings"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(config_error(
+                "default_galleries must be an array of gallery names",
+            ));
+        }
+    };
+    if let Some(gallery) = default_galleries
+        .iter()
+        .find(|gallery| !config.galleries.contains(gallery))
+    {
+        return Err(config_error(format!(
+            "profile {name:?} has unconfigured default gallery {gallery:?}"
+        )));
+    }
+    Ok(default_galleries)
 }
 
 fn profile_price(table: &toml::Table) -> Result<Option<f64>> {
