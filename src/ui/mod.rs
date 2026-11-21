@@ -119,6 +119,8 @@ pub struct UiOptions {
     pub ai_timeout: Duration,
 }
 
+const WINDOW_WIDTH: f32 = 1100.0;
+
 pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Result {
     iced::application(
         move || App::new(application.clone(), options.clone()),
@@ -127,7 +129,7 @@ pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Resul
     )
     .subscription(App::subscription)
     .theme(app_theme)
-    .window_size((1100.0, 760.0))
+    .window_size((WINDOW_WIDTH, 760.0))
     .centered()
     .exit_on_close_request(false)
     .run()
@@ -193,6 +195,8 @@ pub enum Message {
     LoadFinished(u64, Result<Loaded, String>),
     Navigate(Tab),
     Scrolled(Tab, iced::widget::scrollable::AbsoluteOffset),
+    /// The window's new width.
+    WindowResized(f32),
     Edited {
         uuid: String,
         field: Field,
@@ -426,6 +430,7 @@ pub struct App {
     source: Source,
     model: ModelOption,
     describe_layout: describe::DescribeLayout,
+    window_width: f32,
     generation_states: HashMap<String, GenerationState>,
     batch: Option<BatchProgress>,
     pending_generation: Option<String>,
@@ -531,6 +536,7 @@ impl App {
             source: Source::OpenRouter,
             model,
             describe_layout: describe::load_layout(&application.store().paths().data_dir),
+            window_width: WINDOW_WIDTH,
             generation_states: HashMap::new(),
             batch: None,
             pending_generation: None,
@@ -858,11 +864,21 @@ impl App {
             | Message::CloseCancelPublish
             | Message::CloseWait
             | Message::PublishFinished(..) => self.update_selection(message),
-            Message::Scrolled(tab, offset) => {
-                self.scroll_offsets.insert(tab, offset);
+            Message::Scrolled(..) | Message::WindowResized(..) => {
+                self.update_viewport(message);
                 Task::none()
             }
             message => self.update_workflow(message),
+        }
+    }
+
+    fn update_viewport(&mut self, message: Message) {
+        match message {
+            Message::Scrolled(tab, offset) => {
+                self.scroll_offsets.insert(tab, offset);
+            }
+            Message::WindowResized(width) => self.window_width = width,
+            _ => unreachable!("message routed to viewport handler"),
         }
     }
 
@@ -917,6 +933,7 @@ impl App {
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
             | Message::Scrolled(..)
+            | Message::WindowResized(..)
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -2948,6 +2965,7 @@ impl App {
         Subscription::batch([
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
             iced::event::listen_with(publish_keyboard_event),
         ])
     }

@@ -1389,6 +1389,11 @@ def describe_rows_layout_and_batch_order(ctx):
     navigate(app, "Describe")
     previews(app, palette, "Describe")
     app.look(stacked, "Rows after a relaunch")
+    # A narrow window stacks each card like Grid: its Title input spans the card's width.
+    app.resize(560, 900)
+    app.look(lambda img: (listed := cards(img, list_view(img)[0]))
+             and any(box[2] > listed[0][2] * 0.8 for box in inputs(img, area(listed[0]))),
+             "narrow Rows cards with full-width fields")
     close_and_wait(app)
 
 

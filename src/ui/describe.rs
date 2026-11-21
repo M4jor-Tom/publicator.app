@@ -12,8 +12,11 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The Rows layout's thumbnail and action column widths.
-const ROW_ART_WIDTH: f32 = 240.0;
-const ROW_ACTIONS_WIDTH: f32 = 200.0;
+const ROW_ART_WIDTH: f32 = 160.0;
+const ROW_ACTIONS_WIDTH: f32 = 180.0;
+/// Below this window width a Rows card stacks like a Grid card, so its fields keep about
+/// 300 px beside nothing rather than a sliver between the thumbnail and the actions.
+const ROWS_MIN_WINDOW_WIDTH: f32 = 760.0;
 
 /// Publication thumbnails for the on-screen placeholders of the Schedule, Describe and Publish
 /// lists, which report row UUIDs (Pick's report candidate paths and match no row).
@@ -253,8 +256,9 @@ fn generation_line<'a>(state: &App, uuid: &str, marked: bool) -> Option<Element<
     })
 }
 
-/// A card in the current layout. Grid stacks the thumbnail, `details`, `actions` and `status`;
-/// Rows puts a smaller thumbnail, `details` over `status`, and `actions` side by side.
+/// A card in the current layout. Grid, and Rows in a narrow window, stack the thumbnail,
+/// `details`, `actions` and `status`; Rows puts a smaller thumbnail, `details` over `status`,
+/// and `actions` side by side.
 fn layout_card<'a>(
     state: &'a App,
     uuid: &str,
@@ -262,22 +266,23 @@ fn layout_card<'a>(
     actions: Option<Column<'a, Message>>,
     status: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let content: Element<'a, Message> = match state.describe_layout {
-        DescribeLayout::Grid => column![state.row_art(uuid, 240.0), details]
+    let side_by_side = state.describe_layout == DescribeLayout::Rows
+        && state.window_width >= ROWS_MIN_WINDOW_WIDTH;
+    let content: Element<'a, Message> = if side_by_side {
+        let actions = actions.map(|actions| actions.width(Length::Fixed(ROW_ACTIONS_WIDTH)));
+        row![
+            container(state.row_art(uuid, 160.0)).width(Length::Fixed(ROW_ART_WIDTH)),
+            column![details, status].spacing(8).width(Length::Fill),
+        ]
+        .push(actions.map(Element::from))
+        .spacing(16)
+        .into()
+    } else {
+        column![state.row_art(uuid, 240.0), details]
             .push(actions.map(Element::from))
             .push(status)
             .spacing(8)
-            .into(),
-        DescribeLayout::Rows => {
-            let actions = actions.map(|actions| actions.width(Length::Fixed(ROW_ACTIONS_WIDTH)));
-            row![
-                container(state.row_art(uuid, 160.0)).width(Length::Fixed(ROW_ART_WIDTH)),
-                column![details, status].spacing(8).width(Length::Fill),
-            ]
-            .push(actions.map(Element::from))
-            .spacing(16)
             .into()
-        }
     };
     style::card(content).into()
 }
