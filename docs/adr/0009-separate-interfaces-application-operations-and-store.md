@@ -176,7 +176,7 @@ concurrent-result merges, publisher retry and CLI generation with test doubles.
 
 ### Related
 
-- [Gallery UI](../features/gallery-ui.md)
-- [Publications store](../features/publications-store.md)
-- [AI metadata](../features/ai-metadata.md)
-- [DeviantArt publishing](../features/deviantart-publish.md)
+- [Gallery UI](../features/gallery-ui.feature)
+- [Publications store](../features/publications-store.feature)
+- [AI metadata](../features/ai-metadata.feature)
+- [DeviantArt publishing](../features/deviantart-publish.feature)

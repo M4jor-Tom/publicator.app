@@ -38,7 +38,7 @@ Apps are Nix aliases backed by Rust binaries: `ui`, `da-publish`, `generate-meta
 
 ## Operations and safety
 
-Read the owning file in `docs/features/` and relevant Rust callers before changing behavior. UI and CLI use shared Rust application operations and Store; no HTTP UI or Python business-logic bridge remains. File locks cover short validated mutations only, not provider/browser work. Successful sends are recorded per target; an intent with unknown outcome requires explicit reconciliation, never automatic resend.
+Read the owning Gherkin spec and `docs/features/index.toml` and relevant Rust callers before changing behavior. UI and CLI use shared Rust application operations and Store; no HTTP UI or Python business-logic bridge remains. File locks cover short validated mutations only, not provider/browser work. Successful sends are recorded per target; an intent with unknown outcome requires explicit reconciliation, never automatic resend.
 
 AI generation supports OpenRouter and local Ollama. A local service URL override is available only to the CLI via `PUBLICATOR_OLLAMA_URL`; it is a dependency endpoint, not a fake/test mode. Tests use loopback fixtures. Never install a model, spend provider credentials, access the real profile, or publish real artwork as part of validation.
 
@@ -64,7 +64,7 @@ Job commits and PR titles are Conventional Commits, `<type>[(scope)][!]: <descri
 
 **Seeing the UI.** There is no dev server or browser, and job ports are unused:
 the UI is a native Iced window. Run the `ui_acceptance` fixtures (fake services
-only; scenarios in `docs/features/gallery-ui.md`) on a private Xvfb display,
+only; fixture scenarios in `docs/testing.md`, gallery behavior in `docs/features/gallery-ui.feature`) on a private Xvfb display,
 screenshot it to `/tmp/factory-<job-id>-<agent>-*.png`, and read the PNGs. Never
 launch the real `ui`, `login` or publisher.
 

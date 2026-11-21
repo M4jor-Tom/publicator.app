@@ -3,7 +3,7 @@
 //! `tests/python/recording_worker.py` runs the real `--check-steps` CLI and the real
 //! `serve(..., session_factory)` with an injected recording session, so framing, validation
 //! and the event loop are production code; only the browser is replaced. See "Worker trust
-//! boundary" in `docs/features/deviantart-publish.md` for which side owns each guarantee.
+//! boundary" in `docs/features/deviantart-publish.feature` for which side owns each guarantee.
 mod common;
 use common::{Fixture, id, row};
 use publicator::{

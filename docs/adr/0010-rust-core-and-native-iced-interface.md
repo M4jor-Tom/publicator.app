@@ -46,6 +46,6 @@ Retaining HTTP as a compatibility frontend would keep two UI stacks and require 
 ## Related
 
 - [0009 historical UI/CLI and Store decision (superseded for interface implementation)](0009-separate-interfaces-application-operations-and-store.md)
-- [Gallery UI](../features/gallery-ui.md)
-- [Publications store](../features/publications-store.md)
-- [DeviantArt publishing](../features/deviantart-publish.md)
+- [Gallery UI](../features/gallery-ui.feature)
+- [Publications store](../features/publications-store.feature)
+- [DeviantArt publishing](../features/deviantart-publish.feature)

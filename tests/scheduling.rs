@@ -226,15 +226,24 @@ fn resolve_wall_clock_ignores_embedded_offset() {
 #[test]
 fn repack_reserves_partially_delivered_history_in_any_phase() {
     let cfg =
-        config("timezone='UTC'\n[[profiles]]\nname='default'\nday='tuesday'\nhour=20\nper_slot=1");
+        config("timezone='UTC'\n[[profiles]]\nname='default'\nday='tuesday'\nhour=20\nper_slot=2");
     let slot = epoch("2026-01-06T20:00:00Z");
-    let delivered = json!({"state":"PICKED", "submissionTimestamp":slot,
-        "apparitions":[{"state":"published_or_scheduled"}, {"state":"unpublished"}]});
-    let mut rows: Publications = vec![delivered.clone(), json!({"state":"PICKED"})];
+    let delivered = json!({"state":"PICKED", "submissionTimestamp":slot, "apparitions":[
+        {"state":"published_or_scheduled"}, {"state":"published_or_scheduled"}, {"state":"unpublished"}
+    ]});
+    let mut rows: Publications = vec![
+        delivered.clone(),
+        json!({"state":"PICKED"}),
+        json!({"state":"PICKED"}),
+    ];
     repack(&mut rows, &cfg, slot - 3600).unwrap();
     assert_eq!(rows[0], delivered);
     assert_eq!(
         rows[1]["apparitionTimestampIfDifferentThanSubmission"],
+        slot
+    );
+    assert_eq!(
+        rows[2]["apparitionTimestampIfDifferentThanSubmission"],
         slot + 7 * 86400
     );
 }

@@ -32,6 +32,17 @@ compilation and a green gate say nothing about unlisted paths (see [Unmeasured](
 | Manual recovery and reconciliation evidence per `.claude/skills/publish-deviantart/SKILL.md` | none | supervised |
 | Native window replay (`nix run .#native-acceptance [STORY ...]` runs `scripts/native-ui-replay.py` on a private Xvfb against `examples/ui_acceptance.rs` fakes): focus, keyboard, scroll, visible images, long names kept inside cards, persisted edits, close routes, tile deletion | replay stories; `scripts/native-ui-smoke.sh` stays the supervised human tool | automated: the post-commit gate and CI's `native-acceptance` job |
 
+## Development sandbox
+
+Run `nix develop -c ui-sandbox [SCENARIO]` to launch the native UI with fake AI and publishing services. The default is `mixed`; other fixtures are `gallery`, `calendar`, `empty`, `history`, `publish`, `prompt-search`, `prompt-search-missing-archive` and `reopen`. Each launch prints a fresh temporary data directory and preserves it for inspection. This dev-shell command is not a production package. By contrast, `scripts/dummy-data.sh` creates disposable data but does **not** replace real services.
+
+For the publishing step check without Nix wrappers, run `nix develop -c cargo run --bin publicator -- check-steps` from the checkout. The default launcher is `python/publicator-da-worker` and the manual/recovery contract is `.claude/skills/publish-deviantart/SKILL.md`; `PUBLICATOR_WORKER` and `PUBLICATOR_SKILL` override those defaults. Use the step check and offline fixtures for validation, never a real login or submission.
+
+## Maintenance limits
+
+- Prompt archive rebuilds buffer Git blobs and retain the previous index until the swap. The accepted size is about 100 MB of object content (about 258 MiB peak RSS in the debug audit at 100 MiB of blobs). Beyond that, stream the objects rather than raising the ceiling.
+- If migrating from the old thumbnail fallback, remove only the data directory's `.thumbs/` to rebuild oversized cached originals. Never remove `.publicator/` staging or receipts to clear a failure, or unlink the persistent store lock.
+
 ## Unmeasured
 
 - Branch and line coverage are not measured, and no coverage tool is part of the gate or dev

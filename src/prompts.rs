@@ -232,7 +232,7 @@ impl PromptArchive {
     fn build_index(&self, head: Option<String>) -> Result<Index> {
         // ponytail: buffers every object, then copies blob bodies (measured ~2x object bytes,
         // plus the live old index on a rebuild); accepted ceiling ~100 MB of object content
-        // (prompt-mapping.md). Past it, stream cat-file through a BufRead instead.
+        // (docs/testing.md, Maintenance limits). Past it, stream cat-file through a BufRead instead.
         let stream = self.git(&["cat-file", "--batch-all-objects", "--batch"])?;
         let (by_oid, blobs) = self.read_blobs(&stream).map_err(|error| match error {
             Error::Protocol(reason) => Error::PromptArchiveUnavailable(reason),

@@ -38,7 +38,7 @@ recipe in AGENTS.md, in the worktree, as agent `ux`.
 - The flow does what the spec promises, with no dead ends.
 - Loading, empty and error states exist and say something useful.
 - The user is one artist on their own desktop, working through the Pick,
-  describe, schedule, publish and calendar views (`docs/features/gallery-ui.md`).
+  describe, schedule, publish and calendar views (`docs/features/gallery-ui.feature`).
   There is no sign-in and no roles. Their work must survive: destructive
   actions confirm, failed provider or publish calls say what happened and can
   be retried, and state after a restart matches what they saw.

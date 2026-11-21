@@ -1641,7 +1641,7 @@ def prompt_search_exact_and_missing_archive(ctx):
     palette = Palette.files(app.fixture.glob("pick/*.png"))
     search(app)
     img, _, blocks = previews(app, palette, "Pick")
-    # A missing archive disables prompt lookup (docs/features/config.md): no prompt inputs.
+    # A missing archive disables prompt lookup (docs/features/config.feature): no prompt inputs.
     check([n for n, _ in blocks] == ["plain.png"], f"missing archive listed {blocks}")
     check(not inputs(img, (0, 0, 400, img.h)), "prompt search offered without an archive")
     close_and_wait(app)

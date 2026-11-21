@@ -1,18 +1,18 @@
 # docs/
 
-Feature maintenance docs live in `features/`. Each describes Does / Run / Code / Tests / Config / Data / Decisions / Verify, then flow, invariants, and operational gotchas. Read the owning feature before changing code.
+Read the owning feature before changing code. Each Gherkin spec describes behavior. [The feature index](features/index.toml) lists its code, tests, and run/verify commands under the `.feature` filename without its extension. Use `verify` for offline validation; `run` can operate on real data or services.
 
 ## Features
 
-- [Configuration](features/config.md) — data-directory configuration and validation.
-- [Publications store](features/publications-store.md) — JSON data contract, locks, atomic writes and recovery state.
-- [Images and thumbnails](features/images-thumbnails.md) — candidate discovery, cache and upload preparation.
-- [Gallery UI](features/gallery-ui.md) — native Iced Pick / Schedule / Describe / Publish workflow.
-- [AI metadata](features/ai-metadata.md) — OpenRouter and local Ollama generation and consent.
-- [Scheduling](features/scheduling.md) — timezone-aware dates and capacity.
-- [Calendar](features/calendar.md) — read-only native history and apparition navigation.
-- [Prompt mapping](features/prompt-mapping.md) — content-addressed Git archive mapping.
-- [DeviantArt publishing](features/deviantart-publish.md) — Rust orchestration and retained Python Playwright boundary.
+- [Configuration](features/config.feature) — data-directory configuration and validation.
+- [Publications store](features/publications-store.feature) — JSON data contract, locks, atomic writes and recovery state.
+- [Images and thumbnails](features/images-thumbnails.feature) — candidate discovery, cache and upload preparation.
+- [Gallery UI](features/gallery-ui.feature) — native Iced Pick / Schedule / Describe / Publish workflow.
+- [AI metadata](features/ai-metadata.feature) — OpenRouter and local Ollama generation and consent.
+- [Scheduling](features/scheduling.feature) — timezone-aware dates and capacity.
+- [Calendar](features/calendar.feature) — read-only native history and apparition navigation.
+- [Prompt mapping](features/prompt-mapping.feature) — content-addressed Git archive mapping.
+- [DeviantArt publishing](features/deviantart-publish.feature) — Rust orchestration and retained Python Playwright boundary.
 
 ## Architecture decisions
 
@@ -93,6 +93,6 @@ publishing safety transition and the paths no check measures.
 
 - Document each symbol in the feature that owns its implementation; other files link there.
 - `src/` and `assets/publicationsSchema.json` are Rust application/code assets. `python/publicator_da/` is browser-only. The publishing skill remains a static manual/recovery contract.
-- Update feature docs, tests and code together. `tests/docs.rs` checks concrete paths in maintained docs; glob/placeholders, ROADMAP and historical ADR paths are intentionally excluded.
+- Update feature docs, tests and code together. `tests/docs.rs` checks concrete paths in maintained Markdown, validates the feature index, and parses every Gherkin spec. Scenarios document behavior; the indexed tests exercise it. Markdown glob/placeholders, ROADMAP and historical ADR paths are intentionally excluded.
 - Add architecture decisions with the next ADR number; mark superseded decisions without erasing history.
 - Plans, execution reports, screenshots and temporary fixtures belong in `/tmp`, not Git.

@@ -1,0 +1,53 @@
+[ai-metadata]
+code = ["src/metadata/mod.rs", "src/metadata/local.rs", "src/metadata/openrouter.rs", "src/application.rs", "src/artwork.rs", "src/workflow.rs"]
+tests = ["tests/metadata.rs", "tests/local_metadata.rs", "tests/openrouter.rs", "tests/application_ai.rs", "tests/ui_describe.rs"]
+run = "nix run .#generate-meta -- --help"
+verify = "nix develop -c cargo test --locked --features desktop --test metadata --test local_metadata --test openrouter --test application_ai --test ui_describe"
+
+[calendar]
+code = ["src/calendar.rs", "src/ui/calendar.rs", "src/ui/mod.rs"]
+tests = ["tests/calendar.rs", "tests/ui_publish_calendar.rs"]
+run = "nix run .#ui -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --features desktop --lib --test calendar --test ui_publish_calendar"
+
+[config]
+code = ["src/config.rs", "src/model.rs", "src/scheduling.rs", "src/prompts.rs", "src/bin/publicator.rs"]
+tests = ["tests/config.rs", "tests/store.rs", "tests/cli.rs"]
+run = "nix run .#validate -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --test config --test store --test cli"
+
+[deviantart-publish]
+code = ["src/publishing.rs", "src/publish_journal.rs", "src/publish_protocol.rs", "src/artwork.rs", "python/publicator_da/worker.py", "python/publicator_da/browser.py", ".claude/skills/publish-deviantart/SKILL.md"]
+tests = ["tests/publishing.rs", "tests/publish_protocol.rs", "tests/publish_journal.rs", "tests/worker_integration.rs", "tests/cli.rs", "tests/python/test_worker.py", "tests/python/test_browser.py", "tests/python/test_browser_dom.py", "tests/python/test_pw_daemon.py"]
+run = "nix run .#da-publish -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --test publishing --test publish_protocol --test publish_journal --test worker_integration --test cli && nix develop -c env PYTHONPATH=python pytest tests/python -q && nix run .#check-steps"
+
+[gallery-ui]
+code = ["src/ui/mod.rs", "src/ui/pick.rs", "src/ui/schedule.rs", "src/ui/describe.rs", "src/ui/publish.rs", "src/ui/drafts.rs", "src/application.rs", "src/workflow.rs"]
+tests = ["tests/ui_workflow.rs", "tests/ui_describe.rs", "tests/ui_drafts.rs", "tests/ui_publish_calendar.rs", "scripts/native-ui-replay.py", "examples/ui_acceptance.rs"]
+run = "nix run .#ui -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --features desktop --test ui_workflow --test ui_describe --test ui_drafts --test ui_publish_calendar && nix run .#native-acceptance"
+
+[images-thumbnails]
+code = ["src/images.rs", "src/artwork.rs", "src/ui/preview.rs", "src/publishing.rs", "src/store.rs"]
+tests = ["tests/images.rs", "tests/images_media.rs", "tests/images_fs.rs", "tests/prompt_search.rs", "tests/publishing.rs"]
+run = "nix run .#ui -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --test images --test images_media --test images_fs --test prompt_search --test publishing"
+
+[prompt-mapping]
+code = ["src/prompts.rs", "src/config.rs", "src/ui/prompt.rs", "src/bin/publicator.rs"]
+tests = ["tests/prompts.rs", "tests/prompt_search.rs", "tests/ui_workflow.rs"]
+run = "nix run .#prompt-audit -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --features desktop --test prompts --test prompt_search --test ui_workflow"
+
+[publications-store]
+code = ["src/store.rs", "src/model.rs", "src/workflow.rs", "src/application.rs", "src/migration.rs", "assets/publicationsSchema.json"]
+tests = ["tests/store.rs", "tests/config.rs", "tests/migration.rs", "tests/migration_idempotence.rs", "tests/workflow_dates.rs", "tests/workflow_metadata.rs", "tests/workflow_platforms.rs", "tests/publishing.rs"]
+run = "nix run .#validate -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --test store --test config --test migration --test migration_idempotence --test workflow_dates --test workflow_metadata --test workflow_platforms --test publishing"
+
+[scheduling]
+code = ["src/scheduling.rs", "src/workflow.rs", "src/store.rs", "src/ui/schedule.rs"]
+tests = ["tests/scheduling.rs", "tests/workflow_dates.rs", "tests/store.rs", "tests/ui_workflow.rs"]
+run = "nix run .#ui -- --data-dir DIR"
+verify = "nix develop -c cargo test --locked --features desktop --test scheduling --test workflow_dates --test store --test ui_workflow"
