@@ -592,6 +592,35 @@ fn resolved_receipts_accept_only_their_own_decision_and_terminal() {
 }
 
 #[test]
+fn unresolved_attempt_blocks_rolling_back_its_publication_until_reconciled() {
+    let f = publish_fixture();
+    let (job, snap) = job_for(&f);
+    let journal = PublishJournal::new(f.root.path()).unwrap();
+    journal.begin(&job, &snap).unwrap();
+    let store = std::sync::Arc::new(
+        publicator::store::Store::new(f.store.paths().clone(), f.store.config().clone()).unwrap(),
+    );
+    let application = common::offline_app(store.clone());
+    let before = std::fs::read(&f.store.paths().json).unwrap();
+    assert!(matches!(
+        application.roll_back(&id(1)),
+        Err(publicator::error::Error::ReconciliationRequired(_))
+    ));
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    journal
+        .reconcile(
+            &store,
+            &job.attempt_id,
+            publicator::publish_journal::ReconcileOutcome::NotSubmitted,
+        )
+        .unwrap();
+    assert_eq!(
+        application.roll_back(&id(1)).unwrap(),
+        publicator::model::Phase::Scheduled
+    );
+}
+
+#[test]
 fn unresolved_attempt_blocks_deleting_its_publication_until_reconciled() {
     let f = publish_fixture();
     let (job, snap) = job_for(&f);
