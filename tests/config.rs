@@ -419,3 +419,22 @@ fn duplicate_uuids_fail_validation_reads_and_mutations_without_writing() {
     assert!(!called);
     assert_eq!(fs::read(&f.store.paths().json).unwrap(), before);
 }
+
+#[test]
+fn openrouter_key_comes_from_the_local_toml_without_echoing_it_on_error() {
+    use publicator::config::openrouter_key;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(openrouter_key(dir.path()).unwrap(), None);
+    let local = dir.path().join("publicator.local.toml");
+    fs::write(&local, "[openrouter]\nkey = \"\"\n").unwrap();
+    assert_eq!(openrouter_key(dir.path()).unwrap(), None);
+    fs::write(&local, "[openrouter]\nkey = \"sk-or-secret\"\n").unwrap();
+    assert_eq!(
+        openrouter_key(dir.path()).unwrap().as_deref(),
+        Some("sk-or-secret")
+    );
+    fs::write(&local, "[openrouter]\nkey = sk-or-secret\n").unwrap();
+    let error = openrouter_key(dir.path()).unwrap_err().to_string();
+    assert!(error.contains("publicator.local.toml"), "{error}");
+    assert!(!error.contains("sk-or-secret"), "{error}");
+}

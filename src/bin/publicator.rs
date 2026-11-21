@@ -123,12 +123,22 @@ fn paths(data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<(Paths, Con
     let store = Arc::new(Store::new(paths.clone(), config.clone())?);
     Ok((paths, config, store))
 }
-fn metadata_client() -> MetadataClient {
+fn metadata_client(data_dir: Option<&Path>) -> Result<MetadataClient> {
     let mut endpoints = Endpoints::default();
     if let Some(ollama) = std::env::var_os("PUBLICATOR_OLLAMA_URL") {
         endpoints.ollama = ollama.to_string_lossy().into_owned();
     }
-    MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"))
+    let client = MetadataClient::new(reqwest::Client::new(), endpoints, PathBuf::from("llmfit"));
+    Ok(
+        match data_dir
+            .map(publicator::config::openrouter_key)
+            .transpose()?
+            .flatten()
+        {
+            Some(key) => client.with_openrouter_key(key),
+            None => client,
+        },
+    )
 }
 fn choose_model(source: Source, requested: Option<&str>) -> Result<ModelOption> {
     match source {
@@ -213,7 +223,7 @@ fn delete_publication(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBu
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    Application::new(store, metadata_client()).delete_publication(uuid, now)?;
+    Application::new(store, metadata_client(None)?).delete_publication(uuid, now)?;
     println!("deleted {uuid}");
     Ok(())
 }
@@ -227,7 +237,7 @@ async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {
         data_dir,
         json,
     } = args;
-    let (_, _, store) = paths(data_dir, json)?;
+    let (paths, _, store) = paths(data_dir, json)?;
     let source: Source = source.into();
     let model = choose_model(source, model.as_deref())?;
     if timeout == 0 {
@@ -240,7 +250,7 @@ async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {
                 .iter()
                 .any(|k| r.get(*k).and_then(serde_json::Value::as_str) == Some(GENERATE_MARKER))
     });
-    let client = metadata_client();
+    let client = metadata_client(Some(&paths.data_dir))?;
     let install_missing = if source == Source::Local && eligible {
         local_install_consent(&client, &model, Duration::from_secs(timeout), yes).await?
     } else {
@@ -316,7 +326,7 @@ fn prompt_install_consent(model: &ModelOption) -> Result<bool> {
     }
 }
 async fn vision_models() -> Result<()> {
-    let client = metadata_client();
+    let client = metadata_client(None)?;
     for model in VISION_MODELS.iter() {
         let fit = client.local_fit(model).await?;
         println!(
@@ -375,7 +385,8 @@ async fn da_publish(args: DaPublishArgs) -> Result<()> {
         return reconcile(&paths, &store, &attempt, outcome, url);
     }
     let ids = publication_ids(&store, uuid, all)?;
-    let app = Application::new(store.clone(), metadata_client()).with_publisher(publisher);
+    let app = Application::new(store.clone(), metadata_client(Some(&paths.data_dir))?)
+        .with_publisher(publisher);
     let result = until_interrupted(app.publish(
         PublishRequest {
             uuids: ids,

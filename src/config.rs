@@ -151,6 +151,27 @@ impl Config {
         Ok(config)
     }
 }
+/// `[openrouter].key` from the untracked `publicator.local.toml`; kept out of `Config` so it never reaches `Debug` output.
+pub fn openrouter_key(data_dir: &Path) -> Result<Option<String>> {
+    let path = data_dir.join("publicator.local.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    #[derive(Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        openrouter: OpenRouter,
+    }
+    #[derive(Deserialize, Default)]
+    struct OpenRouter {
+        key: Option<String>,
+    }
+    let raw: Raw = toml::from_str(&text)
+        .map_err(|e| Error::Config(format!("{}: {}", path.display(), e.message())))?;
+    Ok(raw.openrouter.key.filter(|key| !key.is_empty()))
+}
 impl PromptGrammar {
     pub fn compile(config: &PromptConfig) -> Result<Self> {
         let pattern = RegexBuilder::new()

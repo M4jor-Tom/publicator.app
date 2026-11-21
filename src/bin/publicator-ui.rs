@@ -31,12 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let paths = Paths::resolve(args.data_dir.as_deref(), args.json.as_deref())?;
     let config = Config::load(&paths.data_dir)?;
+    let openrouter_key = publicator::config::openrouter_key(&paths.data_dir)?;
     let store = Arc::new(Store::new(paths, config)?);
-    let metadata = MetadataClient::new(
+    let mut metadata = MetadataClient::new(
         reqwest::Client::new(),
         gui_metadata_endpoints(),
         PathBuf::from("llmfit"),
     );
+    if let Some(key) = openrouter_key {
+        metadata = metadata.with_openrouter_key(key);
+    }
     let application =
         Arc::new(Application::new(store, metadata).with_publisher(Publisher::from_env()));
     Ok(publicator::ui::run(
