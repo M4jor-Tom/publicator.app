@@ -259,7 +259,8 @@ fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
 pub(super) fn today_week_offset() -> Task<f32> {
     #[derive(Default)]
     struct Find {
-        list: Option<f32>,
+        /// The list content's top and how far it can scroll.
+        list: Option<(f32, f32)>,
         week: Option<f32>,
     }
     impl Operation<f32> for Find {
@@ -274,18 +275,20 @@ pub(super) fn today_week_offset() -> Task<f32> {
         fn scrollable(
             &mut self,
             id: Option<&Id>,
-            _bounds: Rectangle,
+            bounds: Rectangle,
             content_bounds: Rectangle,
             _translation: Vector,
             _state: &mut dyn operation::Scrollable,
         ) {
             if id == Some(&Id::new(super::Tab::Calendar.scroll_id())) {
-                self.list = Some(content_bounds.y);
+                let end = (content_bounds.height - bounds.height).max(0.0);
+                self.list = Some((content_bounds.y, end));
             }
         }
         fn finish(&self) -> operation::Outcome<f32> {
             match (self.list, self.week) {
-                (Some(list), Some(week)) => operation::Outcome::Some(week - list),
+                // Clamped as drawn: an offset past the end would follow later growth down.
+                (Some((top, end)), Some(week)) => operation::Outcome::Some((week - top).min(end)),
                 _ => operation::Outcome::None,
             }
         }
