@@ -1490,6 +1490,12 @@ def month_heading(img):
     return min(stem[1] for stem in heading) if heading else None
 
 
+def on_today(img):
+    """The list is scrolled down and today's (green) outlined cell is at its top."""
+    (_, top, right, _), thumb = list_view(img)
+    return thumb and thumb[1] > top + 4 and img.boxes(TODAY, (0, top, right, top + 200), 60, 60)
+
+
 def calendar_days(img):
     """The current month's day cells in view, in day order, as boxes from a day's label strip
     (its #222 fill around the day number, above any event) down to the next week's labels.
@@ -1571,6 +1577,8 @@ def calendar_zone_prompts_overflow_url_and_jumps(ctx):
     now = datetime.datetime.now(KIRITIMATI)
     count = (datetime.date(now.year + now.month // 12, now.month % 12 + 1, 1) - datetime.timedelta(days=1)).day
     navigate(app, "Calendar")
+    # First opening: scrolled past the history, today's outlined cell near the list's top.
+    app.look(on_today, "Calendar to open on today's week")
     jump(app, 1.0)
     # Zone boundary: local day 1 holds the 00:xx events that are the previous month in UTC, and
     # shows every one of them (a chip per apparition), however many.
