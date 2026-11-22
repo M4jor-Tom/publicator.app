@@ -63,6 +63,11 @@ class Failure(Exception):
     pass
 
 
+def needs_generation(row):
+    """Mirrors model::needs_generation: SCHEDULED with a blank title or description."""
+    return row["state"] == "SCHEDULED" and not (row.get("title", "").strip() and row.get("description", "").strip())
+
+
 def check(condition, message):
     if not condition:
         raise Failure(message)
@@ -1207,7 +1212,7 @@ def describe_model_install_consent(ctx):
     app = ctx.launch("gallery", settings={"installed_models": ["gemma4:31b"]})
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
     navigate(app, "Describe")
-    marked = next(row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"])
+    marked = next(row for row in app.rows() if needs_generation(row))
     img, region, _ = previews(app, palette, "Describe")
     openrouter, local, small, large, _ = describe_controls(img, region)
     for choice in (local, small):
@@ -1263,7 +1268,7 @@ def describe_batch_progress_per_card_and_summary(ctx):
                 "ai_timeout_ms": 60000}
     app = ctx.launch("gallery", settings=settings, size=(1500, 1400))  # two card rows
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
-    marked = [row for row in app.rows() if row["state"] == "SCHEDULED" and "TODO_GENERATE" in row["title"]]
+    marked = [row for row in app.rows() if needs_generation(row)]
 
     def keep_three(rows):
         for row in rows:
@@ -1304,7 +1309,7 @@ def describe_batch_progress_per_card_and_summary(ctx):
     check(crop(running, summary) != idle, "no batch summary while running")
 
     second, third = (app.row(uuid) for uuid in batch[1:])
-    check(second["state"] == "DESCRIBED" and "TODO_GENERATE" in third["title"],
+    check(second["state"] == "DESCRIBED" and needs_generation(third),
           "an earlier record not persisted while the batch runs")
     (app.fixture / "local-chat-release").write_text("release")
     wait_until(lambda: app.row(batch[2])["state"] == "DESCRIBED", "the last record")
@@ -1322,7 +1327,7 @@ def describe_batch_progress_per_card_and_summary(ctx):
     finished.save(ctx.root / "finished.png")
     check(crop(finished, summary) != crop(running, summary), "the summary did not change")
     failed = app.row(batch[0])
-    check(failed["state"] == "SCHEDULED" and "TODO_GENERATE" in failed["title"], f"failed record {failed}")
+    check(needs_generation(failed), f"failed record {failed}")
     close_and_wait(app)
 
 
@@ -1546,7 +1551,7 @@ def day_events(app, day, now):
     for row in app.rows():
         local = datetime.datetime.fromtimestamp(schedule_of(row), KIRITIMATI)
         if (local.year, local.month, local.day) == (now.year, now.month, day):
-            title = "AI metadata pending" if "TODO_GENERATE" in row["title"] + row["description"] else row["title"]
+            title = "AI metadata pending" if needs_generation(row) else row["title"]
             found += [(schedule_of(row), title)] * len(row.get("apparitions", []))
     return [title for _, title in sorted(found, key=lambda event: event[0])]
 
