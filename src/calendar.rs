@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    model::{Delivery, GENERATE_MARKER, effective_schedule},
+    model::{Delivery, effective_schedule, needs_generation},
 };
 use chrono::{DateTime, Datelike, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -27,15 +27,10 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let title = row.get("title").and_then(Value::as_str).unwrap_or_default();
-        let description = row
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let title = if title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER) {
+        let title = if needs_generation(row) {
             "AI metadata pending"
         } else {
-            title
+            row.get("title").and_then(Value::as_str).unwrap_or_default()
         };
         let timestamp = effective_schedule(row).unwrap_or(0);
         let basename = row

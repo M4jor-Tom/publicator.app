@@ -4,7 +4,7 @@ mod common;
 use common::{
     Fixture,
     http::{Reply, completion},
-    id, row, thumbs, with_markers,
+    id, row, thumbs, with_blank_metadata,
 };
 use iced::Element;
 use publicator::{
@@ -76,8 +76,8 @@ fn edit_manual_metadata(app: &mut App) {
     }
 }
 
-fn marker_row(n: u64) -> serde_json::Value {
-    with_markers(row(n, "SCHEDULED"))
+fn blank_row(n: u64) -> serde_json::Value {
+    with_blank_metadata(row(n, "SCHEDULED"))
 }
 
 fn fake_llmfit(f: &Fixture, level: &str, notes: &[&str]) -> std::path::PathBuf {
@@ -324,7 +324,7 @@ async fn missing_good_model_requires_confirmation_and_only_then_pulls() {
 #[tokio::test]
 async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1), marker_row(2)]));
+    f.write(json!([blank_row(1), blank_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let server =
         common::http::Server::start(vec![Reply::new("/api/tags", 200, json!({"models": []}))]);
@@ -378,7 +378,7 @@ async fn dirty_local_batch_requires_consent_and_refusal_never_pulls() {
 #[tokio::test]
 async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission() {
     let f = Fixture::new();
-    f.write(json!([f.marked_row(1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), blank_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
 
@@ -393,7 +393,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
 
     // The generation Task has not been polled/admitted yet. Its expected batch
     // must still be the original two UUIDs, despite the dirty draft replacing
-    // one marker during the required save.
+    // one blank field during the required save.
     assert_eq!(f.read()[0]["title"], "Manual title");
     let after_flush = std::fs::read(&f.store.paths().json).unwrap();
     let finished = common::ui::first_output(generation).await;
@@ -409,7 +409,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
     );
     let _ = app.update(finished);
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), after_flush);
-    assert_eq!(f.read()[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[1]["title"], "");
     assert!(!app.local_install_consent_pending());
     let calls = server.requests();
     assert!(!calls.iter().any(|call| call["path"] == "/api/pull"));
@@ -419,7 +419,7 @@ async fn installed_local_batch_keeps_identity_through_dirty_flush_and_admission(
 #[tokio::test]
 async fn installed_local_batch_rejects_membership_changed_before_admission() {
     let f = Fixture::new();
-    f.write(json!([f.marked_row(1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), blank_row(2)]));
     let (mut app, server) = good_local_status_app(&f, true);
     select_local(&mut app).await;
     let status = common::ui::first_output(app.update(Message::GenerateMarked)).await;
@@ -459,7 +459,7 @@ async fn installed_local_batch_rejects_membership_changed_before_admission() {
 #[tokio::test]
 async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
     let f = Fixture::new();
-    f.write(json!([f.marked_row(1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), blank_row(2)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let tags = json!({"models": []});
     let server = common::http::Server::start(vec![Reply::new("/api/tags", 200, tags.clone())]);
@@ -514,7 +514,7 @@ async fn batch_local_install_consent_rejects_a_changed_eligible_set() {
 #[tokio::test]
 async fn cancel_missing_model_consent_keeps_saved_bytes_and_never_pulls_or_chats() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
@@ -554,7 +554,7 @@ async fn older_target_fit_result_cannot_authorize_newer_target_consent() {
     assert!(app.local_install_consent_pending());
     let generation = app.update(Message::ConfirmLocalInstall);
     let _ = app.update(common::ui::first_output(generation).await);
-    assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[0]["title"], "");
     assert_eq!(f.read()[1]["title"], "Only second");
     assert_eq!(f.read()[1]["state"], "DESCRIBED");
 }
@@ -566,7 +566,7 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
         ("Mystery", "llmfit fit_level: Mystery"),
     ] {
         let f = Fixture::new();
-        f.write(json!([marker_row(1)]));
+        f.write(json!([blank_row(1)]));
         let before = std::fs::read(&f.store.paths().json).unwrap();
         let server = common::http::Server::start(vec![]);
         let (mut app, _) = local_fixture_app(
@@ -594,7 +594,7 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
     }
 
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let server = common::http::Server::start(vec![]);
     let (mut app, _) = local_fixture_app(&f, failed_llmfit(&f), server.url().into());
@@ -616,7 +616,7 @@ async fn poor_unknown_and_failed_fit_results_never_prompt_or_mutate() {
 #[tokio::test]
 async fn good_fit_with_unavailable_ollama_never_prompts_or_mutates() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, _) = local_fixture_app(
         &f,
@@ -636,7 +636,7 @@ async fn good_fit_with_unavailable_ollama_never_prompts_or_mutates() {
 #[tokio::test]
 async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
@@ -659,7 +659,7 @@ async fn cancelled_or_source_stale_fit_result_cannot_reopen_install_consent() {
 #[tokio::test]
 async fn model_change_invalidates_in_flight_local_fit_before_consent() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let (mut app, _server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
     let stale = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
@@ -674,7 +674,7 @@ async fn model_change_invalidates_in_flight_local_fit_before_consent() {
 #[tokio::test]
 async fn source_change_invalidates_in_flight_local_fit_before_consent() {
     let f = Fixture::new();
-    f.write(json!([marker_row(1)]));
+    f.write(json!([blank_row(1)]));
     let before = std::fs::read(&f.store.paths().json).unwrap();
     let (mut app, _server) = good_local_status_app(&f, false);
     select_local(&mut app).await;
@@ -1051,8 +1051,8 @@ async fn failed_single_generation_can_be_retried_from_describe() {
         Some(GenerationState::Failed(_))
     ));
     assert_eq!(f.read()[0]["state"], "SCHEDULED");
-    assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
-    assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[0]["title"], "");
+    assert_eq!(f.read()[0]["description"], "");
 
     let retried = common::ui::first_output(app.update(Message::GenerateOne(id(1)))).await;
     assert!(matches!(
@@ -1137,6 +1137,28 @@ fn describe_view_constructs_from_loaded_state() {
     let (app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
     let _: Element<'_, Message> = describe::view(&app);
     assert_eq!(VISION_MODELS.len(), 2);
+}
+
+#[tokio::test]
+async fn describe_layout_starts_in_rows_and_keeps_the_choice_in_memory_only() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Rows);
+    let _ = app.update(Message::SelectDescribeLayout(
+        describe::DescribeLayout::Grid,
+    ));
+    let _: Element<'_, Message> = describe::view(&app);
+    common::ui::send(&mut app, Message::Navigate(Tab::Publish)).await;
+    common::ui::send(&mut app, Message::Navigate(Tab::Describe)).await;
+    common::ui::send(&mut app, Message::Refresh).await;
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Grid);
+    assert!(
+        !f.path(".publicator/ui.json").exists(),
+        "the choice is not saved"
+    );
+    let (restarted, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(restarted.describe_layout(), describe::DescribeLayout::Rows);
 }
 
 #[tokio::test]
@@ -1274,7 +1296,7 @@ async fn batch_reports_each_card_and_the_summary_in_processing_order() {
         Some("Generated 2 of 3 · 1 failed")
     );
     server.finish();
-    assert_eq!(f.read()[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(f.read()[1]["title"], "");
     // A successful Refresh clears every finished state and the summary.
     common::ui::send(&mut app, Message::Refresh).await;
     assert_eq!(card_states(&app), ["-"; 3]);
@@ -1303,7 +1325,7 @@ async fn busy_card_refuses_every_action_with_a_message() {
     ];
     for message in blocked {
         let f = Fixture::new();
-        f.write(json!([f.marked_row(1), marker_row(2)]));
+        f.write(json!([f.marked_row(1), blank_row(2)]));
         let before = std::fs::read(&f.store.paths().json).unwrap();
         let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
         // The batch task is never polled: its cards stay Queued.
@@ -1332,7 +1354,7 @@ async fn busy_card_refuses_every_action_with_a_message() {
 #[tokio::test]
 async fn generate_marked_during_a_running_batch_starts_nothing() {
     let f = Fixture::new();
-    f.write(json!([f.marked_row(1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), blank_row(2)]));
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
     let _held = app.update(Message::GenerateMarked);
     let effects = common::ui::run(app.update(Message::GenerateMarked)).await;
@@ -1350,7 +1372,7 @@ async fn generate_marked_during_a_running_batch_starts_nothing() {
 #[tokio::test]
 async fn batch_level_failure_clears_its_queued_cards_and_reports_the_error() {
     let f = Fixture::new();
-    f.write(json!([f.marked_row(1), marker_row(2)]));
+    f.write(json!([f.marked_row(1), blank_row(2)]));
     let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
     let task = app.update(Message::GenerateMarked);
     assert_eq!(app.generation_state(&id(2)), Some(&GenerationState::Queued));

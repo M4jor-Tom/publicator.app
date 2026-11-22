@@ -7,7 +7,7 @@ use publicator::{
         Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS,
         openrouter_model,
     },
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{Phase, needs_generation, phase},
     prompts::{PromptArchive, audit},
     publish_journal::{self, PublishJournal, ReconcileOutcome},
     publishing::{PublishReport, PublishRequest, Publisher, first_pending_uuid},
@@ -49,6 +49,15 @@ enum Command {
     DaPublish(DaPublishArgs),
     /// Delete an undelivered publication entry; its artwork becomes a Pick candidate again.
     DeletePublication {
+        #[arg(long)]
+        uuid: String,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
+    /// Move an undelivered publication back one state: DESCRIBED to SCHEDULED, SCHEDULED to PICKED.
+    RollBack {
         #[arg(long)]
         uuid: String,
         #[arg(long)]
@@ -168,6 +177,11 @@ async fn run() -> Result<()> {
             data_dir,
             json,
         } => delete_publication(&uuid, data_dir, json),
+        Command::RollBack {
+            uuid,
+            data_dir,
+            json,
+        } => roll_back(&uuid, data_dir, json),
         Command::CheckSteps => until_interrupted(check_steps()).await,
     }
 }
@@ -227,6 +241,15 @@ fn delete_publication(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBu
     println!("deleted {uuid}");
     Ok(())
 }
+fn roll_back(uuid: &str, data_dir: Option<PathBuf>, json: Option<PathBuf>) -> Result<()> {
+    let (_, _, store) = paths(data_dir, json)?;
+    let state = match Application::new(store, metadata_client(None)?).roll_back(uuid)? {
+        Phase::Scheduled => "SCHEDULED",
+        _ => "PICKED",
+    };
+    println!("rolled back {uuid} to {state}");
+    Ok(())
+}
 async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {
     let GenerateMetaArgs {
         source,
@@ -244,12 +267,7 @@ async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {
         return Err(Error::Validation("timeout must be positive".into()));
     }
     let rows = store.read()?;
-    let eligible = rows.iter().any(|r| {
-        phase(r).ok() == Some(Phase::Scheduled)
-            && ["title", "description"]
-                .iter()
-                .any(|k| r.get(*k).and_then(serde_json::Value::as_str) == Some(GENERATE_MARKER))
-    });
+    let eligible = rows.iter().any(needs_generation);
     let client = metadata_client(Some(&paths.data_dir))?;
     let install_missing = if source == Source::Local && eligible {
         local_install_consent(&client, &model, Duration::from_secs(timeout), yes).await?

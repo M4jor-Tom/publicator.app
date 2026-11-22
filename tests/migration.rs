@@ -141,24 +141,29 @@ fn migration_preserves_new_blank_drafts_and_is_idempotent() {
 }
 
 #[test]
-fn legacy_metadata_markers_keep_publication_scheduled() {
-    for marker in [
-        " [[PUBLICATOR:TODO_GENERATE]] ",
-        "before [[PUBLICATOR:TODO_GENERATE]] after",
+fn legacy_generate_markers_are_blanked_and_embedded_text_is_kept() {
+    for (value, migrated, state) in [
+        (" [[PUBLICATOR:TODO_GENERATE]] ", "", "SCHEDULED"),
+        (
+            "before [[PUBLICATOR:TODO_GENERATE]] after",
+            "before [[PUBLICATOR:TODO_GENERATE]] after",
+            "DESCRIBED",
+        ),
     ] {
         for field in ["title", "description"] {
             let mut row = legacy();
             row["apparitions"][0]["state"] = json!("unpublished");
             row["title"] = json!("Title");
             row["description"] = json!("Description");
-            row[field] = json!(marker);
+            row[field] = json!(value);
             row["apparitions"][0]["urlElsePublicationName"] = row["title"].clone();
             let original = vec![row];
             let before = original.clone();
             let out = migrate_rows(&original, &[]).unwrap();
             assert_eq!(original, before);
-            assert_eq!(out[0]["state"], "SCHEDULED");
-            assert_eq!(out[0][field], marker);
+            assert_eq!(out[0][field], migrated);
+            assert_eq!(out[0]["state"], state, "state follows blankness");
+            assert_eq!(migrate_rows(&out, &[]).unwrap(), out);
             assert!(
                 original[0]["apparitions"][0]
                     .get("urlElsePublicationName")
@@ -166,6 +171,16 @@ fn legacy_metadata_markers_keep_publication_scheduled() {
             );
         }
     }
+    // A stated row keeps its state; its exact marker is blanked all the same.
+    let mut described = legacy();
+    described["state"] = json!("DESCRIBED");
+    described["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    described["apparitions"][0]["urlElsePublicationName"] = described["title"].clone();
+    let out = migrate_rows(&vec![described], &[]).unwrap();
+    assert_eq!(
+        (&out[0]["title"], &out[0]["state"]),
+        (&json!(""), &json!("DESCRIBED"))
+    );
 }
 
 #[test]

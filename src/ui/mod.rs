@@ -119,6 +119,8 @@ pub struct UiOptions {
     pub ai_timeout: Duration,
 }
 
+const WINDOW_WIDTH: f32 = 1100.0;
+
 pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Result {
     iced::application(
         move || App::new(application.clone(), options.clone()),
@@ -127,7 +129,7 @@ pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Resul
     )
     .subscription(App::subscription)
     .theme(app_theme)
-    .window_size((1100.0, 760.0))
+    .window_size((WINDOW_WIDTH, 760.0))
     .centered()
     .exit_on_close_request(false)
     .run()
@@ -176,7 +178,9 @@ enum BatchProgress {
         done: usize,
         failed: usize,
     },
+    /// `ids` keep the finished batch's cards first until Refresh clears it.
     Finished {
+        ids: Vec<String>,
         succeeded: usize,
         failed: usize,
     },
@@ -191,6 +195,8 @@ pub enum Message {
     LoadFinished(u64, Result<Loaded, String>),
     Navigate(Tab),
     Scrolled(Tab, iced::widget::scrollable::AbsoluteOffset),
+    /// The window's new width.
+    WindowResized(f32),
     Edited {
         uuid: String,
         field: Field,
@@ -276,12 +282,14 @@ pub enum Message {
     SaveDraft(String),
     ApproveMetadata(String),
     ReturnToSchedule(String),
+    ReturnToDescribe(String),
     GenerateOne(String),
     GenerateMarked,
     ConfirmLocalInstall,
     CancelLocalInstall,
     SelectSource(Source),
     SelectModel(ModelOption),
+    SelectDescribeLayout(describe::DescribeLayout),
     GenerationProgress(BatchEvent),
     GenerationFinished {
         uuid: Option<String>,
@@ -422,6 +430,8 @@ pub struct App {
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
+    describe_layout: describe::DescribeLayout,
+    window_width: f32,
     generation_states: HashMap<String, GenerationState>,
     batch: Option<BatchProgress>,
     pending_generation: Option<String>,
@@ -526,6 +536,8 @@ impl App {
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
+            describe_layout: describe::DescribeLayout::default(),
+            window_width: WINDOW_WIDTH,
             generation_states: HashMap::new(),
             batch: None,
             pending_generation: None,
@@ -589,6 +601,16 @@ impl App {
     }
     pub fn current_tab(&self) -> Tab {
         self.active_tab
+    }
+    pub fn describe_layout(&self) -> describe::DescribeLayout {
+        self.describe_layout
+    }
+    /// The current batch's cards, listed first in Describe.
+    fn batch_ids(&self) -> &[String] {
+        match &self.batch {
+            Some(BatchProgress::Running { ids, .. } | BatchProgress::Finished { ids, .. }) => ids,
+            _ => &[],
+        }
     }
     pub fn local_fit_status(&self) -> Option<&LocalStatus> {
         self.local_fit.as_ref()
@@ -822,6 +844,7 @@ impl App {
             | Message::PublishKeyboardExit => self.update_keyboard(message),
             Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -842,11 +865,21 @@ impl App {
             | Message::CloseCancelPublish
             | Message::CloseWait
             | Message::PublishFinished(..) => self.update_selection(message),
-            Message::Scrolled(tab, offset) => {
-                self.scroll_offsets.insert(tab, offset);
+            Message::Scrolled(..) | Message::WindowResized(..) => {
+                self.update_viewport(message);
                 Task::none()
             }
             message => self.update_workflow(message),
+        }
+    }
+
+    fn update_viewport(&mut self, message: Message) {
+        match message {
+            Message::Scrolled(tab, offset) => {
+                self.scroll_offsets.insert(tab, offset);
+            }
+            Message::WindowResized(width) => self.window_width = width,
+            _ => unreachable!("message routed to viewport handler"),
         }
     }
 
@@ -856,7 +889,8 @@ impl App {
             | Message::OptionTierChanged { .. }
             | Message::OptionGalleryChanged { .. }
             | Message::SaveOptions(..)
-            | Message::OptionsSaved { .. } => self.update_options(message),
+            | Message::OptionsSaved { .. }
+            | Message::ReturnToDescribe(..) => self.update_options(message),
             Message::ReconcileUrlChanged { .. }
             | Message::ReconcileAttempt { .. }
             | Message::ReconcileFinished { .. }
@@ -901,6 +935,7 @@ impl App {
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
             | Message::Scrolled(..)
+            | Message::WindowResized(..)
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -914,6 +949,7 @@ impl App {
             | Message::PublishKeyboardExit
             | Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -1089,6 +1125,7 @@ impl App {
         match message {
             Message::SelectSource(source) => return self.select_source(source),
             Message::SelectModel(model) => return self.select_model(model),
+            Message::SelectDescribeLayout(layout) => self.describe_layout = layout,
             Message::ConfirmLocalInstall => return self.on_confirm_local_install(),
             Message::CancelLocalInstall => {
                 self.pending_local_consent = None;
@@ -1178,6 +1215,7 @@ impl App {
             } => self.on_option_gallery_changed(uuid, value, selected),
             Message::SaveOptions(uuid) => self.save_options_task(uuid),
             Message::OptionsSaved { uuid, result } => self.on_options_saved(uuid, result),
+            Message::ReturnToDescribe(uuid) => self.return_to_describe(uuid),
             _ => unreachable!("message routed to options handler"),
         }
     }
@@ -1785,6 +1823,7 @@ impl App {
             }
             self.batch = Some(match result {
                 Ok(()) => BatchProgress::Finished {
+                    ids,
                     succeeded: done,
                     failed,
                 },
@@ -2497,6 +2536,35 @@ impl App {
             .then(|| "Unresolved publish attempt must be reconciled before editing options".into())
     }
 
+    /// Sends a DESCRIBED Publish row back to Describe through the CLI's guarded rollback.
+    fn return_to_describe(&mut self, uuid: String) -> Task<Message> {
+        if self.options_locked(&uuid) {
+            return Task::none();
+        }
+        if self
+            .publish_options
+            .get(&uuid)
+            .is_some_and(|options| options.dirty)
+        {
+            self.result = Some("Save options before returning to Describe".into());
+            return Task::none();
+        }
+        let application = self.application.clone();
+        self.busy = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || application.roll_back(&uuid).map(|_| ()))
+                    .await
+                    .unwrap_or_else(|error| Err(crate::error::Error::Config(error.to_string())))
+                    .map_err(|error| error.to_string())
+            },
+            |result| Message::WorkflowFinished {
+                message: "Returned to Describe".into(),
+                result,
+            },
+        )
+    }
+
     fn save_options_task(&mut self, uuid: String) -> Task<Message> {
         if self.busy {
             self.mark_options_save_error(&uuid, "Another operation is in progress");
@@ -2766,12 +2834,7 @@ impl App {
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .filter(|row| {
-                phase(row).ok() == Some(Phase::Scheduled)
-                    && ["title", "description"].iter().any(|key| {
-                        row.get(*key).and_then(Value::as_str) == Some(crate::model::GENERATE_MARKER)
-                    })
-            })
+            .filter(|row| crate::model::needs_generation(row))
             .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
             .collect()
     }
@@ -2935,6 +2998,7 @@ impl App {
         Subscription::batch([
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
             iced::event::listen_with(publish_keyboard_event),
         ])
     }
@@ -2943,7 +3007,7 @@ impl App {
         let count = |tab| match tab {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
-            Tab::Describe => Some(describe::ordered_rows(rows, None, |_| false).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, &[], None, |_| false).len()),
             Tab::Publish => {
                 Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
             }
@@ -4035,7 +4099,7 @@ done
         );
         assert_eq!(shown(&app, &one), stored(&app, &one));
 
-        // A failed generation writes markers and reloads while other drafts hold input.
+        // A failed generation writes nothing and reloads while other drafts hold input.
         edit(&mut app, &one, Field::Title, "In flight");
         let held = app.update(Message::SaveDraft(one.clone()));
         edit(&mut app, &two, Field::Description, "Unsaved");
@@ -4046,6 +4110,7 @@ done
                 Ok(())
             })
             .unwrap();
+        let before = stored(&app, &three);
         let generated = send(&mut app, Message::GenerateOne(three.clone())).await;
         assert!(
             generated.iter().any(|message| matches!(
@@ -4053,8 +4118,10 @@ done
                 Message::GenerationFinished { result: Err(_), .. }
             ))
         );
-        let marker = crate::model::GENERATE_MARKER.to_owned();
-        assert_eq!(stored(&app, &three), (marker.clone(), marker));
+        assert_eq!(stored(&app, &three), before);
+        let rows = app.application.store().read().unwrap();
+        let row = rows.iter().find(|row| row["uuid"] == three).unwrap();
+        assert_eq!(row["state"], "SCHEDULED");
         assert_eq!(shown(&app, &three), stored(&app, &three));
         assert_eq!(
             shown(&app, &two),

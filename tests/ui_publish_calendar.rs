@@ -783,6 +783,37 @@ async fn active_publish_locks_option_edits() {
 }
 
 #[tokio::test]
+async fn return_to_describe_rolls_back_only_an_unlocked_idle_row() {
+    let (mut app, store, _root) = options_app();
+    let before = std::fs::read(&store.paths().json).unwrap();
+    let uuid = "00000000-0000-4000-8000-000000000009".to_owned();
+    let _ = app.update(Message::PublishLocksFinished(Ok([uuid.clone()].into())));
+    let _ = common::ui::send(&mut app, Message::ReturnToDescribe(uuid.clone())).await;
+    assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
+    let _ = app.update(Message::PublishLocksFinished(Ok(
+        std::collections::HashSet::new(),
+    )));
+    let publish = app.update(Message::PublishSelected);
+    let _ = common::ui::run(app.update(Message::ReturnToDescribe(uuid.clone()))).await;
+    assert_eq!(std::fs::read(&store.paths().json).unwrap(), before);
+    for message in common::ui::run(publish).await.messages {
+        let _ = app.update(message);
+    }
+    let _ = app.update(Message::LoadFinished(0, Ok(store.read().unwrap().into())));
+    let _ = app.update(Message::PublishLocksFinished(Ok(
+        std::collections::HashSet::new(),
+    )));
+    let task = app.update(Message::ReturnToDescribe(uuid));
+    common::ui::finish_workflow(&mut app, task).await;
+    let row = &store.read().unwrap()[0];
+    assert_eq!(row["state"], "SCHEDULED");
+    let original: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(row["title"], original[0]["title"]);
+    assert_eq!(row["description"], original[0]["description"]);
+    assert_eq!(app.status_message(), Some("Returned to Describe"));
+}
+
+#[tokio::test]
 async fn invalid_publish_option_input_keeps_saved_bytes_unchanged() {
     let (mut app, store, _root) = options_app();
     let before = std::fs::read(&store.paths().json).unwrap();
@@ -1267,7 +1298,7 @@ fn calendar_projection_keeps_every_apparition_and_includes_current_configured_zo
 
 #[test]
 fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() {
-    let literal = "<literal> [[PUBLICATOR:TODO_GENERATE]]\n雪";
+    let literal = "<literal> [[literal]]\n雪";
     let exact = PromptMatch::Exact(PromptVersion {
         digest: "exact-digest".into(),
         text: literal.into(),
@@ -1289,7 +1320,7 @@ fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() 
             path: "b/second.txt".into(),
             versions: vec![PromptVersion {
                 digest: "second".into(),
-                text: "second [[PUBLICATOR:TODO_GENERATE]]".into(),
+                text: "second [[literal]]".into(),
                 paths: vec!["b/second.txt".into()],
                 committed: 2,
             }],
@@ -1303,8 +1334,11 @@ fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() 
             .iter()
             .any(|line| line.contains("a/first.txt") && line.contains("first <candidate>"))
     );
-    assert!(lines.iter().any(|line| line.contains("b/second.txt")
-        && line.contains("second [[PUBLICATOR:TODO_GENERATE]]")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("b/second.txt") && line.contains("second [[literal]]"))
+    );
     assert_eq!(
         prompt::plain_text(&PromptMatch::Unknown("no grammar match <x>".into())),
         vec!["Prompt unknown: no grammar match <x>"]

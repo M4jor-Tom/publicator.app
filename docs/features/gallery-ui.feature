@@ -34,7 +34,7 @@ Feature: Review artwork in the native gallery
       When the user opens Delete on a Pick, Schedule or Describe tile
       Then the confirmation stays visible without moving the list
       And confirming in Pick deletes the unpicked file; in Schedule or Describe it removes only the entry and its unsaved draft
-      And a DESCRIBED row must return from Publish before tile deletion; the CLI can delete it directly
+      And a DESCRIBED row must use Return to Describe in Publish before tile deletion; the CLI can delete it directly
 
     Scenario: A draft changes while its save is in flight
       When the earlier save completes
@@ -72,6 +72,12 @@ Feature: Review artwork in the native gallery
       Then only that card's state is updated for the new generation
       And other finished states and the previous batch summary remain until replaced or successfully refreshed
 
+    Scenario: Switch the Describe layout during a batch
+      When the user chooses Grid or Rows in the Describe controls
+      Then Grid shows the card grid and Rows shows one full-width card per publication, thumbnail, fields and actions side by side, stacked like Grid in a narrow window
+      And Describe opens in Rows; the choice is kept in memory through tab switches and Refresh, never saved, so a restart opens Rows again
+      And in both layouts the batch cards are listed first, in batch order, until the Refresh that clears its summary
+
   Rule: Publish selection is not submission
 
     Scenario: A delivery has succeeded or its outcome is unresolved
@@ -79,6 +85,13 @@ Feature: Review artwork in the native gallery
       Then its ordinary rows and count include only pending DeviantArt deliveries; successful sends remain in Calendar
       And a completed row opened from Calendar or a row awaiting reconciliation is locked
       And only registered platform cells can execute; retries skip recorded successes
+
+    Scenario: Return a pending row to Describe
+      Given a DESCRIBED row with a pending DeviantArt delivery
+      When the user clicks Return to Describe in Publish
+      Then the CLI's roll-back makes it SCHEDULED, so it leaves Publish and shows in Describe with its saved title and description
+      And the button is disabled while another operation or a publish run is active, or an unresolved attempt locks the row
+      And unsaved options refuse it until saved; delivered and APPEARED rows have no such button
 
     Scenario: Close, refresh or submit again during publishing
       When a close is requested, including after draft discard, save or status refresh

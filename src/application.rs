@@ -3,7 +3,7 @@ use crate::{
     error::{Error, Result},
     images::{PreparedImage, prepare_ai_image_until},
     metadata::{Generated, GenerationRequest, MetadataClient, Source, VISION_MODELS},
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{Phase, needs_generation, phase},
     store::Store,
     workflow,
 };
@@ -90,6 +90,36 @@ impl Application {
     /// reconciliation runs meanwhile, and refuses a publication an unresolved attempt names:
     /// its receipt must stay reconcilable against the row.
     pub fn delete_publication(&self, uuid: &str, now: i64) -> Result<()> {
+        self.unattempted(uuid, "deletion", || {
+            self.mutate(Some(uuid), |store| {
+                workflow::delete_publication(store, uuid, now)
+            })
+        })
+    }
+    /// Moves an undelivered publication back one state (DESCRIBED to SCHEDULED, SCHEDULED to
+    /// PICKED) under the same guards as deletion, returning the new phase.
+    pub fn roll_back(&self, uuid: &str) -> Result<Phase> {
+        self.unattempted(uuid, "rollback", || {
+            self.mutate(Some(uuid), |store| {
+                match phase(lookup(&store.read()?, uuid)?)? {
+                    Phase::Described => {
+                        workflow::return_to_metadata(store, uuid).map(|()| Phase::Scheduled)
+                    }
+                    Phase::Scheduled => {
+                        workflow::return_to_scheduling(store, uuid).map(|()| Phase::Picked)
+                    }
+                    Phase::Picked => Err(Error::InvalidState(
+                        "PICKED has no earlier state; use delete-publication to unpick it".into(),
+                    )),
+                    Phase::Appeared => Err(Error::InvalidState(
+                        "APPEARED publications cannot be rolled back".into(),
+                    )),
+                }
+            })
+        })
+    }
+    /// Runs `f` under the publisher lock unless an unresolved attempt names `uuid`.
+    fn unattempted<R>(&self, uuid: &str, action: &str, f: impl FnOnce() -> Result<R>) -> Result<R> {
         let data_dir = &self.store.paths().data_dir;
         let _lock = crate::publish_journal::publisher_lock(data_dir)?;
         if crate::publish_journal::PublishJournal::new(data_dir)?
@@ -97,13 +127,11 @@ impl Application {
             .iter()
             .any(|attempt| attempt.uuid == uuid)
         {
-            return Err(Error::ReconciliationRequired(
-                "unresolved publish attempt blocks deletion".into(),
-            ));
+            return Err(Error::ReconciliationRequired(format!(
+                "unresolved publish attempt blocks {action}"
+            )));
         }
-        self.mutate(Some(uuid), |store| {
-            workflow::delete_publication(store, uuid, now)
-        })
+        f()
     }
     pub async fn generate_one(&self, uuid: &str, request: GenerationRequest) -> Result<Generated> {
         validate_request(&request)?;
@@ -198,12 +226,7 @@ impl Application {
         }
         let mut ids: Vec<String> = rows
             .iter()
-            .filter(|row| {
-                phase(row).ok() == Some(Phase::Scheduled)
-                    && ["title", "description"]
-                        .iter()
-                        .any(|key| row.get(*key).and_then(Value::as_str) == Some(GENERATE_MARKER))
-            })
+            .filter(|row| needs_generation(row))
             .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
             .collect();
         if expected_ids.is_some_and(|expected| expected != ids) {
@@ -227,6 +250,7 @@ impl Application {
         let deadline = Instant::now() + request.timeout;
         let rows = self.store.read()?;
         let row = lookup(&rows, uuid)?;
+        let started = WorkflowMetadata::of(row);
         let image = crate::artwork::resolve(&self.store.paths().data_dir, row)?;
         let generated = self
             .generate_provider(&image, request, preferred.as_deref(), deadline)
@@ -234,9 +258,10 @@ impl Application {
         if preferred.is_none() {
             *preferred = Some(generated.model_used.clone());
         }
-        workflow::merge_generated_markers(
+        workflow::merge_generated_blanks(
             &self.store,
             uuid,
+            &started,
             &WorkflowMetadata {
                 title: generated.metadata.title,
                 description: generated.metadata.description,
@@ -261,20 +286,15 @@ impl Application {
         request: &GenerationRequest,
         deadline: Instant,
     ) -> Result<Generated> {
-        match self.generate_provider(image, request, None, deadline).await {
-            Ok(g) => {
-                let pair = WorkflowMetadata {
-                    title: g.metadata.title.clone(),
-                    description: g.metadata.description.clone(),
-                };
-                workflow::save_generated_pair(&self.store, uuid, admitted, &pair)?;
-                Ok(g)
-            }
-            Err(error) => {
-                workflow::fail_generation(&self.store, uuid, admitted)?;
-                Err(error)
-            }
-        }
+        let g = self
+            .generate_provider(image, request, None, deadline)
+            .await?;
+        let pair = WorkflowMetadata {
+            title: g.metadata.title.clone(),
+            description: g.metadata.description.clone(),
+        };
+        workflow::save_generated_pair(&self.store, uuid, admitted, &pair)?;
+        Ok(g)
     }
     async fn preflight_local(&self, request: &GenerationRequest, deadline: Instant) -> Result<()> {
         if request.source != Source::Local {
@@ -477,7 +497,7 @@ mod test_http;
 #[cfg(test)]
 mod persistence_tests {
     use super::{
-        Application, GENERATE_MARKER, GenerationRequest, Source, Store, VISION_MODELS, Value,
+        Application, GenerationRequest, Source, Store, VISION_MODELS, Value,
         test_http::{Reply, Server, completion},
     };
     use crate::{
@@ -496,7 +516,7 @@ mod persistence_tests {
     /// SCHEDULED rows 1 and 2 over distinct real PNGs and hashes; `marked` rows await generation.
     fn fixture(marked: bool) -> (tempfile::TempDir, Store) {
         let root = tempfile::tempdir().unwrap();
-        let text = |plain: &str| if marked { GENERATE_MARKER } else { plain }.to_owned();
+        let text = |plain: &str| if marked { "" } else { plain }.to_owned();
         let rows: Vec<Value> = [1u64, 2]
             .iter()
             .map(|n| {
@@ -562,7 +582,7 @@ mod persistence_tests {
     }
 
     #[tokio::test]
-    async fn provider_failure_with_failed_marker_save_surfaces_the_persistence_failure() {
+    async fn provider_failure_writes_nothing_and_surfaces_the_provider_error() {
         let (_root, store) = fixture(false);
         let server = Server::start(vec![
             Reply::new(
@@ -577,8 +597,8 @@ mod persistence_tests {
         fail_next_commit_for_test(CommitFailureForTest::BeforeRename);
         let error = app.generate_one(&id(1), request()).await.unwrap_err();
         assert_eq!(server.requests().len(), 2);
-        // The markers were not saved, so the error is the save failure, not the provider failure.
-        assert!(matches!(&error, Error::Io(e) if e.to_string() == "injected pre-rename failure"));
+        // The armed commit failure never fires: a provider failure attempts no save.
+        assert!(matches!(&error, Error::Provider(_)), "{error:?}");
         assert_eq!(fs::read(&store.paths().json).unwrap(), before);
         assert_released(&app);
     }
@@ -602,7 +622,7 @@ mod persistence_tests {
             "OpenRouter batches start from the last row"
         );
         assert_eq!(saved[1]["state"], "DESCRIBED");
-        assert_eq!(saved[0]["title"], GENERATE_MARKER);
+        assert_eq!(saved[0]["title"], "");
         assert_released(&app);
     }
 

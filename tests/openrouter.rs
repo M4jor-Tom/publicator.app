@@ -447,7 +447,7 @@ fn two_tone_row(f: &Fixture, n: u64, extension: &str, [left, right]: [&str; 2]) 
         .status()
         .unwrap();
     assert!(status.success());
-    let mut publication = common::with_markers(common::row(n, "SCHEDULED"));
+    let mut publication = common::with_blank_metadata(common::row(n, "SCHEDULED"));
     publication["files"][0] = json!({"basename": name, "sha512sum": file_sha512(&path).unwrap()});
     publication
 }
