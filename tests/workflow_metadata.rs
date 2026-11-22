@@ -1,14 +1,21 @@
 mod common;
 use common::{Fixture, id, row};
 use publicator::{
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{Phase, phase},
+    store::Store,
     workflow::{
-        Metadata, MetadataPatch, approve_metadata, fail_generation, merge_generated_markers,
-        return_to_metadata, save_generated_pair, save_metadata,
+        Metadata, MetadataPatch, approve_metadata, merge_generated_blanks, return_to_metadata,
+        save_generated_pair, save_metadata,
     },
 };
 use serde_json::json;
 use std::sync::{Arc, Barrier};
+
+/// A batch merge of `pair` from the row as stored now, as a batch record starts.
+fn merge(store: &Store, pair: &Metadata) -> publicator::error::Result<()> {
+    let started = Metadata::of(&store.read().unwrap()[0]);
+    merge_generated_blanks(store, &id(1), &started, pair)
+}
 
 #[test]
 fn metadata_draft_does_not_approve_until_explicit_approval() {
@@ -48,23 +55,8 @@ fn generated_pair_advances_only_with_complete_valid_metadata() {
 }
 
 #[test]
-fn accepted_generation_failure_marks_both_fields_without_advancing() {
-    let f = Fixture::new();
-    f.write(json!([row(1, "SCHEDULED")]));
-    fail_generation(&f.store, &id(1), &row_pair()).unwrap();
-    let saved = f.store.read().unwrap();
-    assert_eq!(saved[0]["title"], GENERATE_MARKER);
-    assert_eq!(saved[0]["description"], GENERATE_MARKER);
-    assert_eq!(phase(&saved[0]).unwrap(), Phase::Scheduled);
-}
-
-#[test]
-fn any_marker_occurrence_and_blank_metadata_block_approval() {
-    for (title, description) in [
-        ("Title", "text [[PUBLICATOR:TODO_GENERATE]] tail"),
-        ("", "Description"),
-        ("Title", " \n "),
-    ] {
+fn blank_metadata_blocks_approval() {
+    for (title, description) in [("", "Description"), ("Title", " \n ")] {
         let f = Fixture::new();
         let mut publication = row(1, "SCHEDULED");
         publication["title"] = json!(title);
@@ -106,7 +98,7 @@ fn title_limit_counts_unicode_characters_not_utf8_bytes() {
 }
 
 #[test]
-fn saving_an_embedded_marker_keeps_a_draft_that_cannot_be_approved() {
+fn text_embedding_the_old_marker_is_ordinary_and_can_be_approved() {
     let f = Fixture::new();
     f.write(json!([row(1, "SCHEDULED")]));
     save_metadata(
@@ -121,24 +113,19 @@ fn saving_an_embedded_marker_keeps_a_draft_that_cannot_be_approved() {
     let saved = &f.store.read().unwrap()[0];
     assert_eq!(saved["title"], "[[PUBLICATOR:TODO_GENERATE]] embedded");
     assert_eq!(saved["state"], "SCHEDULED");
-    let before_approval = std::fs::read(&f.store.paths().json).unwrap();
-    assert!(approve_metadata(&f.store, &id(1)).is_err());
-    assert_eq!(
-        std::fs::read(&f.store.paths().json).unwrap(),
-        before_approval
-    );
+    approve_metadata(&f.store, &id(1)).unwrap();
+    assert_eq!(f.read()[0]["state"], "DESCRIBED");
 }
 
 #[test]
-fn merge_does_not_overwrite_a_manual_field() {
+fn batch_fills_only_the_blank_field_of_a_partial_draft_and_approves_it() {
     let f = Fixture::new();
     let mut p = row(1, "SCHEDULED");
     p["title"] = "Manual".into();
-    p["description"] = GENERATE_MARKER.into();
+    p["description"] = "".into();
     f.write(json!([p]));
-    merge_generated_markers(
+    merge(
         &f.store,
-        &id(1),
         &Metadata {
             title: "AI".into(),
             description: "Story".into(),
@@ -146,6 +133,7 @@ fn merge_does_not_overwrite_a_manual_field() {
     )
     .unwrap();
     assert_eq!(f.read()[0]["title"], "Manual");
+    assert_eq!(f.read()[0]["description"], "Story");
     assert_eq!(f.read()[0]["state"], "DESCRIBED");
 }
 
@@ -153,12 +141,11 @@ fn merge_does_not_overwrite_a_manual_field() {
 fn generated_title_preserves_a_manual_description() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
+    publication["title"] = json!("");
     publication["description"] = json!("Manual description");
     f.write(json!([publication]));
-    merge_generated_markers(
+    merge(
         &f.store,
-        &id(1),
         &Metadata {
             title: "Generated".into(),
             description: "Ignored stale description".into(),
@@ -172,37 +159,14 @@ fn generated_title_preserves_a_manual_description() {
 }
 
 #[test]
-fn valid_generated_field_persists_beside_a_blank_manual_title_without_approving() {
+fn whitespace_only_fields_count_as_blank_and_are_generated() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!("");
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
-    merge_generated_markers(
-        &f.store,
-        &id(1),
-        &Metadata {
-            title: "AI title".into(),
-            description: "AI description".into(),
-        },
-    )
-    .unwrap();
-    let saved = f.store.read().unwrap();
-    assert_eq!(saved[0]["title"], "");
-    assert_eq!(saved[0]["description"], "AI description");
-    assert_eq!(saved[0]["state"], "SCHEDULED");
-}
-
-#[test]
-fn valid_generated_field_persists_beside_a_blank_manual_description_without_approving() {
-    let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
+    publication["title"] = json!(" \n ");
     publication["description"] = json!("");
     f.write(json!([publication]));
-    merge_generated_markers(
+    merge(
         &f.store,
-        &id(1),
         &Metadata {
             title: "AI title".into(),
             description: "AI description".into(),
@@ -211,45 +175,19 @@ fn valid_generated_field_persists_beside_a_blank_manual_description_without_appr
     .unwrap();
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "AI title");
-    assert_eq!(saved[0]["description"], "");
-    assert_eq!(saved[0]["state"], "SCHEDULED");
-}
-
-#[test]
-fn valid_generated_field_preserves_nonexact_marker_manual_counterpart() {
-    let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!("manual [[PUBLICATOR:TODO_GENERATE]] text");
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
-    merge_generated_markers(
-        &f.store,
-        &id(1),
-        &Metadata {
-            title: "AI title".into(),
-            description: "AI description".into(),
-        },
-    )
-    .unwrap();
-    let saved = f.store.read().unwrap();
-    assert_eq!(
-        saved[0]["title"],
-        "manual [[PUBLICATOR:TODO_GENERATE]] text"
-    );
     assert_eq!(saved[0]["description"], "AI description");
-    assert_eq!(saved[0]["state"], "SCHEDULED");
+    assert_eq!(saved[0]["state"], "DESCRIBED");
 }
 
 #[test]
-fn stale_generated_result_with_no_markers_never_approves_manual_draft() {
+fn batch_merge_skips_a_complete_manual_draft() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
     publication["title"] = json!("Manual title");
     publication["description"] = json!("Manual description");
     f.write(json!([publication]));
-    merge_generated_markers(
+    merge(
         &f.store,
-        &id(1),
         &Metadata {
             title: "Stale AI title".into(),
             description: "Stale AI description".into(),
@@ -263,15 +201,12 @@ fn stale_generated_result_with_no_markers_never_approves_manual_draft() {
 }
 
 #[test]
-fn merging_both_markers_with_valid_pair_advances_to_described() {
+fn merging_both_blank_fields_with_valid_pair_advances_to_described() {
     let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
+    let publication = common::with_blank_metadata(row(1, "SCHEDULED"));
     f.write(json!([publication]));
-    merge_generated_markers(
+    merge(
         &f.store,
-        &id(1),
         &Metadata {
             title: "AI title".into(),
             description: "AI description".into(),
@@ -292,10 +227,8 @@ fn merging_both_markers_with_valid_pair_advances_to_described() {
 
 fn merge_after_manual_edit(pair: Metadata, patch: MetadataPatch) -> Fixture {
     let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(GENERATE_MARKER);
-    publication["description"] = json!(GENERATE_MARKER);
-    f.write(json!([publication]));
+    f.write(json!([common::with_blank_metadata(row(1, "SCHEDULED"))]));
+    let snapshot = Metadata::of(&f.read()[0]);
     let started = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let worker = {
@@ -304,7 +237,7 @@ fn merge_after_manual_edit(pair: Metadata, patch: MetadataPatch) -> Fixture {
         std::thread::spawn(move || {
             started.wait();
             release.wait();
-            merge_generated_markers(&store, &id(1), &pair).unwrap();
+            merge_generated_blanks(&store, &id(1), &snapshot, &pair).unwrap();
         })
     };
     started.wait(); // Provider is blocked before returning its generated pair.
@@ -315,7 +248,7 @@ fn merge_after_manual_edit(pair: Metadata, patch: MetadataPatch) -> Fixture {
 }
 
 #[test]
-fn provider_result_merges_only_fields_still_marked_after_concurrent_edit() {
+fn provider_result_merges_only_fields_still_blank_after_concurrent_edit() {
     let f = merge_after_manual_edit(
         Metadata {
             title: "AI title".into(),
@@ -348,24 +281,6 @@ fn provider_result_preserves_a_newer_manual_description_and_generates_title() {
     assert_eq!(saved[0]["title"], "AI title");
     assert_eq!(saved[0]["description"], "Concurrent draft");
     assert_eq!(saved[0]["state"], "DESCRIBED");
-}
-
-#[test]
-fn blocked_provider_persists_remaining_marked_field_after_blank_manual_edit() {
-    let f = merge_after_manual_edit(
-        Metadata {
-            title: "AI title".into(),
-            description: "AI description".into(),
-        },
-        MetadataPatch {
-            title: Some("".into()),
-            description: None,
-        },
-    );
-    let saved = f.store.read().unwrap();
-    assert_eq!(saved[0]["title"], "");
-    assert_eq!(saved[0]["description"], "AI description");
-    assert_eq!(saved[0]["state"], "SCHEDULED");
 }
 
 #[test]
@@ -429,12 +344,11 @@ fn invalid_generated_pair_does_not_advance_or_partially_overwrite() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
     publication["title"] = json!("Manual title");
-    publication["description"] = json!(GENERATE_MARKER);
+    publication["description"] = json!("");
     f.write(json!([publication]));
     assert!(
-        merge_generated_markers(
+        merge(
             &f.store,
-            &id(1),
             &Metadata {
                 title: "AI".into(),
                 description: "".into()
@@ -444,7 +358,7 @@ fn invalid_generated_pair_does_not_advance_or_partially_overwrite() {
     );
     let saved = f.store.read().unwrap();
     assert_eq!(saved[0]["title"], "Manual title");
-    assert_eq!(saved[0]["description"], GENERATE_MARKER);
+    assert_eq!(saved[0]["description"], "");
     assert_eq!(saved[0]["state"], "SCHEDULED");
 }
 
@@ -494,25 +408,19 @@ fn single_completion_overwrites_only_fields_unchanged_since_admission() {
         title: "AI title".into(),
         description: "AI description".into(),
     };
-    for (failed, description) in [(false, "AI description"), (true, GENERATE_MARKER)] {
-        let f = Fixture::new();
-        f.write(json!([row(1, "SCHEDULED")]));
-        let newer = MetadataPatch {
-            title: Some("Newer title".into()),
-            description: None,
-        };
-        save_metadata(&f.store, &id(1), &newer).unwrap();
-        if failed {
-            fail_generation(&f.store, &id(1), &row_pair()).unwrap();
-        } else {
-            save_generated_pair(&f.store, &id(1), &row_pair(), &generated).unwrap();
-        }
-        let saved = f.store.read().unwrap();
-        assert_eq!(saved[0]["title"], "Newer title");
-        assert_eq!(saved[0]["description"], description);
-        assert_eq!(
-            saved[0]["state"], "SCHEDULED",
-            "a newer edit is never approved"
-        );
-    }
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    let newer = MetadataPatch {
+        title: Some("Newer title".into()),
+        description: None,
+    };
+    save_metadata(&f.store, &id(1), &newer).unwrap();
+    save_generated_pair(&f.store, &id(1), &row_pair(), &generated).unwrap();
+    let saved = f.store.read().unwrap();
+    assert_eq!(saved[0]["title"], "Newer title");
+    assert_eq!(saved[0]["description"], "AI description");
+    assert_eq!(
+        saved[0]["state"], "SCHEDULED",
+        "a newer edit is never approved"
+    );
 }

@@ -1298,7 +1298,7 @@ fn calendar_projection_keeps_every_apparition_and_includes_current_configured_zo
 
 #[test]
 fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() {
-    let literal = "<literal> [[PUBLICATOR:TODO_GENERATE]]\n雪";
+    let literal = "<literal> [[literal]]\n雪";
     let exact = PromptMatch::Exact(PromptVersion {
         digest: "exact-digest".into(),
         text: literal.into(),
@@ -1320,7 +1320,7 @@ fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() 
             path: "b/second.txt".into(),
             versions: vec![PromptVersion {
                 digest: "second".into(),
-                text: "second [[PUBLICATOR:TODO_GENERATE]]".into(),
+                text: "second [[literal]]".into(),
                 paths: vec!["b/second.txt".into()],
                 committed: 2,
             }],
@@ -1334,8 +1334,11 @@ fn shared_prompt_panel_preserves_literal_text_and_labels_all_nearest_lineages() 
             .iter()
             .any(|line| line.contains("a/first.txt") && line.contains("first <candidate>"))
     );
-    assert!(lines.iter().any(|line| line.contains("b/second.txt")
-        && line.contains("second [[PUBLICATOR:TODO_GENERATE]]")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("b/second.txt") && line.contains("second [[literal]]"))
+    );
     assert_eq!(
         prompt::plain_text(&PromptMatch::Unknown("no grammar match <x>".into())),
         vec!["Prompt unknown: no grammar match <x>"]

@@ -1,7 +1,7 @@
 use super::{App, BatchProgress, GenerationState, Message, style};
 use crate::{
     metadata::{Source, VISION_MODELS},
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{Phase, metadata_blank, phase},
 };
 use iced::{
     Element, Length, Task,
@@ -252,7 +252,7 @@ fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, M
         text(super::schedule::date_label(state, row)),
     ]
     .spacing(8);
-    let marked = title.contains(GENERATE_MARKER) || description.contains(GENERATE_MARKER);
+    let marked = metadata_blank(&title, &description);
     if let Some(line) = generation_line(state, &uuid, marked) {
         card = card.push(line);
     }

@@ -45,7 +45,6 @@ fn metadata_requires_string_pair_and_valid_title() {
     for input in [
         r#"{"title":7,"description":"D"}"#,
         r#"{"title":"  ","description":"D"}"#,
-        r#"{"title":"[[PUBLICATOR:TODO_GENERATE]]","description":"D"}"#,
         &format!(r#"{{"title":"{}","description":"D"}}"#, "x".repeat(51)),
     ] {
         assert!(parse_metadata(input).is_err(), "accepted {input}");

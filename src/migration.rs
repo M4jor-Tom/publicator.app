@@ -1,13 +1,15 @@
 use crate::{
     config::{Config, validate_publications},
     error::{Error, Result},
-    model::{GENERATE_MARKER, Publications, deliveries_complete, has_delivery_success},
+    model::{Publications, deliveries_complete, has_delivery_success},
 };
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
 const OLD_TITLE: &str = "urlElsePublicationName";
 const OLD_DATE: &str = "apparitionTimestampIfDifferentThanSubmission";
+/// The retired "needs generation" sentinel; a field holding only it is migrated to blank.
+const OLD_MARKER: &str = "[[PUBLICATOR:TODO_GENERATE]]";
 
 fn is_http_url(value: &str) -> bool {
     url::Url::parse(value)
@@ -26,7 +28,7 @@ fn inferred_state(row: &Value) -> String {
     let complete = ["title", "description"].iter().all(|key| {
         row.get(key)
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty() && !value.contains(GENERATE_MARKER))
+            .is_some_and(|value| !value.trim().is_empty())
     });
     let dated = row.get(OLD_DATE).is_some();
     // A partial delivery has left the editable stages, as publishing records it.
@@ -155,6 +157,11 @@ fn migrate_row(row: &mut Value, recovered: &HashMap<String, String>) -> Result<(
     object
         .entry("description")
         .or_insert_with(|| Value::String(String::new()));
+    for key in ["title", "description"] {
+        if object.get(key).and_then(Value::as_str).map(str::trim) == Some(OLD_MARKER) {
+            object.insert(key.into(), Value::String(String::new()));
+        }
+    }
     let state = inferred_state(row);
     row.as_object_mut()
         .unwrap()

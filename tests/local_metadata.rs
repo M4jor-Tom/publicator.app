@@ -6,7 +6,6 @@ use publicator::{
         Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS,
         consent_required, metadata_prompt, title_description_schema,
     },
-    model::GENERATE_MARKER,
 };
 use serde_json::{Value, json};
 use std::{
@@ -247,7 +246,6 @@ async fn local_chat_sends_schema_and_image_and_parses_pair() {
 
 #[tokio::test]
 async fn local_chat_rejects_malformed_or_empty_metadata() {
-    let marked = format!("{{\"title\":\"T\",\"description\":\"text {GENERATE_MARKER}\"}}");
     for (reply, expected) in [
         (chat("not json"), "provider error: no JSON object"),
         (
@@ -256,11 +254,7 @@ async fn local_chat_rejects_malformed_or_empty_metadata() {
         ),
         (
             chat("{\"title\":\"\",\"description\":\"text\"}"),
-            "validation error: complete unmarked metadata required",
-        ),
-        (
-            chat(&marked),
-            "validation error: complete unmarked metadata required",
+            "validation error: complete metadata required",
         ),
         (
             Reply::new("/api/chat", 200, json!({"message":{}})),
