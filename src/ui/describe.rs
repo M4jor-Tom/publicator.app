@@ -7,9 +7,7 @@ use iced::{
     Element, Length, Task,
     widget::{Column, button, column, container, row, text, text_input},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
 
 /// The Rows layout's thumbnail and action column widths.
 const ROW_ART_WIDTH: f32 = 160.0;
@@ -401,45 +399,14 @@ pub(super) fn ordered_rows<'a>(
     super::revealed_rows(listed.into_iter(), target)
 }
 
-/// The Describe card arrangement, kept in `<data dir>/.publicator/ui.json`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The Describe card arrangement, kept in memory for the session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DescribeLayout {
     /// Cards in a responsive grid.
-    #[default]
     Grid,
     /// One full-width card per row.
+    #[default]
     Rows,
-}
-
-#[derive(Serialize, Deserialize)]
-struct UiPreferences {
-    describe_layout: DescribeLayout,
-}
-
-fn preferences_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(".publicator")
-}
-
-/// The saved layout; Grid when the file is missing, unreadable or invalid.
-pub(super) fn load_layout(data_dir: &Path) -> DescribeLayout {
-    std::fs::read(preferences_dir(data_dir).join("ui.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<UiPreferences>(&bytes).ok())
-        .map(|preferences| preferences.describe_layout)
-        .unwrap_or_default()
-}
-
-pub(super) fn save_layout(data_dir: &Path, layout: DescribeLayout) -> crate::error::Result<()> {
-    let dir = preferences_dir(data_dir);
-    crate::publish_journal::create_real_directory(
-        &dir,
-        "UI preference directory must be a real directory",
-    )?;
-    let bytes = serde_json::to_vec(&UiPreferences {
-        describe_layout: layout,
-    })?;
-    crate::store::write_atomic(&dir.join("ui.json"), &bytes)
 }
 
 #[cfg(test)]
@@ -491,36 +458,5 @@ mod tests {
             uuids(&ordered_rows(&rows, &batch, Some("e"), |_| false)),
             ["e", "b", "a", "c", "d"]
         );
-    }
-
-    #[test]
-    fn layout_preference_round_trips_and_falls_back_to_grid() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            load_layout(dir.path()),
-            DescribeLayout::Grid,
-            "missing file"
-        );
-        save_layout(dir.path(), DescribeLayout::Rows).unwrap();
-        let file = dir.path().join(".publicator/ui.json");
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            r#"{"describe_layout":"rows"}"#
-        );
-        assert_eq!(load_layout(dir.path()), DescribeLayout::Rows);
-        for invalid in ["not json", r#"{"describe_layout":"columns"}"#, "{}"] {
-            std::fs::write(&file, invalid).unwrap();
-            assert_eq!(load_layout(dir.path()), DescribeLayout::Grid, "{invalid}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn layout_preference_refuses_a_symlinked_state_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(".publicator")).unwrap();
-        assert!(save_layout(dir.path(), DescribeLayout::Rows).is_err());
-        assert!(!elsewhere.path().join("ui.json").exists());
     }
 }

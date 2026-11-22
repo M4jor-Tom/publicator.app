@@ -535,7 +535,7 @@ impl App {
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
-            describe_layout: describe::load_layout(&application.store().paths().data_dir),
+            describe_layout: describe::DescribeLayout::default(),
             window_width: WINDOW_WIDTH,
             generation_states: HashMap::new(),
             batch: None,
@@ -1119,20 +1119,11 @@ impl App {
         Task::none()
     }
 
-    /// Switches at once; a failed save only reports itself.
-    fn select_describe_layout(&mut self, layout: describe::DescribeLayout) {
-        self.describe_layout = layout;
-        let data_dir = &self.application.store().paths().data_dir;
-        if let Err(error) = describe::save_layout(data_dir, layout) {
-            self.result = Some(format!("Layout preference was not saved: {error}"));
-        }
-    }
-
     fn update_generation(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectSource(source) => return self.select_source(source),
             Message::SelectModel(model) => return self.select_model(model),
-            Message::SelectDescribeLayout(layout) => self.select_describe_layout(layout),
+            Message::SelectDescribeLayout(layout) => self.describe_layout = layout,
             Message::ConfirmLocalInstall => return self.on_confirm_local_install(),
             Message::CancelLocalInstall => {
                 self.pending_local_consent = None;
