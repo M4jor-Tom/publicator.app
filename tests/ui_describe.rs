@@ -1140,6 +1140,28 @@ fn describe_view_constructs_from_loaded_state() {
 }
 
 #[tokio::test]
+async fn describe_layout_starts_in_rows_and_keeps_the_choice_in_memory_only() {
+    let f = Fixture::new();
+    f.write(json!([row(1, "SCHEDULED")]));
+    let (mut app, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Rows);
+    let _ = app.update(Message::SelectDescribeLayout(
+        describe::DescribeLayout::Grid,
+    ));
+    let _: Element<'_, Message> = describe::view(&app);
+    common::ui::send(&mut app, Message::Navigate(Tab::Publish)).await;
+    common::ui::send(&mut app, Message::Navigate(Tab::Describe)).await;
+    common::ui::send(&mut app, Message::Refresh).await;
+    assert_eq!(app.describe_layout(), describe::DescribeLayout::Grid);
+    assert!(
+        !f.path(".publicator/ui.json").exists(),
+        "the choice is not saved"
+    );
+    let (restarted, _) = fixture_app(&f, "http://127.0.0.1:1".into());
+    assert_eq!(restarted.describe_layout(), describe::DescribeLayout::Rows);
+}
+
+#[tokio::test]
 async fn native_multiline_description_editor_keeps_unicode_and_literal_markup() {
     let fixture = Fixture::new();
     let mut scheduled = row(900, "SCHEDULED");
