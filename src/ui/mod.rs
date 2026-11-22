@@ -119,6 +119,8 @@ pub struct UiOptions {
     pub ai_timeout: Duration,
 }
 
+const WINDOW_WIDTH: f32 = 1100.0;
+
 pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Result {
     iced::application(
         move || App::new(application.clone(), options.clone()),
@@ -127,7 +129,7 @@ pub fn run(application: Arc<CoreApplication>, options: UiOptions) -> iced::Resul
     )
     .subscription(App::subscription)
     .theme(app_theme)
-    .window_size((1100.0, 760.0))
+    .window_size((WINDOW_WIDTH, 760.0))
     .centered()
     .exit_on_close_request(false)
     .run()
@@ -176,7 +178,9 @@ enum BatchProgress {
         done: usize,
         failed: usize,
     },
+    /// `ids` keep the finished batch's cards first until Refresh clears it.
     Finished {
+        ids: Vec<String>,
         succeeded: usize,
         failed: usize,
     },
@@ -191,6 +195,8 @@ pub enum Message {
     LoadFinished(u64, Result<Loaded, String>),
     Navigate(Tab),
     Scrolled(Tab, iced::widget::scrollable::AbsoluteOffset),
+    /// The window's new width.
+    WindowResized(f32),
     Edited {
         uuid: String,
         field: Field,
@@ -283,6 +289,7 @@ pub enum Message {
     CancelLocalInstall,
     SelectSource(Source),
     SelectModel(ModelOption),
+    SelectDescribeLayout(describe::DescribeLayout),
     GenerationProgress(BatchEvent),
     GenerationFinished {
         uuid: Option<String>,
@@ -423,6 +430,8 @@ pub struct App {
     custom_dates: HashMap<String, (String, String)>,
     source: Source,
     model: ModelOption,
+    describe_layout: describe::DescribeLayout,
+    window_width: f32,
     generation_states: HashMap<String, GenerationState>,
     batch: Option<BatchProgress>,
     pending_generation: Option<String>,
@@ -527,6 +536,8 @@ impl App {
             custom_dates: HashMap::new(),
             source: Source::OpenRouter,
             model,
+            describe_layout: describe::DescribeLayout::default(),
+            window_width: WINDOW_WIDTH,
             generation_states: HashMap::new(),
             batch: None,
             pending_generation: None,
@@ -590,6 +601,16 @@ impl App {
     }
     pub fn current_tab(&self) -> Tab {
         self.active_tab
+    }
+    pub fn describe_layout(&self) -> describe::DescribeLayout {
+        self.describe_layout
+    }
+    /// The current batch's cards, listed first in Describe.
+    fn batch_ids(&self) -> &[String] {
+        match &self.batch {
+            Some(BatchProgress::Running { ids, .. } | BatchProgress::Finished { ids, .. }) => ids,
+            _ => &[],
+        }
     }
     pub fn local_fit_status(&self) -> Option<&LocalStatus> {
         self.local_fit.as_ref()
@@ -823,6 +844,7 @@ impl App {
             | Message::PublishKeyboardExit => self.update_keyboard(message),
             Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -843,11 +865,21 @@ impl App {
             | Message::CloseCancelPublish
             | Message::CloseWait
             | Message::PublishFinished(..) => self.update_selection(message),
-            Message::Scrolled(tab, offset) => {
-                self.scroll_offsets.insert(tab, offset);
+            Message::Scrolled(..) | Message::WindowResized(..) => {
+                self.update_viewport(message);
                 Task::none()
             }
             message => self.update_workflow(message),
+        }
+    }
+
+    fn update_viewport(&mut self, message: Message) {
+        match message {
+            Message::Scrolled(tab, offset) => {
+                self.scroll_offsets.insert(tab, offset);
+            }
+            Message::WindowResized(width) => self.window_width = width,
+            _ => unreachable!("message routed to viewport handler"),
         }
     }
 
@@ -903,6 +935,7 @@ impl App {
             | Message::PublishStatusesFinished(..)
             | Message::Navigate(..)
             | Message::Scrolled(..)
+            | Message::WindowResized(..)
             | Message::CloseRequested
             | Message::ConfirmDiscard
             | Message::KeepEditing
@@ -916,6 +949,7 @@ impl App {
             | Message::PublishKeyboardExit
             | Message::SelectSource(..)
             | Message::SelectModel(..)
+            | Message::SelectDescribeLayout(..)
             | Message::ConfirmLocalInstall
             | Message::CancelLocalInstall
             | Message::LocalFitFinished { .. }
@@ -1091,6 +1125,7 @@ impl App {
         match message {
             Message::SelectSource(source) => return self.select_source(source),
             Message::SelectModel(model) => return self.select_model(model),
+            Message::SelectDescribeLayout(layout) => self.describe_layout = layout,
             Message::ConfirmLocalInstall => return self.on_confirm_local_install(),
             Message::CancelLocalInstall => {
                 self.pending_local_consent = None;
@@ -1788,6 +1823,7 @@ impl App {
             }
             self.batch = Some(match result {
                 Ok(()) => BatchProgress::Finished {
+                    ids,
                     succeeded: done,
                     failed,
                 },
@@ -2952,6 +2988,7 @@ impl App {
         Subscription::batch([
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
             iced::event::listen_with(publish_keyboard_event),
         ])
     }
@@ -2960,7 +2997,7 @@ impl App {
         let count = |tab| match tab {
             Tab::Pick => Some(self.candidates.len()),
             Tab::Schedule => Some(schedule::ordered_rows(rows, None).len()),
-            Tab::Describe => Some(describe::ordered_rows(rows, None, |_| false).len()),
+            Tab::Describe => Some(describe::ordered_rows(rows, &[], None, |_| false).len()),
             Tab::Publish => {
                 Some(publish::ordered_rows(rows, None, self.publish_locks.as_ref()).len())
             }
