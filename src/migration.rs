@@ -157,16 +157,20 @@ fn migrate_row(row: &mut Value, recovered: &HashMap<String, String>) -> Result<(
     object
         .entry("description")
         .or_insert_with(|| Value::String(String::new()));
-    for key in ["title", "description"] {
-        if object.get(key).and_then(Value::as_str).map(str::trim) == Some(OLD_MARKER) {
-            object.insert(key.into(), Value::String(String::new()));
-        }
-    }
+    blank_old_markers(object);
     let state = inferred_state(row);
     row.as_object_mut()
         .unwrap()
         .insert("state".into(), Value::String(state));
     Ok(())
+}
+
+fn blank_old_markers(row: &mut Map<String, Value>) {
+    for key in ["title", "description"] {
+        if row.get(key).and_then(Value::as_str).map(str::trim) == Some(OLD_MARKER) {
+            row.insert(key.into(), Value::String(String::new()));
+        }
+    }
 }
 
 fn migrate_date(row: &mut Map<String, Value>, date: Option<i64>, uuid: &str) -> Result<()> {

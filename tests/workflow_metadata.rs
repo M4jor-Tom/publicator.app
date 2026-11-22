@@ -159,27 +159,6 @@ fn generated_title_preserves_a_manual_description() {
 }
 
 #[test]
-fn whitespace_only_fields_count_as_blank_and_are_generated() {
-    let f = Fixture::new();
-    let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!(" \n ");
-    publication["description"] = json!("");
-    f.write(json!([publication]));
-    merge(
-        &f.store,
-        &Metadata {
-            title: "AI title".into(),
-            description: "AI description".into(),
-        },
-    )
-    .unwrap();
-    let saved = f.store.read().unwrap();
-    assert_eq!(saved[0]["title"], "AI title");
-    assert_eq!(saved[0]["description"], "AI description");
-    assert_eq!(saved[0]["state"], "DESCRIBED");
-}
-
-#[test]
 fn batch_merge_skips_a_complete_manual_draft() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
@@ -202,27 +181,31 @@ fn batch_merge_skips_a_complete_manual_draft() {
 
 #[test]
 fn merging_both_blank_fields_with_valid_pair_advances_to_described() {
-    let f = Fixture::new();
-    let publication = common::with_blank_metadata(row(1, "SCHEDULED"));
-    f.write(json!([publication]));
-    merge(
-        &f.store,
-        &Metadata {
-            title: "AI title".into(),
-            description: "AI description".into(),
-        },
-    )
-    .unwrap();
-    let saved = f.store.read().unwrap();
-    assert_eq!(saved[0]["title"], "AI title");
-    assert_eq!(saved[0]["description"], "AI description");
-    assert_eq!(saved[0]["state"], "DESCRIBED");
-    let before_reapproval = std::fs::read(&f.store.paths().json).unwrap();
-    assert!(approve_metadata(&f.store, &id(1)).is_err());
-    assert_eq!(
-        std::fs::read(&f.store.paths().json).unwrap(),
-        before_reapproval
-    );
+    // A whitespace-only field counts as blank.
+    for title in ["", " \n "] {
+        let f = Fixture::new();
+        let mut publication = common::with_blank_metadata(row(1, "SCHEDULED"));
+        publication["title"] = json!(title);
+        f.write(json!([publication]));
+        merge(
+            &f.store,
+            &Metadata {
+                title: "AI title".into(),
+                description: "AI description".into(),
+            },
+        )
+        .unwrap();
+        let saved = f.store.read().unwrap();
+        assert_eq!(saved[0]["title"], "AI title");
+        assert_eq!(saved[0]["description"], "AI description");
+        assert_eq!(saved[0]["state"], "DESCRIBED");
+        let before_reapproval = std::fs::read(&f.store.paths().json).unwrap();
+        assert!(approve_metadata(&f.store, &id(1)).is_err());
+        assert_eq!(
+            std::fs::read(&f.store.paths().json).unwrap(),
+            before_reapproval
+        );
+    }
 }
 
 fn merge_after_manual_edit(pair: Metadata, patch: MetadataPatch) -> Fixture {
