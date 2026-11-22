@@ -648,10 +648,12 @@ class Palette:
         return sorted(found, key=lambda item: (item[1][1] // 12, item[1][0]))
 
 
-def previews(app, palette, what, timeout=90):
+def previews(app, palette, what, timeout=90, order=None):
     """Wait until artwork is listed and every card whose top is visible shows a fixture image
     (not "Loading preview…"); return (capture, list region, visible images). Other muted text,
-    such as an unknown-prompt label or a placeholder, is legitimate."""
+    such as an unknown-prompt label or a placeholder, is legitimate. Given the list's `order`,
+    also wait for the images to be one contiguous run of it: a card still loading is only a
+    text line tall, so scrolled partly out it can hide wholly above the list's top edge."""
 
     def loaded(img):
         region, thumb = list_view(img)
@@ -669,7 +671,17 @@ def previews(app, palette, what, timeout=90):
                     return None
         return img, region, blocks
 
-    return app.look(loaded, f"every visible {what} card to show its own preview", timeout)
+    def ready(img):
+        found = loaded(img)
+        return found if found and (order is None or contiguous(found[2], order)) else None
+
+    return app.look(ready, f"every visible {what} card to show its own preview", timeout)
+
+
+def contiguous(blocks, expected):
+    """The listed images among `blocks` are one gap-free run of `expected`."""
+    positions = [expected.index(name) for name, _ in blocks if name in expected]
+    return not positions or positions == list(range(positions[0], positions[0] + len(positions)))
 
 
 def assert_order(blocks, expected, what):
@@ -1004,7 +1016,7 @@ def schedule_custom_preset_refresh_and_persistence(ctx):
     before = app.digest()
     navigate(app, "Schedule")
     expected = listed_names(app, "Schedule")
-    img, region, blocks = previews(app, palette, "Schedule")
+    img, region, blocks = previews(app, palette, "Schedule", order=expected)
     assert_order(blocks, expected, "Schedule")
     jump(app, 0.5)
     previews(app, palette, "Schedule")
@@ -1122,7 +1134,7 @@ def describe_unicode_debounce_save_failure_retry_and_restart(ctx):
     describe_grid(app)
     expected = listed_names(app, "Describe")
     target = next(row for row in app.rows() if row["files"][0]["basename"] == expected[0])
-    img, region, blocks = previews(app, palette, "Describe")
+    img, region, blocks = previews(app, palette, "Describe", order=expected)
     assert_order(blocks, expected, "Describe")
 
     def fields():
@@ -1829,9 +1841,10 @@ def every_visible_card_loads_its_own_image(ctx):
             for fraction in (1.0, 0.45, 0.0, 0.8):
                 what = f"{tab} at {size} {fraction:.0%}"
                 jump(app, fraction)
-                img, region, blocks = previews(app, palette, what)
-                if tab in TAB_STATES:
-                    assert_order(blocks, listed_names(app, tab), tab)
+                expected = listed_names(app, tab) if tab in TAB_STATES else None
+                img, region, blocks = previews(app, palette, what, order=expected)
+                if expected is not None:
+                    assert_order(blocks, expected, tab)
                     continue
                 if not blocks:
                     # Pick cards are about as tall as the view, so a stop can fall between two
