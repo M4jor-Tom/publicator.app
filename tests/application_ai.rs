@@ -1,6 +1,6 @@
 mod common;
 use common::http::{Reply, Server, completion, content};
-use common::{Fixture, eventually, id, row, run_child_test, running, with_markers};
+use common::{Fixture, eventually, id, row, run_child_test, running, with_blank_metadata};
 use publicator::{
     application::Application,
     config::{Config, Paths},
@@ -64,7 +64,7 @@ async fn marked_batch_uses_configuration_from_data_dir_for_external_json() {
     let json_path = external.path().join("rows.json");
 
     let make_row = |gallery: &str| {
-        let mut publication = with_markers(row(1, "SCHEDULED"));
+        let mut publication = with_blank_metadata(row(1, "SCHEDULED"));
         publication["files"][0]["basename"] = json!("art.png");
         publication["files"][0]["sha512sum"] =
             json!(publicator::images::file_sha512(&f.path("art.png")).unwrap());
@@ -135,7 +135,7 @@ async fn empty_local_marked_batch_is_noop_without_model_or_service_setup() {
 async fn marked_batch_admission_uses_eligibility_after_a_waiting_edit() {
     let f = Fixture::new();
     f.image("1.png", 4, 4);
-    f.write(json!([with_markers(row(1, "SCHEDULED"))]));
+    f.write(json!([with_blank_metadata(row(1, "SCHEDULED"))]));
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
         client("http://127.0.0.1:1".into()),
@@ -200,11 +200,12 @@ async fn generation_lease_excludes_duplicate_and_same_uuid_edits_but_not_other_w
 }
 
 #[tokio::test]
-async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
+async fn openrouter_batch_continues_after_failure_and_skips_a_complete_draft() {
     let f = Fixture::new();
     let mut rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
-    rows[2]["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
-    rows[2]["description"] = json!("[[PUBLICATOR:TODO_GENERATE]] ");
+    rows[0]["title"] = json!("Manual title");
+    rows[2]["title"] = json!("Complete title");
+    rows[2]["description"] = json!("Complete description");
     f.write(json!(rows));
     let server = Server::start(vec![
         Reply::new(
@@ -231,11 +232,14 @@ async fn openrouter_batch_continues_after_failure_and_ignores_inexact_marker() {
         [id(2).as_str(), id(1).as_str()]
     );
     let saved = f.read();
-    assert_eq!(saved[0]["title"], "Generated");
+    // The partial draft gets only its blank description and validates.
+    assert_eq!(saved[0]["title"], "Manual title");
     assert_eq!(saved[0]["description"], "A complete generated description.");
-    assert_eq!(saved[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
-    assert_eq!(saved[1]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
-    assert_eq!(saved[2]["title"], "[[PUBLICATOR:TODO_GENERATE]] ");
+    assert_eq!(saved[0]["state"], "DESCRIBED");
+    // The failed record is left exactly as it was.
+    assert_eq!(saved[1], rows[1]);
+    // The complete draft was never admitted.
+    assert_eq!(saved[2], rows[2]);
     let requests = server.requests();
     assert_eq!(
         requests
@@ -284,8 +288,7 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
     let saved = f.read();
     assert_eq!(saved[0]["title"], "title-1");
     assert_eq!(saved[0]["description"], "A complete generated description.");
-    assert_eq!(saved[1]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
-    assert_eq!(saved[1]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(saved[1], rows[1], "a failed record is left unchanged");
     assert_eq!(saved[2]["title"], "title-3");
     assert_eq!(saved[2]["description"], "A complete generated description.");
 }
@@ -459,7 +462,7 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
     assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before_model);
 
     for invalid_field in ["uuid", "submissionTimestamp"] {
-        let mut invalid = with_markers(row(1, "SCHEDULED"));
+        let mut invalid = with_blank_metadata(row(1, "SCHEDULED"));
         if invalid_field == "uuid" {
             invalid["uuid"] = json!("short");
         } else {
@@ -483,26 +486,29 @@ async fn invalid_phase_model_and_database_do_not_write_or_call_provider() {
 }
 
 #[tokio::test]
-async fn accepted_provider_failure_saves_both_markers() {
+async fn accepted_provider_failure_leaves_the_row_unchanged() {
     let f = Fixture::new();
     f.write(json!([f.art_row(1, "SCHEDULED")]));
+    let before = std::fs::read(&f.store.paths().json).unwrap();
     let server = Server::start(provider_failures(1));
     let app = Application::new(Arc::new(f.store.clone()), client(server.url().to_owned()));
     let result = app.generate_one(&id(1), request(Source::OpenRouter)).await;
     server.finish();
     let error = result.unwrap_err().to_string();
     assert!(error.contains("OpenRouter HTTP 500"), "{error}");
-    assert_eq!(f.read()[0]["title"], "[[PUBLICATOR:TODO_GENERATE]]");
-    assert_eq!(f.read()[0]["description"], "[[PUBLICATOR:TODO_GENERATE]]");
+    assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
+    assert_eq!(f.read()[0]["title"], "Title");
+    assert_eq!(f.read()[0]["description"], "Description");
+    assert_eq!(f.read()[0]["state"], "SCHEDULED");
 }
 
 #[tokio::test]
-async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure() {
+async fn openrouter_batch_reverses_persisted_order_and_keeps_blank_field_on_failure() {
     let f = Fixture::new();
     let mut rows = vec![];
     for n in 1..=3 {
         let mut p = f.art_row(n, "SCHEDULED");
-        p["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+        p["description"] = json!("");
         rows.push(p);
     }
     f.write(json!(rows));
@@ -527,7 +533,7 @@ async fn openrouter_batch_reverses_persisted_order_and_keeps_marker_on_failure()
             .as_array()
             .unwrap()
             .iter()
-            .all(|p| p["description"] == "[[PUBLICATOR:TODO_GENERATE]]")
+            .all(|p| p["description"] == "" && p["state"] == "SCHEDULED")
     );
 }
 

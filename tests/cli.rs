@@ -21,8 +21,8 @@ fn marked_data(root: &std::path::Path) {
         root.join("publications.json"),
         json!([{
             "uuid":"00000000-0000-4000-8000-000000000001",
-            "state":"SCHEDULED", "title":"[[PUBLICATOR:TODO_GENERATE]]",
-            "description":"[[PUBLICATOR:TODO_GENERATE]]", "submissionTimestamp":1700000000,
+            "state":"SCHEDULED", "title":"",
+            "description":"", "submissionTimestamp":1700000000,
             "files":[{"basename":"art.png","sha512sum":hash}], "apparitions":[]
         }])
         .to_string(),

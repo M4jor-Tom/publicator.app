@@ -40,9 +40,14 @@ fn calendar_keeps_two_apparitions_with_one_shared_title() {
 }
 
 #[test]
-fn calendar_labels_marker_metadata_and_preserves_file_name() {
+fn calendar_labels_pending_metadata_and_preserves_file_name() {
+    let mut complete = row(2, "Stored title", 1700000000);
+    complete["state"] = json!("SCHEDULED");
+    complete["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
+    assert_eq!(timeline(&[complete]).unwrap()[0].title, "Stored title");
     let mut p = row(1, "real", 1700000000);
-    p["title"] = json!("[[PUBLICATOR:TODO_GENERATE]] title");
+    p["state"] = json!("SCHEDULED");
+    p["description"] = json!(" ");
     p["files"][0] = json!({"basename":"old.png"});
     p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
     let event = &timeline(&[p]).unwrap()[0];

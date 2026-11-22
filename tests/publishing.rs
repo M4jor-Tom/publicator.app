@@ -78,7 +78,7 @@ async fn historical_pending_cells_do_not_block_registered_publish_targets() {
         rows.push(publication);
     }
     let mut historical_only = row(99, "DESCRIBED");
-    historical_only["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    historical_only["title"] = json!("");
     historical_only["apparitions"] =
         json!([{"platformName":"historical-pixiv","state":"unpublished"}]);
     rows.push(historical_only.clone());
@@ -149,7 +149,7 @@ async fn assert_no_worker_started(f: &Fixture) {
 async fn marked_historical_only_publication_is_an_unchanged_noop() {
     let f = Fixture::new();
     let mut publication = row(1, "SCHEDULED");
-    publication["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    publication["title"] = json!("");
     publication["apparitions"] = json!([{
         "platformName":"pixiv",
         "state":"unpublished",
@@ -163,7 +163,7 @@ async fn marked_historical_only_publication_is_an_unchanged_noop() {
 async fn marked_or_unphased_pending_targets_never_start_the_worker() {
     let f = Fixture::new();
     let mut marked = row(1, "SCHEDULED");
-    marked["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+    marked["title"] = json!("");
     marked["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
     let mut unphased = row(2, "PICKED");
     unphased["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);

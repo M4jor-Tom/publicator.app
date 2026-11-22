@@ -7,7 +7,7 @@ use publicator::{
         Endpoints, GenerationRequest, MetadataClient, ModelOption, Source, VISION_MODELS,
         openrouter_model,
     },
-    model::{GENERATE_MARKER, Phase, phase},
+    model::{Phase, needs_generation, phase},
     prompts::{PromptArchive, audit},
     publish_journal::{self, PublishJournal, ReconcileOutcome},
     publishing::{PublishReport, PublishRequest, Publisher, first_pending_uuid},
@@ -267,12 +267,7 @@ async fn generate_meta(args: GenerateMetaArgs) -> Result<()> {
         return Err(Error::Validation("timeout must be positive".into()));
     }
     let rows = store.read()?;
-    let eligible = rows.iter().any(|r| {
-        phase(r).ok() == Some(Phase::Scheduled)
-            && ["title", "description"]
-                .iter()
-                .any(|k| r.get(*k).and_then(serde_json::Value::as_str) == Some(GENERATE_MARKER))
-    });
+    let eligible = rows.iter().any(needs_generation);
     let client = metadata_client(Some(&paths.data_dir))?;
     let install_missing = if source == Source::Local && eligible {
         local_install_consent(&client, &model, Duration::from_secs(timeout), yes).await?

@@ -18,23 +18,26 @@ Feature: Generate and approve artwork metadata
     Scenario: Accept a complete pair
       Given a SCHEDULED publication whose admitted fields have not changed
       When the chosen provider returns both title and description
-      Then a validated, nonblank, unmarked pair is saved and the publication becomes DESCRIBED
+      Then a validated, nonblank pair is saved and the publication becomes DESCRIBED
 
     Scenario: Generation fails after admission
       Given a SCHEDULED publication whose admitted fields have not changed
       When its single provider generation fails
-      Then both fields contain exactly [[PUBLICATOR:TODO_GENERATE]]
+      Then nothing is written: the title and description stay unchanged
       And the publication remains SCHEDULED and retryable, not approved for publishing
+      And its card shows "Failed: <error>"
 
     Scenario: Another writer edits a field during single generation
       Given the application admitted the current title and description, including any saved draft
       When a writer changes the title before generation completes
-      Then neither the generated title nor a failure marker replaces the newer title
+      Then the generated title does not replace the newer title
       And only fields still equal to their admitted values may be replaced, without approving the pair
 
     Scenario: Run a marked batch
+      Given the batch admits every SCHEDULED publication whose title or description is blank after trimming
       When the admitted publications are processed in order
-      Then one record runs at a time outside the store lock and only exact marker fields are merged
+      Then one record runs at a time outside the store lock
+      And only fields blank when the record started and unchanged since are merged; it becomes DESCRIBED when a merged field leaves a valid pair
       And each start and finish is reported and each success persisted before the next record
       And a finished record becomes editable immediately; aborting releases all remaining reservations
 

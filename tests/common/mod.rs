@@ -86,9 +86,9 @@ impl Fixture {
             json!(publicator::images::file_sha512(&image).unwrap());
         publication
     }
-    /// A SCHEDULED `art_row` marked for generation, as AI generation requires.
+    /// A SCHEDULED `art_row` with blank metadata, so a marked batch admits it.
     pub fn marked_row(&self, n: u64) -> Value {
-        with_markers(self.art_row(n, "SCHEDULED"))
+        with_blank_metadata(self.art_row(n, "SCHEDULED"))
     }
     /// Rows 1 and 2 in `state` whose artwork shares the basename `blur.png` (`a/` red, `b/` blue),
     /// each recording its own file's SHA-512; with those files and their thumbnail names.
@@ -148,10 +148,10 @@ pub fn found(f: &Fixture, roots: &[&str]) -> publicator::error::Result<Vec<std::
     Ok(paths)
 }
 
-/// `row` with both fields carrying the exact generation marker.
-pub fn with_markers(mut row: Value) -> Value {
-    row["title"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
-    row["description"] = json!("[[PUBLICATOR:TODO_GENERATE]]");
+/// `row` with both fields blank, so it needs generation.
+pub fn with_blank_metadata(mut row: Value) -> Value {
+    row["title"] = json!("");
+    row["description"] = json!("");
     row
 }
 

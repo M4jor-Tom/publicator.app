@@ -2819,12 +2819,7 @@ impl App {
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .filter(|row| {
-                phase(row).ok() == Some(Phase::Scheduled)
-                    && ["title", "description"].iter().any(|key| {
-                        row.get(*key).and_then(Value::as_str) == Some(crate::model::GENERATE_MARKER)
-                    })
-            })
+            .filter(|row| crate::model::needs_generation(row))
             .filter_map(|row| row.get("uuid").and_then(Value::as_str).map(str::to_owned))
             .collect()
     }
@@ -4089,7 +4084,7 @@ done
         );
         assert_eq!(shown(&app, &one), stored(&app, &one));
 
-        // A failed generation writes markers and reloads while other drafts hold input.
+        // A failed generation writes nothing and reloads while other drafts hold input.
         edit(&mut app, &one, Field::Title, "In flight");
         let held = app.update(Message::SaveDraft(one.clone()));
         edit(&mut app, &two, Field::Description, "Unsaved");
@@ -4100,6 +4095,7 @@ done
                 Ok(())
             })
             .unwrap();
+        let before = stored(&app, &three);
         let generated = send(&mut app, Message::GenerateOne(three.clone())).await;
         assert!(
             generated.iter().any(|message| matches!(
@@ -4107,8 +4103,10 @@ done
                 Message::GenerationFinished { result: Err(_), .. }
             ))
         );
-        let marker = crate::model::GENERATE_MARKER.to_owned();
-        assert_eq!(stored(&app, &three), (marker.clone(), marker));
+        assert_eq!(stored(&app, &three), before);
+        let rows = app.application.store().read().unwrap();
+        let row = rows.iter().find(|row| row["uuid"] == three).unwrap();
+        assert_eq!(row["state"], "SCHEDULED");
         assert_eq!(shown(&app, &three), stored(&app, &three));
         assert_eq!(
             shown(&app, &two),

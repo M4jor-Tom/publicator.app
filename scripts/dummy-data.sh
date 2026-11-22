@@ -81,7 +81,6 @@ hour = 10
 per_slot = 1
 EOF
 
-marker='[[PUBLICATOR:TODO_GENERATE]]'
 rows=()
 row() { # row N STATE TITLE DESCRIPTION OFFSET_DAYS APPARITIONS
   local name="art-$1.png"
@@ -104,7 +103,7 @@ row 3 APPEARED "Night market" "Neon and rain." -3 "$(live 3)"
 row 4 DESCRIBED "Copper dunes" "Desert at noon." 4 "$draft"
 row 5 DESCRIBED "Tidal bloom" "Algae under moonlight." 8 "$draft"
 row 6 SCHEDULED "Signal tower" "Radio mast in fog." 11 '[]'
-row 7 SCHEDULED "$marker" "$marker" 15 '[]'
+row 7 SCHEDULED "" "" 15 '[]'
 row 8 SCHEDULED "Paper moons" "" 18 '[]'
 row 9 PICKED "" "" 22 '[]'
 row 10 PICKED "" "" 25 '[]'

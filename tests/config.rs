@@ -386,10 +386,10 @@ fn paths_resolve_relative_json_under_data_dir_and_default_to_cwd() {
 }
 
 #[test]
-fn metadata_requires_complete_unmarked_title_with_unicode_limit() {
+fn metadata_requires_complete_title_with_unicode_limit() {
     assert!(validate_metadata("valid", "description").is_ok());
     assert!(validate_metadata("  ", "description").is_err());
-    assert!(validate_metadata("Title [[PUBLICATOR:TODO_GENERATE]]", "description").is_err());
+    assert!(validate_metadata("Title [[old generation marker]]", "description").is_ok());
     assert!(validate_metadata(&"🦀".repeat(51), "description").is_err());
 }
 

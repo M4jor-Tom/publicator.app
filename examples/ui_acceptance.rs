@@ -12,7 +12,6 @@ use publicator::{
     application::Application,
     config::{Config, Paths, PromptConfig, PromptGrammar},
     metadata::{Endpoints, MetadataClient},
-    model::GENERATE_MARKER,
     publishing::Publisher,
     store::Store,
     ui::{self, UiOptions},
@@ -113,8 +112,8 @@ fn row(uuid: u64, state: &str, color: [u8; 3], dir: &Path) -> Value {
     json!({
         "uuid": format!("00000000-0000-4000-8000-{uuid:012}"),
         "state": state,
-        "title": if state == "SCHEDULED" { GENERATE_MARKER } else { "Fixture title" },
-        "description": if state == "SCHEDULED" { GENERATE_MARKER } else { "Fixture description" },
+        "title": if state == "SCHEDULED" { "" } else { "Fixture title" },
+        "description": if state == "SCHEDULED" { "" } else { "Fixture description" },
         "submissionTimestamp": 1_700_000_000,
         "apparitionTimestampIfDifferentThanSubmission": 1_700_002_800 + uuid as i64 * 86400,
         "files": [{"basename": name, "sha512sum": publicator::images::file_sha512(&path).unwrap()}],
@@ -322,7 +321,7 @@ fn gallery_color(index: usize) -> [u8; 3] {
     ]
 }
 
-/// Odd rows keep generation markers; even rows carry long Unicode, newlines and literal markup
+/// Odd SCHEDULED rows keep blank metadata; even rows carry long Unicode, newlines and literal markup
 /// (titles stay within the 50-character limit) and plural publish options.
 fn gallery_metadata(row: &mut Value, index: usize) {
     if row["state"] == "SCHEDULED" && index % 2 == 1 {
@@ -583,8 +582,8 @@ fn calendar_publication(
     json!({
         "uuid": format!("00000000-0000-4000-8000-{uuid:012}"),
         "state": state,
-        "title": if state == "SCHEDULED" { GENERATE_MARKER } else { title },
-        "description": if state == "SCHEDULED" { GENERATE_MARKER } else { "Fixture description" },
+        "title": if state == "SCHEDULED" { "" } else { title },
+        "description": if state == "SCHEDULED" { "" } else { "Fixture description" },
         "submissionTimestamp": timestamp - 86400,
         "apparitionTimestampIfDifferentThanSubmission": timestamp,
         "files": [{"basename": basename, "sha512sum": path.map(|path| publicator::images::file_sha512(path).unwrap()).unwrap_or_else(|| "0".repeat(128))}],

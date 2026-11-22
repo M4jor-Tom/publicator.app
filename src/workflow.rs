@@ -3,8 +3,8 @@ use crate::{
     error::{Error, Result},
     images::{Candidate, file_sha512, published_file_fields},
     model::{
-        GENERATE_MARKER, Phase, RECORDED_SHA512_KEYS, deliveries_complete, has_delivery_success,
-        phase, validate_metadata,
+        Phase, RECORDED_SHA512_KEYS, deliveries_complete, has_delivery_success, phase,
+        validate_metadata,
     },
     scheduling::{profiles, repack, resolve_wall_clock},
     store::Store,
@@ -181,17 +181,23 @@ pub fn approve_metadata(store: &Store, uuid: &str) -> Result<()> {
 }
 
 /// Writes `next` into each field still holding its `admitted` value, so an edit saved by another
-/// writer during generation survives. Returns whether both fields were replaced.
-fn replace_admitted(row: &mut Value, admitted: &Metadata, next: [&str; 2]) -> bool {
-    let mut replaced = true;
+/// writer during generation survives; with `blank_only`, fields nonblank at admission are kept too.
+/// Returns how many fields were replaced.
+fn replace_admitted(
+    row: &mut Value,
+    admitted: &Metadata,
+    next: [&str; 2],
+    blank_only: bool,
+) -> usize {
+    let mut replaced = 0;
     for (key, before, value) in [
         ("title", &admitted.title, next[0]),
         ("description", &admitted.description, next[1]),
     ] {
-        if row.get(key).and_then(Value::as_str) == Some(before.as_str()) {
+        let unchanged = row.get(key).and_then(Value::as_str).unwrap_or_default() == before;
+        if unchanged && (!blank_only || before.trim().is_empty()) {
             row[key] = json!(value);
-        } else {
-            replaced = false;
+            replaced += 1;
         }
     }
     replaced
@@ -209,36 +215,26 @@ pub fn save_generated_pair(
         let row = find_mut(rows, uuid)?;
         require_scheduled_metadata(row)?;
         validate_metadata(&pair.title, &pair.description)?;
-        if replace_admitted(row, admitted, [&pair.title, &pair.description]) {
+        if replace_admitted(row, admitted, [&pair.title, &pair.description], false) == 2 {
             row["state"] = json!("DESCRIBED");
         }
         Ok(())
     })
 }
 
-/// Marks the fields still equal to `admitted` for regeneration; newer edits are kept.
-pub fn fail_generation(store: &Store, uuid: &str, admitted: &Metadata) -> Result<()> {
-    store.mutate(|rows| {
-        let row = find_mut(rows, uuid)?;
-        require_scheduled_metadata(row)?;
-        replace_admitted(row, admitted, [GENERATE_MARKER, GENERATE_MARKER]);
-        Ok(())
-    })
-}
-
-pub fn merge_generated_markers(store: &Store, uuid: &str, pair: &Metadata) -> Result<()> {
+/// Fills a batch record's fields that were blank in its `started` snapshot and are unchanged
+/// since; it approves only when it wrote a field and the merged row validates.
+pub fn merge_generated_blanks(
+    store: &Store,
+    uuid: &str,
+    started: &Metadata,
+    pair: &Metadata,
+) -> Result<()> {
     validate_metadata(&pair.title, &pair.description)?;
     store.mutate(|rows| {
         let row = find_mut(rows, uuid)?;
         require_scheduled_metadata(row)?;
-        let mut applied = false;
-        for (key, value) in [("title", &pair.title), ("description", &pair.description)] {
-            if row.get(key).and_then(Value::as_str) == Some(GENERATE_MARKER) {
-                row[key] = json!(value);
-                applied = true;
-            }
-        }
-        if applied
+        if replace_admitted(row, started, [&pair.title, &pair.description], true) > 0
             && validate_metadata(
                 row.get("title").and_then(Value::as_str).unwrap_or_default(),
                 row.get("description")

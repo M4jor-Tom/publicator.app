@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 
 pub type Publications = Vec<serde_json::Value>;
-pub const GENERATE_MARKER: &str = "[[PUBLICATOR:TODO_GENERATE]]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -26,6 +25,20 @@ pub fn phase(row: &serde_json::Value) -> Result<Phase> {
             "publication state is missing or invalid".into(),
         )),
     }
+}
+/// Whether either field of a (title, description) pair is blank after trimming.
+pub fn metadata_blank(title: &str, description: &str) -> bool {
+    title.trim().is_empty() || description.trim().is_empty()
+}
+/// A `SCHEDULED` row with a missing or blank title or description awaits AI generation.
+pub fn needs_generation(row: &serde_json::Value) -> bool {
+    let field = |key| {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    phase(row).ok() == Some(Phase::Scheduled)
+        && metadata_blank(field("title"), field("description"))
 }
 pub fn effective_schedule(row: &serde_json::Value) -> Option<i64> {
     row.get("apparitionTimestampIfDifferentThanSubmission")
@@ -64,13 +77,8 @@ pub fn deliveries_complete(row: &serde_json::Value) -> bool {
         })
 }
 pub fn validate_metadata(title: &str, description: &str) -> Result<()> {
-    if [title, description]
-        .iter()
-        .any(|s| s.trim().is_empty() || s.contains(GENERATE_MARKER))
-    {
-        return Err(Error::Validation(
-            "complete unmarked metadata required".into(),
-        ));
+    if metadata_blank(title, description) {
+        return Err(Error::Validation("complete metadata required".into()));
     }
     if title.chars().count() > 50 {
         return Err(Error::Validation("title exceeds 50 characters".into()));
