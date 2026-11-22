@@ -195,7 +195,7 @@ fn replace_admitted(
         ("description", &admitted.description, next[1]),
     ] {
         let unchanged = row.get(key).and_then(Value::as_str).unwrap_or_default() == before;
-        if unchanged && !(blank_only && !before.trim().is_empty()) {
+        if unchanged && (!blank_only || before.trim().is_empty()) {
             row[key] = json!(value);
             replaced += 1;
         }
