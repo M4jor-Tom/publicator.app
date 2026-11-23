@@ -1,0 +1,14 @@
+{
+  "subagents": {
+    "agentOverrides": {
+      "intake": {"tools": ["read", "grep", "find", "write"]},
+      "spec-writer": {"tools": ["read", "grep", "find", "bash", "write"]},
+      "builder": {"tools": ["read", "grep", "find", "bash", "edit", "write"]},
+      "approver": {"tools": ["read", "grep", "find", "bash", "write"]},
+      "reviewer-code": {"tools": ["read", "grep", "find", "bash", "write"]},
+      "reviewer-security": {"tools": ["read", "grep", "find", "bash", "write"]},
+      "reviewer-ui": {"tools": ["read", "grep", "find", "bash", "write"]},
+      "reviewer-ux": {"tools": ["read", "grep", "find", "bash", "write"]}
+    }
+  }
+}

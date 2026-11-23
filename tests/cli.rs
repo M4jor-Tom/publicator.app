@@ -1076,7 +1076,7 @@ fn unknown_publish_outcome_prints_reconcile_guidance_matching_the_skill() {
 
     let skill = fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/skills/publish-deviantart/SKILL.md"
+        "/.harnesses/skills/publish-deviantart/SKILL.md"
     ))
     .unwrap();
     for phrase in RECOVERY_PHRASES {

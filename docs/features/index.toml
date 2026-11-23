@@ -22,6 +22,12 @@ tests = ["tests/publishing.rs", "tests/publish_protocol.rs", "tests/publish_jour
 run = "nix run .#da-publish -- --data-dir DIR"
 verify = "nix develop -c cargo test --locked --test publishing --test publish_protocol --test publish_journal --test worker_integration --test cli && nix develop -c env PYTHONPATH=python pytest tests/python -q && nix run .#check-steps"
 
+[factory-model-routing]
+code = ["factory/config.json", "factory/bin/route", ".pi/settings.json", ".harnesses/skills/factory/SKILL.md", ".harnesses/agents/builder.md"]
+tests = ["tests/python/test_factory_models.py", "tests/python/test_factory_harnesses.py"]
+run = "factory/bin/route --pi-model opus"
+verify = "nix develop -c pytest tests/python/test_factory_models.py tests/python/test_factory_harnesses.py -q"
+
 [gallery-ui]
 code = ["src/ui/mod.rs", "src/ui/pick.rs", "src/ui/schedule.rs", "src/ui/describe.rs", "src/ui/publish.rs", "src/ui/drafts.rs", "src/application.rs", "src/workflow.rs"]
 tests = ["tests/ui_workflow.rs", "tests/ui_describe.rs", "tests/ui_drafts.rs", "tests/ui_publish_calendar.rs", "scripts/native-ui-replay.py", "examples/ui_acceptance.rs"]

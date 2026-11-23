@@ -94,7 +94,7 @@ fn with_image(f: &Fixture) -> Value {
 }
 
 async fn publish(f: &Fixture, worker: &Path) -> Result<PublishReport> {
-    let skill = PathBuf::from(REPO).join("skills/publish-deviantart/SKILL.md");
+    let skill = PathBuf::from(REPO).join(".harnesses/skills/publish-deviantart/SKILL.md");
     let app = common::offline_app(Arc::new(f.store.clone()))
         .with_publisher(Publisher::new(worker.to_owned(), skill));
     let request = PublishRequest {

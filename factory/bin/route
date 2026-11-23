@@ -2,6 +2,7 @@
 """Map intake's risk and surfaces to the job's agent set.
 
 Usage: route <job-id>
+       route --pi-model <alias>
 
 Reads `risk` and `surfaces` from intake.md (through job.json), looks them up in
 config.json's `routing` and `surface_reviewers` tables, and records the result
@@ -9,6 +10,7 @@ in job.json with `job agents`. Prints the agent set.
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,8 +25,16 @@ def die(msg):
 
 
 def main(argv):
-    if len(argv) != 1:
-        die("usage: route <job-id>")
+    if len(argv) == 2 and argv[0] == "--pi-model":
+        alias = argv[1]
+        table = CONFIG.get("pi_model_map")
+        model = table.get(alias) if isinstance(table, dict) else None
+        if not isinstance(model, str) or not re.fullmatch(r"[^\s/]+(?:/[^\s/]+)+", model):
+            die(f"pi_model_map: no valid provider/model for {alias!r}")
+        print(model)
+        return
+    if len(argv) != 1 or argv[0].startswith("-"):
+        die("usage: route <job-id> | route --pi-model <alias>")
     job_id = argv[0]
     job_bin = str(FACTORY / "bin" / "job")
     res = subprocess.run([job_bin, "sync", job_id], capture_output=True, text=True)

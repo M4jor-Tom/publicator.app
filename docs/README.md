@@ -13,6 +13,7 @@ Read the owning feature before changing code. Each Gherkin spec describes behavi
 - [Calendar](features/calendar.feature) — read-only native history and apparition navigation.
 - [Prompt mapping](features/prompt-mapping.feature) — content-addressed Git archive mapping.
 - [DeviantArt publishing](features/deviantart-publish.feature) — Rust orchestration and retained Python Playwright boundary.
+- [Factory model routing](features/factory-model-routing.feature) — shared tiers and Pi model selection.
 
 ## Architecture decisions
 

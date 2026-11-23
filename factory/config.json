@@ -8,6 +8,12 @@
     "needs_info": "factory:needs-info",
     "needs_human": "factory:needs-human"
   },
+  "pi_model_map": {
+    "fable": "openai-codex/gpt-6.2-astra",
+    "opus": "openai-codex/gpt-6.2-sol",
+    "sonnet": "openai-codex/gpt-6.1-terra",
+    "haiku": "openai-codex/gpt-6-luna"
+  },
   "routing": {
     "low":    { "code": "haiku" },
     "medium": { "code": "sonnet" },

@@ -21,15 +21,15 @@ tell the user; never work around it.
 ## The pipeline
 
 ```
-intake (fable)     → ACCEPT (scope possibly changed) | NEEDS-INFO | REJECT, posted as an issue comment
-route (script)     → reviewers + models from risk/surfaces via config.json
-worktree           → factory/<job-id> from origin/<base>
-spec-writer (opus) → spec.md
-builder (opus)     → commits; the first push opens a draft PR "Closes #<n>"
-gate (script)      → merge origin/<base> + push, then checks.sh; FAIL/conflict → builder gets the log, no reviewers spawned
-reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers
-approver (opus)    → APPROVE: sync origin/<base>, gate, gh pr merge
-                     ESCALATE: PR ready, decision as PR comment, label factory:needs-human
+intake (tier: fable)      → ACCEPT (scope possibly changed) | NEEDS-INFO | REJECT, posted as an issue comment
+route (script)            → reviewers + tiers from risk/surfaces via config.json
+worktree                  → factory/<job-id> from origin/<base>
+spec-writer (tier: opus)  → spec.md
+builder (tier: opus)      → commits; the first push opens a draft PR "Closes #<n>"
+gate (script)             → merge origin/<base> + push, then checks.sh; FAIL/conflict → builder gets the log, no reviewers spawned
+reviewers (routed tiers)  → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers
+approver (tier: opus)     → APPROVE: sync origin/<base>, gate, gh pr merge
+                            ESCALATE: PR ready, decision as PR comment, label factory:needs-human
 ```
 
 A job has at most `max_rounds` build rounds (`config.json`); a round is one
@@ -60,18 +60,32 @@ through the scripts. `factory/jobs/` is gitignored runtime state.
 <repo>/.worktrees/<job-id>/                    the job's worktree, on factory/<job-id>
 ```
 
-Read `job.json` with `cat` when you need a field. Read agents' files only by
-their first line (`head -1`); the agents put the detail there for the next
-agent and for the human, not for you. Your context has to last the whole run.
+Read `job.json` with `cat` when you need a field. Read agents' result files
+only by their first line (`head -1`); the agents put the detail there for the
+next agent and for the human, not for you. Your context has to last the whole run.
 
 ## Spawning agents
 
-Spawn every agent with the Agent tool, in the background, with
-`subagent_type` set to the agent's name. Pass `model` from `job.json`
-`agents` for the reviewers, and never for intake, spec-writer, builder or
-approver: their frontmatter sets it. Each agent replies with one line;
-you are notified when it finishes, and you advance that job then. While agents
-run, don't poll and don't wait: end your turn with a one-line status.
+Use the launch rule for the harness running this session. Work from the main
+checkout; retain the full job header in every brief. Only the factory scripts
+advance state. A missing mapping, failed dispatch, missing or invalid verdict,
+or failed child setup stops that job. When stopping a job, leave it parked at
+its current stage and track its ID and the reason for this invocation only.
+Report the stop; never substitute a model or a PASS. Retry only on a later
+explicit `/factory run` or `/factory run <n>`.
+
+- Claude Code: launch a background `Agent` with `subagent_type` set to the
+  role. Omit `model` for non-reviewers; pass `agents.reviewers[r]` for reviewers.
+- Pi: enable `subagent` if necessary. For intake, spec-writer, builder and
+  approver, read the `model:` field from `.harnesses/agents/<role>.md` in the
+  main checkout. For each pending reviewer take its tier from the job's
+  `agents.reviewers[r]`, not its static role file. Resolve every requested
+  tier via `factory/bin/route --pi-model <tier>` before launching that group.
+  Pass the returned provider/model explicitly to `subagent` for each fresh
+  child. Never pass a bare Claude alias. Set `cwd` to the main checkout;
+  do not request a Pi-managed worktree. The header names the job worktree.
+- Dispatch in the background; wait for native completion notifications rather
+  than polling. A child reply isn't a substitute for the expected on-disk result.
 
 Every prompt starts with the job's header, built from `job.json`:
 
@@ -80,15 +94,18 @@ Job: <id>. Job folder: <repo>/factory/jobs/<id>/. Main checkout: <repo>. Worktre
 ```
 
 `<header>` below means that line. Keep `Job folder: <path>/` exactly as shown:
-the job's cost is found by that string.
+Claude transcript costs are found by that string. Pi cost is unmeasured, not zero.
 
 Agents that open pages get ports. With `n` the job number (`004` → 4), the
 builder gets `5100 + 10n`, `reviewer-ux` `5101 + 10n` and `reviewer-ui`
 `5102 + 10n` (`ports` in `config.json`).
 
-Name the builder `builder-<id>`. Resume it with `SendMessage` to that name
-when this session spawned it; otherwise spawn a new `builder` with that name.
-Start every message to it with `<header>` too.
+Claude Code: name the builder `builder-<id>`; in this session use `SendMessage`
+with the same header for each new round. Pi: keep the latest completed builder
+run ID per job; call `subagent({action: "resume", id: runId, message: brief})`
+with the header and round instructions, and retain the returned run ID. Do not
+supply a fresh model on resume. On session recovery without the builder handle,
+launch a fresh builder using the existing disk-based recovery instructions.
 
 ## Advancing a job
 
@@ -107,14 +124,14 @@ decision:
 **spec.** Spawn `spec-writer` with `<header>`. When it returns,
 `factory/bin/job advance <id> build` and go to **build**.
 
-**build.** Spawn or resume `builder-<id>` with
-`<header> Build round <N>. Port: <port>.` plus what this round is for: the
+**build.** Spawn or resume the builder for this job using the rule above.
+Use `<header> Build round <N>. Port: <port>.` plus what this round is for: the
 gate's `round-<N-1>/checks.md`, the reviews in `round-<N-1>/`, or
 `feedback-<k>.md`. When it returns, read `build.md`'s first line:
 
 - `STATUS: READY`: `factory/bin/job advance <id> gate`, then go to **gate**. If
   `advance` refuses (nothing pushed, no PR, a dirty tree), resume the builder
-  once with the refusal. If it refuses again, stop this job and tell the user.
+  once with the refusal. If it refuses again, park the job as above.
 - `STATUS: BLOCKED`: `factory/bin/job advance <id> needs-human`.
 
 **gate.** Run `factory/bin/gate <id>`. It prints `GATE: PASS` or `GATE: FAIL`.
@@ -126,12 +143,20 @@ gate's `round-<N-1>/checks.md`, the reviews in `round-<N-1>/`, or
   `The gate failed: read round-<N-1>/checks.md and checks.log, fix it, push, and update build.md.`
   No reviewer runs on a failing build.
 
-**review.** Spawn every reviewer in `job.json` `agents.reviewers` **in one
-message**, so they run in parallel: `subagent_type` `reviewer-<r>`, model from
-the same map, prompt `<header> Review round <N>.` plus the port for `ux` and
-`ui`. **WAIT FOR ALL.** Each time one finishes, run
-`factory/bin/job sync <id>` so the dashboard fills in. When every reviewer has
-finished:
+**review.** For every pending key `r` in `agents.reviewers`, dispatch
+`reviewer-<r>` in parallel using this harness's spawning rule and its tier for
+this job. In Claude Code submit the Agent calls in one message; in Pi submit
+the pending group with `subagent({workflow: 'parallel', args: {tasks}, async: true})`,
+each task carrying its `agent`, resolved `model`, main-checkout `cwd` and full
+`task` brief. Never launch reviews on a failing gate. Keep
+`<header> Review round <N>.` and the existing ports for UX/UI. Before
+advancing out of review, require terminal native success for the exact job,
+round, role and attempt that produced each routed reviewer's valid verdict.
+A Pi group status alone is not task evidence. If a reviewer fails, report
+which one and park the job even if it wrote a verdict. Keep handling
+outstanding completions. Discard failed reviewers' verdicts once those writers
+can no longer write, then run `factory/bin/job sync <id>` after processing all
+results and cleanup for that completion.
 
 - all PASS: `factory/bin/job advance <id> approve`, then spawn `approver` with
   `<header> PR: #<pr>. Final round: <N>.`
@@ -162,31 +187,44 @@ then moves the job to `merged`; stop any agents still running for it.
    `new` and replied `needs-info` lines as there are free slots come out as
    `new` or `resume`; the rest are `hold`. `job create` and the
    `needs-info → intake` move refuse when no slot is free.
-2. Start every `resume` and `new` line, nothing else. Don't judge issues
-   yourself: every new issue goes to intake, which decides whether it gets
-   built. For a new issue, `factory/bin/job create <n>` prints the job id;
+2. Start only eligible `resume` and `new` rows. On every scan, including
+   refreshes, exclude parked IDs from eligibility and never redispatch a job
+   you're already running. Don't judge issues yourself: every new issue goes
+   to intake. For a new issue, `factory/bin/job create <n>` prints the job id;
    start it at **intake**.
-3. Each time a job finishes, run `factory/bin/job queue` again and start its
-   `resume` lines you aren't already running and its `new` lines.
-4. When nothing is queued or running, print `factory/bin/job summary <ids>`
-   for the jobs this run touched, then list what waits on a human: PRs to
-   review (merge one to approve it, or give feedback with `/factory`) and
-   questions waiting on authors.
+3. Each time a job finishes or parks, run `factory/bin/job queue` again and
+   apply the same eligibility rule. The script still governs free slots.
+4. Once there are no eligible rows and no running work, print
+   `factory/bin/job summary <ids>` for the jobs this run touched. Report each
+   parked job's ID, stage and reason, even if only ineligible rows remain. Then
+   list what waits on a human: PRs to review (merge one to approve it, or give
+   feedback with `/factory`) and questions waiting on authors. For all summaries
+   and status reports, cost covers Claude transcripts only; Pi cost is
+   unmeasured, not zero.
 
 **Resuming.** State lives in files, so a new session picks up where a dead one
 stopped. For a `resume` job, run its stage's step again: `intake` and `spec`
-respawn their agent; `build` spawns a new builder told it is resuming (it reads
-`build.md` and `git log` to see how far the last one got); `gate` runs the
-gate; `review` spawns only the reviewers whose `review-<r>.md` is missing in
-the current round; `approve` respawns the approver; `merging` runs
-`factory/bin/job merge <id>`. A `needs-info` job the author has answered shows
-as `resume`: run `factory/bin/job advance <id> intake` and go to **intake**.
+respawn their agent; `build` without a builder handle spawns a new builder
+told it is resuming (it reads `build.md` and `git log` to see how far the last
+one got); `gate` runs the
+gate; `approve` respawns the approver; `merging` runs `factory/bin/job merge <id>`.
+A `needs-info` job the author has answered shows as `resume`: run
+`factory/bin/job advance <id> intake` and go to **intake**.
+
+On `review` recovery, reconcile each routed reviewer with native task state
+before dispatch. Track still-running attempts as running and wait for them;
+never delete a verdict or dispatch a duplicate while its old writer can still
+write. If you cannot establish quiescence after waiting for known running
+attempts, park and report why. Reuse only valid verdicts with matching
+terminal native success as above. Once no old writer can still write, clear
+other verdict files for this round before syncing and dispatch only pending
+reviewers.
 
 ## /factory run <n>
 
 Run one issue with the same steps. If `factory/bin/job queue` shows a job for
 it, resume that job; otherwise `factory/bin/job create <n>`. Finish with the
-summary line for that job.
+summary line for that job and report its stage and reason if it parked.
 
 ## /factory <anything>
 
