@@ -5,10 +5,10 @@ run = "nix run .#generate-meta -- --help"
 verify = "nix develop -c cargo test --locked --features desktop --test metadata --test local_metadata --test openrouter --test application_ai --test ui_describe"
 
 [calendar]
-code = ["src/calendar.rs", "src/ui/calendar.rs", "src/ui/mod.rs"]
-tests = ["tests/calendar.rs", "tests/ui_publish_calendar.rs"]
+code = ["src/calendar.rs", "src/ui/calendar.rs", "src/ui/mod.rs", "src/ui/style.rs"]
+tests = ["tests/calendar.rs", "tests/ui_publish_calendar.rs", "examples/ui_acceptance.rs", "scripts/native-ui-replay.py"]
 run = "nix run .#ui -- --data-dir DIR"
-verify = "nix develop -c cargo test --locked --features desktop --lib --test calendar --test ui_publish_calendar"
+verify = "nix develop -c cargo test --locked --features desktop --lib --test calendar --test ui_publish_calendar && nix run .#native-acceptance calendar_plans_and_delivery_frames calendar_zone_prompts_overflow_url_and_jumps"
 
 [config]
 code = ["src/config.rs", "src/model.rs", "src/scheduling.rs", "src/prompts.rs", "src/bin/publicator.rs"]

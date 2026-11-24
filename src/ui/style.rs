@@ -16,7 +16,7 @@ const WARNING: Color = color!(0xe0a800);
 pub const ERROR: Color = color!(0xff9090);
 pub const MUTED: Color = color!(0x888888);
 pub const TODAY: Color = color!(0x4caf50);
-const UPCOMING: Color = color!(0x2196f3);
+pub(super) const EVENT_OUTLINE: Color = color!(0x2196f3);
 const CONTROL: Color = color!(0xe9e9ed);
 const CONTROL_PRESSED: Color = color!(0xd0d0d7);
 const CONTROL_BORDER: Color = color!(0x8f8f9d);
@@ -257,8 +257,9 @@ pub fn tab(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-/// A calendar event chip: upcoming outlined blue, past dimmed.
-pub fn event(upcoming: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+/// Confirmed events are outlined when upcoming and dimmed when past. Pending frames
+/// are drawn separately over the button.
+pub fn event(upcoming: bool, dashed: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button::Style {
         background: Some(
             if status == button::Status::Hovered {
@@ -268,15 +269,15 @@ pub fn event(upcoming: bool) -> impl Fn(&Theme, button::Status) -> button::Style
             }
             .into(),
         ),
-        text_color: if upcoming {
+        text_color: if upcoming || dashed {
             color!(0xcccccc)
         } else {
             color!(0x777777)
         },
         border: Border::default()
             .rounded(3)
-            .width(if upcoming { 2 } else { 0 })
-            .color(UPCOMING),
+            .width(if upcoming && !dashed { 2 } else { 0 })
+            .color(EVENT_OUTLINE),
         ..button::Style::default()
     }
 }

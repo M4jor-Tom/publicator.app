@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    model::{Delivery, effective_schedule, needs_generation},
+    model::{Delivery, Phase, effective_schedule, needs_generation, phase},
 };
 use chrono::{DateTime, Datelike, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -9,16 +9,28 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub uuid: String,
-    pub apparition_index: usize,
-    pub platform: String,
+    /// None is a Calendar-only plan, not a saved delivery.
+    pub apparition: Option<Apparition>,
     pub title: String,
     pub timestamp: i64,
-    pub url: Option<String>,
     pub basename: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Apparition {
+    pub index: usize,
+    pub platform: String,
+    pub url: Option<String>,
     pub delivery: Delivery,
 }
 
-/// Project every publication apparition into a stable date-ordered event list.
+impl Event {
+    pub fn url(&self) -> Option<&str> {
+        self.apparition.as_ref()?.url.as_deref()
+    }
+}
+
+/// Project dated plans and saved apparitions into a stable date-ordered event list.
 pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     for row in rows {
@@ -32,7 +44,6 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
         } else {
             row.get("title").and_then(Value::as_str).unwrap_or_default()
         };
-        let timestamp = effective_schedule(row).unwrap_or(0);
         let basename = row
             .pointer("/files/0/basename")
             .and_then(Value::as_str)
@@ -46,38 +57,59 @@ pub fn timeline(rows: &[Value]) -> Result<Vec<Event>> {
                 )));
             }
         };
-        for (apparition_index, app) in apparitions.iter().enumerate() {
-            let platform = app
-                .get("platformName")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    Error::Validation(format!("{uuid}: apparition platformName must be a string"))
-                })?;
-            let delivery = apparition_delivery(app, &uuid)?;
-            events.push(Event {
-                uuid: uuid.clone(),
-                apparition_index,
-                platform: platform.to_owned(),
-                title: title.to_owned(),
-                timestamp,
-                url: app.get("url").and_then(Value::as_str).map(str::to_owned),
-                basename: basename.clone(),
-                delivery,
-            });
+        let Some(timestamp) = event_timestamp(row, !apparitions.is_empty()) else {
+            continue;
+        };
+        let event = |apparition| Event {
+            uuid: uuid.clone(),
+            apparition,
+            title: title.to_owned(),
+            timestamp,
+            basename: basename.clone(),
+        };
+        if apparitions.is_empty() {
+            events.push(event(None));
+        }
+        for (index, app) in apparitions.iter().enumerate() {
+            events.push(event(Some(saved_apparition(app, index, &uuid)?)));
         }
     }
     events.sort_by_key(|event| event.timestamp);
     Ok(events)
 }
 
-fn apparition_delivery(app: &Value, uuid: &str) -> Result<Delivery> {
-    match app.get("state").and_then(Value::as_str) {
-        Some("unpublished") => Ok(Delivery::Unpublished),
-        Some("published_or_scheduled") => Ok(Delivery::PublishedOrScheduled),
-        _ => Err(Error::Validation(format!(
-            "{uuid}: apparition state is invalid"
-        ))),
+fn event_timestamp(row: &Value, has_platform: bool) -> Option<i64> {
+    if !has_platform && phase(row).ok() == Some(Phase::Picked) {
+        // Pick saves a submission timestamp even when there is no slot.
+        row.get("apparitionTimestampIfDifferentThanSubmission")
+            .and_then(Value::as_i64)
+    } else {
+        effective_schedule(row)
     }
+}
+
+fn saved_apparition(app: &Value, index: usize, uuid: &str) -> Result<Apparition> {
+    let platform = app
+        .get("platformName")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::Validation(format!("{uuid}: apparition platformName must be a string"))
+        })?;
+    let delivery = match app.get("state").and_then(Value::as_str) {
+        Some("unpublished") => Delivery::Unpublished,
+        Some("published_or_scheduled") => Delivery::PublishedOrScheduled,
+        _ => {
+            return Err(Error::Validation(format!(
+                "{uuid}: apparition state is invalid"
+            )));
+        }
+    };
+    Ok(Apparition {
+        index,
+        platform: platform.to_owned(),
+        url: app.get("url").and_then(Value::as_str).map(str::to_owned),
+        delivery,
+    })
 }
 
 /// First day of the zone-local month, or None when the instant or its local date is outside
