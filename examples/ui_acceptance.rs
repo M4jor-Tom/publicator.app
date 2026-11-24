@@ -94,7 +94,7 @@ fn arg(name: &str) -> PathBuf {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: ui_acceptance --fixture-dir DIR --scenario empty|history|mixed|reopen|publish|calendar|prompt-search|prompt-search-missing-archive|gallery"
+        "usage: ui_acceptance --fixture-dir DIR --scenario empty|history|mixed|reopen|publish|calendar|calendar-plans|prompt-search|prompt-search-missing-archive|gallery"
     );
     std::process::exit(2)
 }
@@ -462,6 +462,47 @@ fn calendar_fixture(dir: &Path) -> (Vec<Value>, Config) {
         "timezone".into(),
         toml::Value::String("Pacific/Kiritimati".into()),
     );
+    (rows, config)
+}
+
+fn calendar_plans_fixture(art: &Path) -> (Vec<Value>, Config) {
+    let zone = chrono_tz::Pacific::Kiritimati;
+    let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+    let past = today - chrono::Days::new(7);
+    let future = today + chrono::Days::new(7);
+    let mixed = json!([
+        {"platformName":"historical-pixiv","state":"unpublished"},
+        {"platformName":"deviantart","state":"published_or_scheduled","url":"https://example.test/confirmed"}
+    ]);
+    let rows = [
+        ("DESCRIBED", "Past deliveries", past, 12, mixed.clone()),
+        ("PICKED", "Future plan", future, 11, json!([])),
+        ("DESCRIBED", "Future deliveries", future, 12, mixed),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (state, title, day, hour, apparitions))| {
+        let basename = format!("plan-fixture-{index}.png");
+        let path = art.join(&basename);
+        image(&path, fixture_color(index));
+        calendar_publication(
+            index as u64 + 1,
+            state,
+            title,
+            fixture_timestamp(zone, day, hour, 0),
+            &basename,
+            Some(&path),
+            apparitions,
+        )
+    })
+    .collect();
+    let mut config = Config {
+        publicable: vec!["art".into()],
+        ..Config::default()
+    };
+    config
+        .schedule
+        .insert("timezone".into(), toml::Value::String(zone.to_string()));
     (rows, config)
 }
 
@@ -1463,6 +1504,7 @@ fn main() -> iced::Result {
     fs::write(dir.join("tags.txt"), "fixture-tag\n").unwrap();
     let (rows, mut config) = match scenario.as_str() {
         "calendar" => calendar_fixture(&dir),
+        "calendar-plans" => calendar_plans_fixture(&art),
         "prompt-search" => prompt_search_fixture(&dir),
         "prompt-search-missing-archive" => prompt_search_missing_archive_fixture(&dir),
         "gallery" => gallery_fixture(&dir),

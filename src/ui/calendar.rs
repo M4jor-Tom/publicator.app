@@ -2,13 +2,18 @@ use super::{App, Message, style};
 use crate::{
     artwork,
     calendar::{self, Event},
+    model::Delivery,
     prompts::PromptMatch,
     scheduling,
 };
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use iced::{
-    Element, Length, Rectangle, Task, Vector,
-    advanced::widget::{Id, Operation, operation},
+    Element, Length, Rectangle, Renderer, Size, Task, Theme, Vector,
+    advanced::{
+        Layout, Widget, layout, renderer,
+        widget::{Id, Operation, Tree, operation},
+    },
+    mouse,
     widget::{button, column, container, row, space, stack, text},
 };
 
@@ -58,7 +63,7 @@ pub fn view(state: &App) -> Element<'_, Message> {
         .as_secs() as i64;
     let today = DateTime::<Utc>::from_timestamp(now, 0)
         .map(|instant| instant.with_timezone(&zone).date_naive());
-    content = content.push(text(format!("All apparition dates — {zone}")).color(style::MUTED));
+    content = content.push(text(format!("Publication dates — {zone}")).color(style::MUTED));
     match calendar::months(&events, zone, now) {
         Ok(months) => {
             for month in months {
@@ -153,7 +158,10 @@ pub(super) fn month_view<'a>(
 }
 
 fn event_key(event: &Event) -> String {
-    format!("{}:{}", event.uuid, event.apparition_index)
+    match &event.apparition {
+        Some(apparition) => format!("{}:{}", event.uuid, apparition.index),
+        None => format!("{}:plan", event.uuid),
+    }
 }
 
 fn days_in_month(month: NaiveDate) -> u32 {
@@ -197,32 +205,37 @@ fn event_view<'a>(
         .unwrap_or_else(|| "time unavailable".into());
     let key = event_key(event);
     let expanded = state.calendar_expanded.contains(&key);
+    let dashed = event
+        .apparition
+        .as_ref()
+        .is_none_or(|apparition| apparition.delivery == Delivery::Unpublished);
     let chip = button(text(format!("{local_time} {}", event.title)).size(11))
         .padding([2, 4])
         .width(Length::Fill)
-        .style(style::event(event.timestamp >= now))
+        .style(style::event(event.timestamp >= now, dashed))
         .on_press(Message::ToggleCalendarEvent(key));
+    let chip = if dashed {
+        stack![chip].push(Element::new(DashedFrame)).into()
+    } else {
+        Element::from(chip)
+    };
     if !expanded {
-        return chip.into();
+        return chip;
     }
+    let label = event
+        .apparition
+        .as_ref()
+        .map_or("Planned", |apparition| apparition.platform.as_str());
     let mut item = column![
         chip,
-        text(format!(
-            "{local_time} — {} — {}",
-            event.platform, event.title
-        ))
-        .size(12),
+        text(format!("{local_time} — {label} — {}", event.title)).size(12),
         artwork_view(state, event),
     ]
     .spacing(4);
     if let Some(prompt) = event_prompt_view(state, event) {
         item = item.push(prompt);
     }
-    if let Some(url) = event
-        .url
-        .as_deref()
-        .filter(|url| actual_http_url(url).is_ok())
-    {
+    if let Some(url) = event.url().filter(|url| actual_http_url(url).is_ok()) {
         item = item.push(
             button(text("Open actual URL").size(12))
                 .on_press(Message::OpenActualUrl(url.to_owned())),
@@ -235,6 +248,72 @@ fn event_view<'a>(
         );
     }
     item.into()
+}
+
+/// Iced borders are solid. Paint dashes over the stock button without handling input.
+struct DashedFrame;
+
+impl Widget<Message, Theme, Renderer> for DashedFrame {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(&mut self, _: &mut Tree, _: &Renderer, limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+
+    fn draw(
+        &self,
+        _: &Tree,
+        renderer: &mut Renderer,
+        _: &Theme,
+        _: &renderer::Style,
+        layout: Layout<'_>,
+        _: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use iced::advanced::Renderer as _;
+        let bounds = layout.bounds();
+        if !bounds.intersects(viewport) {
+            return;
+        }
+        let Rectangle {
+            x,
+            y,
+            width,
+            height,
+        } = bounds;
+        let mut dash = |x, y, width, height| {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    snap: true,
+                    ..renderer::Quad::default()
+                },
+                style::EVENT_OUTLINE,
+            );
+        };
+        // Leave the rounded corners clear and trim the last dash to the available edge.
+        for (length, horizontal) in [(width, true), (height, false)] {
+            let mut offset = 3.0;
+            while offset < length - 3.0 {
+                let segment = 5.0_f32.min(length - 3.0 - offset);
+                if horizontal {
+                    dash(x + offset, y, segment, 2.0);
+                    dash(x + offset, y + height - 2.0, segment, 2.0);
+                } else {
+                    dash(x, y + offset, 2.0, segment);
+                    dash(x + width - 2.0, y + offset, 2.0, segment);
+                }
+                offset += 8.0;
+            }
+        }
+    }
 }
 
 fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
@@ -455,7 +534,7 @@ pub(super) fn system_open_url(value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::event_date;
+    use super::{event_date, event_key};
     use crate::calendar::timeline;
     use chrono::{NaiveDate, TimeZone, Utc};
     use chrono_tz::Europe::Paris;
@@ -482,6 +561,21 @@ mod tests {
         assert_ne!(
             cell_date,
             Some(Utc.timestamp_opt(timestamp, 0).unwrap().date_naive())
+        );
+    }
+
+    #[test]
+    fn picked_plan_uses_saved_override_in_the_configured_timezone() {
+        let row = json!({
+            "uuid":"picked", "state":"PICKED",
+            "submissionTimestamp":Utc.with_ymd_and_hms(2026, 1, 2, 12, 0, 0).unwrap().timestamp(),
+            "apparitionTimestampIfDifferentThanSubmission":Utc.with_ymd_and_hms(2026, 1, 5, 23, 30, 0).unwrap().timestamp()
+        });
+        let event = timeline(&[row]).unwrap().remove(0);
+        assert_eq!(event_key(&event), "picked:plan");
+        assert_eq!(
+            event_date(&event, Paris),
+            Some(NaiveDate::from_ymd_opt(2026, 1, 6).unwrap())
         );
     }
 }

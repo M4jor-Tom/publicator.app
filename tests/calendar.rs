@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::{America::Los_Angeles, Europe::Paris, Tz, UTC};
 use common::epoch;
 use publicator::{
-    calendar::{Event, months, timeline},
+    calendar::{Apparition, Event, months, timeline},
     error::Error,
     model::{Delivery, Publications},
 };
@@ -16,27 +16,46 @@ fn row(n: usize, title: &str, timestamp: i64) -> serde_json::Value {
 }
 
 #[test]
-fn calendar_keeps_two_apparitions_with_one_shared_title() {
+fn calendar_replaces_the_plan_with_one_event_per_saved_apparition() {
     let mut p = row(1, "Shared title", 1700000000);
+    let planned = timeline(std::slice::from_ref(&p)).unwrap();
+    assert_eq!(planned.len(), 1);
+    assert!(planned[0].apparition.is_none());
+
     p["apparitions"] = json!([
-        {"platformName":"deviantart","state":"unpublished","url":"https://da.example/artwork/123"},
-        {"platformName":"pixiv","state":"published_or_scheduled","url":"https://pixiv.example/artwork/123"}
+        {"platformName":"deviantart","state":"unpublished","url":"https://da.example/artwork/123"}
     ]);
-    let ev = timeline(&[p]).unwrap();
-    assert_eq!(ev.len(), 2);
-    assert_ne!(ev[0].apparition_index, ev[1].apparition_index);
-    assert_eq!(ev[0].title, "Shared title");
-    assert_eq!(ev[1].title, "Shared title");
-    assert_eq!(ev[0].platform, "deviantart");
-    assert_eq!(ev[1].platform, "pixiv");
-    assert_eq!(ev[0].url.as_deref(), Some("https://da.example/artwork/123"));
+    let pending = timeline(std::slice::from_ref(&p)).unwrap();
+    assert_eq!(pending.len(), 1);
     assert_eq!(
-        ev[1].url.as_deref(),
-        Some("https://pixiv.example/artwork/123")
+        pending[0].apparition,
+        Some(Apparition {
+            index: 0,
+            platform: "deviantart".into(),
+            url: Some("https://da.example/artwork/123".into()),
+            delivery: Delivery::Unpublished,
+        })
     );
-    assert_eq!(ev[0].delivery, Delivery::Unpublished);
-    assert_eq!(ev[1].delivery, Delivery::PublishedOrScheduled);
-    assert_eq!(ev[0].basename.as_deref(), Some("art.png"));
+    p["apparitions"].as_array_mut().unwrap().push(json!({
+        "platformName":"pixiv","state":"published_or_scheduled","url":"https://pixiv.example/artwork/123"
+    }));
+    let mixed = timeline(&[p]).unwrap();
+    assert_eq!(mixed.len(), 2);
+    assert_eq!(mixed[0], pending[0]);
+    assert_eq!(
+        mixed[1].apparition,
+        Some(Apparition {
+            index: 1,
+            platform: "pixiv".into(),
+            url: Some("https://pixiv.example/artwork/123".into()),
+            delivery: Delivery::PublishedOrScheduled,
+        })
+    );
+    for event in mixed {
+        assert_eq!(event.title, planned[0].title);
+        assert_eq!(event.timestamp, planned[0].timestamp);
+        assert_eq!(event.basename, planned[0].basename);
+    }
 }
 
 #[test]
@@ -49,10 +68,10 @@ fn calendar_labels_pending_metadata_and_preserves_file_name() {
     p["state"] = json!("SCHEDULED");
     p["description"] = json!(" ");
     p["files"][0] = json!({"basename":"old.png"});
-    p["apparitions"] = json!([{"platformName":"other","state":"unpublished"}]);
     let event = &timeline(&[p]).unwrap()[0];
+    assert!(event.apparition.is_none());
     assert_eq!(event.title, "AI metadata pending");
-    assert_eq!(event.url, None);
+    assert_eq!(event.url(), None);
     assert_eq!(event.basename.as_deref(), Some("old.png"));
     assert_eq!(event.timestamp, 1700000000);
 }
@@ -115,7 +134,7 @@ fn calendar_falls_back_to_submission_time_and_handles_publications_without_files
     let event = &timeline(&[p]).unwrap()[0];
     assert_eq!(event.timestamp, 1700000000);
     assert_eq!(event.basename, None);
-    assert_eq!(event.url, None);
+    assert_eq!(event.url(), None);
 }
 
 #[test]
@@ -131,16 +150,35 @@ fn calendar_keeps_equal_timestamp_apparitions_in_source_order() {
     assert_eq!(
         events
             .iter()
-            .map(|event| event.platform.as_str())
+            .map(|event| event.apparition.as_ref().unwrap().platform.as_str())
             .collect::<Vec<_>>(),
         ["first-platform", "second-platform", "third-platform"]
     );
 }
 
 #[test]
-fn calendar_treats_a_publication_without_apparitions_as_empty() {
+fn calendar_projects_one_plan_for_missing_or_empty_apparitions() {
     let mut p = row(1, "No delivery", 1700000000);
+    let empty = timeline(std::slice::from_ref(&p)).unwrap();
+    assert_eq!(empty.len(), 1);
+    assert!(empty[0].apparition.is_none());
+    assert_eq!(empty[0].url(), None);
+    assert_eq!(empty[0].timestamp, 1700000000);
     p.as_object_mut().unwrap().shift_remove("apparitions");
+    assert_eq!(timeline(&[p]).unwrap(), empty);
+}
+
+#[test]
+fn calendar_omits_unslotted_picks_and_rows_without_timestamps() {
+    let mut p = row(1, "Not planned", 1700000000);
+    p["state"] = json!("PICKED");
+    assert!(timeline(std::slice::from_ref(&p)).unwrap().is_empty());
+    p["state"] = json!("DESCRIBED");
+    p.as_object_mut()
+        .unwrap()
+        .shift_remove("submissionTimestamp");
+    assert!(timeline(std::slice::from_ref(&p)).unwrap().is_empty());
+    p["apparitions"] = json!([{"platformName":"deviantart","state":"unpublished"}]);
     assert!(timeline(&[p]).unwrap().is_empty());
 }
 
@@ -168,13 +206,10 @@ fn calendar_uses_publication_schedule_for_every_platform() {
 fn at(timestamp: i64) -> Event {
     Event {
         uuid: "event".into(),
-        apparition_index: 0,
-        platform: "deviantart".into(),
+        apparition: None,
         title: "Title".into(),
         timestamp,
-        url: None,
         basename: None,
-        delivery: Delivery::Unpublished,
     }
 }
 

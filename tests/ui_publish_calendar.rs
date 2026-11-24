@@ -147,7 +147,7 @@ fn calendar_timeline_keeps_each_apparition_and_its_actual_url() {
     })];
     let events = timeline(&rows).unwrap();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[1].url.as_deref(), Some("https://example.test/item"));
+    assert_eq!(events[1].url(), Some("https://example.test/item"));
     assert!(events.iter().all(|event| event.title == "<literal>"));
 }
 
@@ -1285,11 +1285,11 @@ fn calendar_projection_keeps_every_apparition_and_includes_current_configured_zo
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].title, "Shared title");
     assert_eq!(events[0].timestamp, common::epoch("2024-02-01T01:30:00Z"));
+    assert_eq!(events[0].url(), Some("https://example.test/actual"));
     assert_eq!(
-        events[0].url.as_deref(),
-        Some("https://example.test/actual")
+        events[1].apparition.as_ref().unwrap().platform,
+        "historical-pixiv"
     );
-    assert_eq!(events[1].platform, "historical-pixiv");
     assert_eq!(
         months(&events, Honolulu, common::epoch("2024-02-01T02:00:00Z")).unwrap(),
         vec![NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()]

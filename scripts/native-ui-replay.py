@@ -50,6 +50,7 @@ MUTED = (0x88, 0x88, 0x88)
 DAY = (0x22, 0x22, 0x22)
 TODAY = (0x4C, 0xAF, 0x50)  # the current month's heading; today's outline
 CHIP_HOVER = (0x33, 0x33, 0x33)
+CHIP_OUTLINE = (0x21, 0x96, 0xF3)
 PROMPT_EXACT = (0xEE, 0xF4, 0xEE)
 PROMPT_TEXT = (0xF7, 0xF7, 0xF7)  # a prompt panel's text lines
 RAIL = (0x32, 0x32, 0x32)  # scrollbar rail; also an unchecked checkbox
@@ -1651,9 +1652,10 @@ def labelled(img, box):
     return any(p[0] > 0x50 for p in corner) and all(p[0] == p[1] == p[2] <= 0x80 for p in corner)
 
 
-def chips(img, cell):
-    """A day's event chips (#2a2a2a; #333 when hovered), top to bottom."""
-    found = [box for color in (CARD, CHIP_HOVER) for box in img.boxes(color, area(cell), 30, 10) if box[3] < 80]
+def chips(img, cell=None):
+    """Event chips (#2a2a2a; #333 when hovered), top to bottom, optionally within a day."""
+    region = area(cell) if cell else content(img)
+    found = [box for color in (CARD, CHIP_HOVER) for box in img.boxes(color, region, 30, 10) if box[3] < 80]
     return sorted(found, key=lambda box: box[1])
 
 
@@ -1745,6 +1747,50 @@ def calendar_zone_prompts_overflow_url_and_jumps(ctx):
                              for x in range(20, 200, 3)) and img.stems(WARNING, list_view(img)[0]),
              "the jump target first and marked in Publish")
     close_and_wait(app)
+
+
+def chip_frame(img, chip):
+    """Measure blue runs at the chip's top edge, just inside its rounded corners."""
+    x, y, w, _ = chip
+    rows = [img.runs(CHIP_OUTLINE, j, x + 6, x + w - 6) for j in range(y - 2, y + 2)]
+    runs = max(rows, key=lambda runs: sum(b - a for a, b in runs))
+    if not runs:
+        return "none"
+    if len(runs) == 1 and runs[0][1] - runs[0][0] >= w - 14:
+        return "solid"
+    if len(runs) >= 4 and all(b - a <= 7 for a, b in runs):
+        return "dashed"
+    return "partial"
+
+
+@story
+def calendar_plans_and_delivery_frames(ctx):
+    app = ctx.launch("calendar-plans", size=(1100, 1500))
+    before = app.json_path.read_bytes()
+    navigate(app, "Calendar")
+    listed = app.look(lambda img: len(found := chips(img)) == 5 and found,
+                      "two past and three future Calendar chips")
+    # Fixture dates are a week before and after today. Within a day, the plan is earlier
+    # than the mixed deliveries; the saved pending entry comes before the confirmed one.
+    img = app.last
+    frames = [chip_frame(img, chip) for chip in listed]
+    check(frames == ["dashed", "none", "dashed", "dashed", "solid"], f"unexpected Calendar frames: {frames}")
+    check(img.stems((0x77,) * 3, area(listed[1])), "past confirmed title is not dimmed")
+    img.save(ctx.root / "frames.png")
+
+    plan = app.row("00000000-0000-4000-8000-000000000002")
+    rgb = file_color(app.fixture / "art" / plan["files"][0]["basename"])
+    app.click(center(listed[2]))
+    img = app.look(lambda img: artwork(img, rgb) and img, "the expanded plan's fixture artwork")
+    actions = buttons(img, content(img), 40)
+    check(len(actions) == 1, f"the plan should have only Open publication, got {len(actions)} actions")
+    check(app.json_path.read_bytes() == before, "inspecting the plan changed publications.json")
+    img.save(ctx.root / "expanded-plan.png")
+    app.click(center(actions[0]))
+    app.look(lambda img: tabs(img)[1][1], "Schedule to open from the plan")
+    check(app.json_path.read_bytes() == before, "navigating from the plan changed publications.json")
+    close_and_wait(app)
+    check(app.json_path.read_bytes() == before, "closing the fixture changed publications.json")
 
 
 @story
