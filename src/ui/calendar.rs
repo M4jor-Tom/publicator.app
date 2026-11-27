@@ -328,6 +328,7 @@ fn artwork_view<'a>(state: &'a App, event: &Event) -> Element<'a, Message> {
                     .height(Length::Fixed(120.0)),
                 original,
                 path,
+                Some(&event.uuid),
             ),
             Some(Some(Err(error))) => text(format!("Preview unavailable: {error}")).into(),
         },

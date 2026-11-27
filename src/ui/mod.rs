@@ -20,7 +20,7 @@ use crate::{
 };
 use iced::{
     Element, Length, Subscription, Task, Theme,
-    keyboard::{Key, key::Named},
+    keyboard::{Key, Modifiers, key::Named},
     widget::{button, column, container, row, text},
 };
 use serde_json::Value;
@@ -245,8 +245,14 @@ pub enum Message {
         result: Result<(PathBuf, PathBuf), String>,
     },
     /// Shows a file over the whole window until `CloseViewer`.
-    OpenViewer(PathBuf),
+    OpenViewer {
+        path: PathBuf,
+        publication: Option<String>,
+    },
     CloseViewer,
+    ViewerWheel,
+    ViewerKey(Named, Modifiers, f32),
+    ToggleDescriptionEditor(String),
     Pick(Candidate),
     PickFinished(Result<(), String>),
     AskDelete(Candidate),
@@ -418,11 +424,12 @@ pub struct App {
     row_previews: HashMap<String, Option<Result<std::path::PathBuf, String>>>,
     /// Per row UUID with a thumbnail: the file it previews from (`artwork::preview_source`).
     row_sources: HashMap<String, PathBuf>,
-    /// The file shown over the whole window (`OpenViewer`).
-    viewer: Option<PathBuf>,
+    /// The image and optional publication description captured when a thumbnail is clicked.
+    viewer: Option<(PathBuf, Option<String>)>,
     /// Preview keys (candidate paths, row UUIDs) whose placeholder is on screen.
     shown_previews: HashSet<String>,
     description_editors: HashMap<String, iced::widget::text_editor::Content>,
+    expanded_description: Option<String>,
 
     pending_delete: Option<Candidate>,
     pending_publication_delete: Option<String>,
@@ -530,6 +537,7 @@ impl App {
             viewer: None,
             shown_previews: HashSet::new(),
             description_editors: HashMap::new(),
+            expanded_description: None,
             pending_delete: None,
             pending_publication_delete: None,
             scroll_offsets: HashMap::new(),
@@ -865,7 +873,9 @@ impl App {
             | Message::CloseCancelPublish
             | Message::CloseWait
             | Message::PublishFinished(..) => self.update_selection(message),
-            Message::Scrolled(..) | Message::WindowResized(..) => {
+            Message::Scrolled(..)
+            | Message::WindowResized(..)
+            | Message::ToggleDescriptionEditor(..) => {
                 self.update_viewport(message);
                 Task::none()
             }
@@ -879,6 +889,10 @@ impl App {
                 self.scroll_offsets.insert(tab, offset);
             }
             Message::WindowResized(width) => self.window_width = width,
+            Message::ToggleDescriptionEditor(uuid) => {
+                self.expanded_description =
+                    (self.expanded_description.as_ref() != Some(&uuid)).then_some(uuid);
+            }
             _ => unreachable!("message routed to viewport handler"),
         }
     }
@@ -911,8 +925,10 @@ impl App {
             | Message::CalendarPrepared(..)
             | Message::CalendarPreviewFinished { .. }
             | Message::ToggleCalendarEvent(..)
-            | Message::OpenViewer(..)
-            | Message::CloseViewer => self.update_previews(message),
+            | Message::OpenViewer { .. }
+            | Message::CloseViewer
+            | Message::ViewerWheel
+            | Message::ViewerKey(..) => self.update_previews(message),
             Message::Pick(..)
             | Message::PickFinished(..)
             | Message::AskDelete(..)
@@ -960,6 +976,7 @@ impl App {
             | Message::ReturnToSchedule(..)
             | Message::GenerateOne(..)
             | Message::GenerateMarked
+            | Message::ToggleDescriptionEditor(..)
             | Message::DescriptionAction { .. }
             | Message::Edited { .. }
             | Message::SaveFinished { .. }
@@ -1070,11 +1087,7 @@ impl App {
     }
 
     fn update_keyboard(&mut self, message: Message) -> Task<Message> {
-        // Escape closes the viewer first; other keys would act on cells hidden under it.
         if self.viewer.is_some() {
-            if matches!(message, Message::PublishKeyboardExit) {
-                self.viewer = None;
-            }
             return Task::none();
         }
         match message {
@@ -1359,11 +1372,52 @@ impl App {
     }
 
     fn update_viewer(&mut self, message: Message) -> Task<Message> {
-        self.viewer = match message {
-            Message::OpenViewer(path) => Some(path),
-            _ => None,
+        match message {
+            Message::OpenViewer { path, publication } => {
+                let description = publication
+                    .as_deref()
+                    .and_then(|uuid| self.description_for(uuid))
+                    .filter(|description| !description.trim().is_empty())
+                    .map(str::to_owned);
+                self.viewer = Some((path, description));
+                iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::unfocus(),
+                )
+            }
+            Message::CloseViewer => {
+                self.viewer = None;
+                Task::none()
+            }
+            Message::ViewerKey(key, modifiers, height) => {
+                self.update_viewer_key(key, modifiers, height)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn update_viewer_key(
+        &mut self,
+        key: Named,
+        modifiers: Modifiers,
+        height: f32,
+    ) -> Task<Message> {
+        let Some((_, description)) = &self.viewer else {
+            return Task::none();
         };
-        Task::none()
+        if key == Named::Escape && modifiers.is_empty() {
+            return self.update_viewer(Message::CloseViewer);
+        }
+        if description.is_none() {
+            return Task::none();
+        }
+        style::scroll_viewer(key, modifiers, height)
+    }
+
+    fn description_for(&self, uuid: &str) -> Option<&str> {
+        self.drafts
+            .get(uuid)
+            .map(Draft::description)
+            .or_else(|| self.publication(uuid)?.get("description")?.as_str())
     }
 
     fn update_previews(&mut self, message: Message) -> Task<Message> {
@@ -1403,7 +1457,12 @@ impl App {
                 self.row_previews.insert(uuid, Some(result));
                 return describe::preview_tasks(self);
             }
-            Message::OpenViewer(..) | Message::CloseViewer => return self.update_viewer(message),
+            Message::OpenViewer { .. }
+            | Message::CloseViewer
+            | Message::ViewerWheel
+            | Message::ViewerKey(..) => {
+                return self.update_viewer(message);
+            }
             _ => unreachable!("message routed to previews handler"),
         }
         Task::none()
@@ -1848,7 +1907,11 @@ impl App {
         let Some(editor) = self.description_editors.get_mut(&uuid) else {
             return Task::none();
         };
+        let changed = action.is_edit();
         editor.perform(action);
+        if !changed {
+            return Task::none();
+        }
         let text = editor.text();
         self.update(Message::Edited {
             uuid,
@@ -2980,6 +3043,7 @@ impl App {
             false,
             height,
             uuid,
+            Some(uuid),
         )
     }
 
@@ -2999,7 +3063,11 @@ impl App {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
-            iced::event::listen_with(publish_keyboard_event),
+            if self.viewer.is_none() {
+                iced::event::listen_with(publish_keyboard_event)
+            } else {
+                Subscription::none()
+            },
         ])
     }
 
@@ -3069,18 +3137,10 @@ impl App {
                 .style(style::header),
         ];
         // The page keeps its tree slot whether or not the viewer covers it, so no scroll resets.
-        let viewer = self.viewer.as_deref().map(|path| {
-            iced::widget::mouse_area(
-                container(
-                    iced::widget::image(iced::widget::image::Handle::from_path(path))
-                        .content_fit(iced::ContentFit::ScaleDown),
-                )
-                .center(Length::Fill)
-                .style(style::viewer),
-            )
-            .on_press(Message::CloseViewer)
-            .into()
-        });
+        let viewer = self
+            .viewer
+            .as_ref()
+            .map(|(path, description)| style::art_viewer(path, description.as_deref()));
         floating(page, viewer)
     }
 
@@ -3434,8 +3494,11 @@ mod tests {
     fn viewer_opens_and_closes_on_the_same_tab() {
         let (mut app, _root) = app();
         app.active_tab = Tab::Schedule;
-        let _ = app.update(Message::OpenViewer(PathBuf::from("/art/a.png")));
-        assert_eq!(app.viewer.as_deref(), Some(Path::new("/art/a.png")));
+        let _ = app.update(Message::OpenViewer {
+            path: PathBuf::from("/art/a.png"),
+            publication: None,
+        });
+        assert_eq!(app.viewer, Some((PathBuf::from("/art/a.png"), None)));
         let _ = app.update(Message::CloseViewer);
         assert!(app.viewer.is_none());
         assert_eq!(app.active_tab, Tab::Schedule);
@@ -3446,14 +3509,44 @@ mod tests {
         let (mut app, _root) = app();
         app.active_tab = Tab::Publish;
         app.publish_keyboard_mode = true;
-        let _ = app.update(Message::OpenViewer(PathBuf::from("/art/a.png")));
+        let _ = app.update(Message::OpenViewer {
+            path: PathBuf::from("/art/a.png"),
+            publication: None,
+        });
         let _ = app.update(Message::PublishKeyboardToggle);
-        assert!(app.publish_keyboard_mode);
         let _ = app.update(Message::PublishKeyboardExit);
+        assert!(app.publish_keyboard_mode);
+        assert!(app.viewer.is_some());
+        let _ = app.update(Message::ViewerKey(Named::Escape, Modifiers::NONE, 760.0));
         assert!(app.viewer.is_none());
         assert!(app.publish_keyboard_mode);
         let _ = app.update(Message::PublishKeyboardExit);
         assert!(!app.publish_keyboard_mode);
+    }
+
+    #[test]
+    fn viewer_text_belongs_to_the_clicked_publication_and_prefers_its_draft() {
+        let (mut app, _root) = app();
+        app.publications = Some(vec![
+            serde_json::json!({"uuid": "one", "description": "First description"}),
+            serde_json::json!({"uuid": "two", "description": "Second description"}),
+        ]);
+        let _ = app.update(Message::Edited {
+            uuid: "two".into(),
+            field: Field::Description,
+            text: "Edited second description".into(),
+        });
+        for (uuid, expected) in [
+            (Some("one"), Some("First description")),
+            (Some("two"), Some("Edited second description")),
+            (None, None),
+        ] {
+            let _ = app.update(Message::OpenViewer {
+                path: "/art/same.png".into(),
+                publication: uuid.map(str::to_owned),
+            });
+            assert_eq!(app.viewer.as_ref().unwrap().1.as_deref(), expected);
+        }
     }
 
     #[test]
