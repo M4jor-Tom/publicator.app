@@ -1393,3 +1393,57 @@ async fn batch_level_failure_clears_its_queued_cards_and_reports_the_error() {
         describe::batch_summary(&app)
     );
 }
+
+#[tokio::test]
+async fn describe_keeps_one_active_card_and_counts_publications_across_openrouter_retry() {
+    use common::http::{Server, manual_clock, received};
+    let f = Fixture::new();
+    f.write(json!([f.marked_row(1), f.marked_row(2)]));
+    let (throttled, observed) = Reply::new("/chat/completions", 429, "busy").confirm_skipped_body();
+    let server = Server::start(vec![
+        throttled,
+        completion("Second artwork"),
+        completion("First artwork"),
+    ]);
+    let (mut app, _) = fixture_app(&f, server.url().into());
+    let _clock = manual_clock();
+    let mut actions = iced_runtime::task::into_stream(app.update(Message::GenerateMarked)).unwrap();
+    for expected in [
+        BatchEvent::Admitted(vec![id(2), id(1)]),
+        BatchEvent::Started(id(2)),
+    ] {
+        let message = common::ui::next_output(&mut actions).await;
+        assert!(matches!(&message, Message::GenerationProgress(event) if *event == expected));
+        common::ui::send(&mut app, message).await;
+    }
+    // Drive the stream while confirming that the server never sent the 429 body.
+    let until_retry = async {
+        received(&observed).await;
+        assert_eq!(card_states(&app), ["queued", "generating", "-"]);
+        assert_eq!(
+            describe::batch_summary(&app).as_deref(),
+            Some("Generating 1 of 2 · 0 done · 0 failed")
+        );
+        assert!(iced_runtime::task::into_stream(app.update(Message::GenerateMarked)).is_none());
+        assert_eq!(server.requests().len(), 1);
+        tokio::time::advance(Duration::from_millis(1001)).await;
+    };
+    let (first_finish, ()) = tokio::join!(common::ui::next_output(&mut actions), until_retry);
+    assert!(
+        matches!(&first_finish, Message::GenerationProgress(BatchEvent::Finished(result)) if result.uuid == id(2) && result.saved)
+    );
+    common::ui::send(&mut app, first_finish).await;
+    for _ in 0..3 {
+        let message = common::ui::next_output(&mut actions).await;
+        common::ui::send(&mut app, message).await;
+    }
+    assert_eq!(card_states(&app), ["generated", "generated", "-"]);
+    assert_eq!(
+        describe::batch_summary(&app).as_deref(),
+        Some("Generated 2 of 2")
+    );
+    let saved = f.read();
+    assert_eq!(saved[0]["title"], "First artwork");
+    assert_eq!(saved[1]["title"], "Second artwork");
+    server.finish();
+}

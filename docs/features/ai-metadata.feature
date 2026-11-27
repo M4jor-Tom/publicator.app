@@ -54,6 +54,22 @@ Feature: Generate and approve artwork metadata
       Then the local key takes precedence over OPENROUTER_KEY
       But a malformed secrets file reports an error without echoing its source line
 
+    Scenario: OpenRouter rate-limits a request
+      When any OpenRouter response returns HTTP 429 headers
+      Then new OpenRouter completions, schema and fallback attempts, and uncached catalogue requests share one pause on that client
+      And in-flight requests may finish and save normally; Ollama is not paused
+      And a usable Retry-After delay or HTTP-date sets the pause without a backoff cap
+      But a missing or unusable value backs off for 1, 2, 4, then at most 8 seconds until work dispatched after the latest pause succeeds
+      And a concurrent 429 can extend, but never shorten, the pause
+      And the exact throttled request retries without changing model or schema mode
+
+    Scenario: The active record's deadline expires during an OpenRouter pause
+      Given each sequential record starts its own deadline when processing begins
+      When preparation, provider work and cooldown use up that deadline
+      Then no retry is sent and the record reports one OpenRouter deadline failure, even if throttled during fallback or catalogue lookup
+      And the failed record remains unchanged and eligible while the next record starts with its own budget
+      And cancelling a waiting run releases its reservations without erasing the shared pause or leaving a retry behind
+
     Scenario: Ollama is missing a fitting model
       Given local generation uses an already-running Ollama service and llmfit assessed the model
       When the model is not installed

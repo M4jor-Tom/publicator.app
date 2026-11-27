@@ -35,6 +35,7 @@ chrono = "0.4"
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+httpdate = "1"
 libc = "0.2"
 jsonschema = "0.29"
 openssl = "0.10"
@@ -52,4 +53,4 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 gherkin = "0.16"
 iced_runtime = "=0.14.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
