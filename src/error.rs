@@ -20,6 +20,8 @@ pub enum Error {
     Busy(String),
     #[error("provider error: {0}")]
     Provider(String),
+    #[error("provider error: OpenRouter deadline exceeded")]
+    OpenRouterDeadline,
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("prompt archive unavailable: {0}")]

@@ -3,11 +3,16 @@ use crate::{
     error::{Error, Result},
     images::PreparedImage,
 };
+use reqwest::{StatusCode, header::RETRY_AFTER};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
-    time::{Duration, Instant},
+    future::{Future, poll_fn},
+    pin::pin,
+    task::Poll,
+    time::{Duration, SystemTime},
 };
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogModel {
@@ -62,47 +67,92 @@ impl MetadataClient {
             .filter(|key| !key.is_empty())
             .ok_or_else(|| Error::Provider("OPENROUTER_KEY is not set".into()))
     }
-    async fn bounded(
+    async fn bounded<T>(
         &self,
         request: reqwest::RequestBuilder,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
         secrets: &[&str],
-    ) -> Result<Vec<u8>> {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(Error::Provider("OpenRouter deadline exceeded".into()));
-        }
-        let request = request.timeout(remaining);
-        let response = tokio::time::timeout(remaining, async {
-            let response = request.send().await.map_err(|e| {
-                if e.is_timeout() {
-                    Error::Provider("OpenRouter deadline exceeded".into())
-                } else {
-                    Error::Provider(e.to_string())
-                }
-            })?;
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let request = request.build().map_err(request_error)?;
+        loop {
+            // GETs and JSON bodies can be cloned without rebuilding the payload or changing modes.
+            let (response, dispatch_cooldown) =
+                self.dispatch(request.try_clone(), deadline).await?;
             let status = response.status();
-            let bytes = response.bytes().await.map_err(|e| {
-                if e.is_timeout() {
-                    Error::Provider("OpenRouter deadline exceeded".into())
-                } else {
-                    Error::Provider(e.to_string())
-                }
-            })?;
-            Ok::<_, Error>((status, bytes))
-        })
-        .await
-        .map_err(|_| Error::Provider("OpenRouter deadline exceeded".into()))??;
-        if !response.0.is_success() {
-            return Err(Error::Provider(format!(
-                "OpenRouter HTTP {}: {}",
-                response.0.as_u16(),
-                safe_error_detail(&response.1, secrets)
-            )));
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                self.openrouter_cooldown
+                    .lock()
+                    .unwrap()
+                    .throttled(retry_after);
+                // Drop the response without reading potentially slow or sensitive error content.
+                continue;
+            }
+            let bytes = timeout_at(deadline, response.bytes())
+                .await
+                .map_err(|_| Error::OpenRouterDeadline)?
+                .map_err(request_error)?;
+            if !status.is_success() {
+                return Err(Error::Provider(format!(
+                    "OpenRouter HTTP {}: {}",
+                    status.as_u16(),
+                    safe_error_detail(&bytes, secrets)
+                )));
+            }
+            let parsed = parse(&bytes)?;
+            let mut cooldown = self.openrouter_cooldown.lock().unwrap();
+            if cooldown.until == dispatch_cooldown {
+                cooldown.headerless = 0;
+            }
+            return Ok(parsed);
         }
-        Ok(response.1.to_vec())
     }
-    pub async fn catalogue(&self, deadline: tokio::time::Instant) -> Result<Vec<CatalogModel>> {
+    async fn dispatch(
+        &self,
+        request: Option<reqwest::Request>,
+        deadline: Instant,
+    ) -> Result<(reqwest::Response, Option<Instant>)> {
+        let request = request
+            .ok_or_else(|| Error::Protocol("OpenRouter request cannot be retried".into()))?;
+        let mut send = pin!(async { self.http.execute(request).await });
+        let mut wake = pin!(sleep_until(deadline));
+        let mut admitted = None;
+        let dispatch = poll_fn(|cx| {
+            if admitted.is_some() {
+                return send.as_mut().poll(cx);
+            }
+            let cooldown = self.openrouter_cooldown.lock().unwrap();
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Poll::Pending; // The outer timeout owns the deadline.
+                }
+                if let Some(until) = cooldown.until.filter(|until| now < *until) {
+                    wake.as_mut().reset(until.min(deadline));
+                    if wake.as_mut().poll(cx).is_pending() {
+                        return Poll::Pending;
+                    }
+                    continue;
+                }
+                // Start the lazy HTTP future atomically with admission. Later polls never lock.
+                admitted = Some(cooldown.until);
+                return send.as_mut().poll(cx);
+            }
+        });
+        let response = timeout_at(deadline, dispatch)
+            .await
+            .map_err(|_| Error::OpenRouterDeadline)?
+            .map_err(request_error)?;
+        Ok((
+            response,
+            admitted.expect("response requires an admitted request"),
+        ))
+    }
+    pub async fn catalogue(&self, deadline: Instant) -> Result<Vec<CatalogModel>> {
         if let Some((at, models)) = self.catalogue.lock().unwrap().as_ref()
             && at.elapsed() < Duration::from_secs(300)
         {
@@ -111,17 +161,10 @@ impl MetadataClient {
         let url = format!("{}/models", self.endpoints.openrouter.trim_end_matches('/'));
         let key = self.openrouter_key()?;
         let req = self.http.get(url).bearer_auth(&key);
-        let bytes = self.bounded(req, deadline, &[key.as_str()]).await?;
-        let v: Value = serde_json::from_slice(&bytes)?;
-        let rows = v
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::Protocol("OpenRouter catalogue missing data".into()))?;
-        let models = rows
-            .iter()
-            .map(CatalogModel::from_api)
-            .collect::<Result<Vec<_>>>()?;
-        *self.catalogue.lock().unwrap() = Some((Instant::now(), models.clone()));
+        let models = self
+            .bounded(req, deadline, &[key.as_str()], parse_catalogue)
+            .await?;
+        *self.catalogue.lock().unwrap() = Some((std::time::Instant::now(), models.clone()));
         Ok(models)
     }
     pub async fn openrouter_attempt(
@@ -129,7 +172,7 @@ impl MetadataClient {
         image: &PreparedImage,
         model: &str,
         schema: bool,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
     ) -> Result<Generated> {
         let key = self.openrouter_key()?;
         let model = model.strip_prefix("openrouter/").unwrap_or(model);
@@ -142,22 +185,19 @@ impl MetadataClient {
             self.endpoints.openrouter.trim_end_matches('/')
         );
         let send = |body: Value| self.http.post(&url).bearer_auth(&key).json(&body);
-        let bytes = match self
-            .bounded(send(body), deadline, &[key.as_str(), data_url.as_str()])
-            .await
-        {
-            Err(error) if use_schema && unsupported_schema(&error.to_string()) => {
+        let parse = |bytes: &[u8]| parse_completion(bytes, model);
+        let secrets = [key.as_str(), data_url.as_str()];
+        match self.bounded(send(body), deadline, &secrets, parse).await {
+            Err(Error::Provider(detail)) if use_schema && unsupported_schema(&detail) => {
                 self.rejected_schemas
                     .lock()
                     .unwrap()
                     .insert(model.to_owned());
                 let retry = completion_body(model, &data_url, false);
-                self.bounded(send(retry), deadline, &[key.as_str(), data_url.as_str()])
-                    .await?
+                self.bounded(send(retry), deadline, &secrets, parse).await
             }
-            result => result?,
-        };
-        parse_completion(&bytes, model)
+            result => result,
+        }
     }
     pub async fn openrouter_generate(
         &self,
@@ -165,7 +205,7 @@ impl MetadataClient {
         request: &super::GenerationRequest,
         preferred: Option<&str>,
     ) -> Result<Generated> {
-        let deadline = tokio::time::Instant::now() + request.timeout;
+        let deadline = Instant::now() + request.timeout;
         self.openrouter_generate_until(image, request, preferred, deadline)
             .await
     }
@@ -174,7 +214,7 @@ impl MetadataClient {
         image: &PreparedImage,
         request: &super::GenerationRequest,
         preferred: Option<&str>,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
     ) -> Result<Generated> {
         let selected = preferred.unwrap_or(&request.model.openrouter_name);
         let selected = selected.strip_prefix("openrouter/").unwrap_or(selected);
@@ -183,6 +223,7 @@ impl MetadataClient {
             .await
         {
             Ok(generated) => generated,
+            Err(error @ Error::OpenRouterDeadline) => return Err(error),
             Err(original) => {
                 self.openrouter_fallback(image, selected, deadline, original)
                     .await?
@@ -195,17 +236,18 @@ impl MetadataClient {
         &self,
         image: &PreparedImage,
         selected: &str,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
         original: Error,
     ) -> Result<Generated> {
         let models = match self.catalogue(deadline).await {
             Ok(models) => models,
+            Err(error @ Error::OpenRouterDeadline) => return Err(error),
             Err(_) => return Err(original),
         };
         let mut last = original;
         for candidate in fallback_models(models, selected) {
-            if tokio::time::Instant::now() >= deadline {
-                break;
+            if Instant::now() >= deadline {
+                return Err(Error::OpenRouterDeadline);
             }
             if candidate.schema_supported == Some(false) {
                 self.rejected_schemas
@@ -223,12 +265,65 @@ impl MetadataClient {
                 .await
             {
                 Ok(generated) => return Ok(generated),
+                Err(error @ Error::OpenRouterDeadline) => return Err(error),
                 Err(error) => last = error,
             }
         }
         Err(last)
     }
 }
+#[derive(Default)]
+pub(super) struct Cooldown {
+    // Keep the last expiry even after it passes: it identifies work older than a later 429.
+    until: Option<Instant>,
+    headerless: u32,
+}
+
+impl Cooldown {
+    fn throttled(&mut self, retry_after: Option<&str>) {
+        let now = Instant::now();
+        let until = retry_after
+            .and_then(|value| retry_delay(value, SystemTime::now()))
+            .and_then(|delay| now.checked_add(delay))
+            .unwrap_or_else(|| {
+                let delay = Duration::from_secs(1 << self.headerless);
+                self.headerless = (self.headerless + 1).min(3);
+                now + delay
+            });
+        self.until = self.until.max(Some(until));
+    }
+}
+
+fn retry_delay(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    let delay = if value.bytes().all(|b| b.is_ascii_digit()) {
+        Duration::from_secs(value.parse().ok()?)
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .ok()?
+    };
+    (!delay.is_zero()).then_some(delay)
+}
+
+fn request_error(error: reqwest::Error) -> Error {
+    if error.is_timeout() {
+        Error::OpenRouterDeadline
+    } else {
+        Error::Provider(error.to_string())
+    }
+}
+
+fn parse_catalogue(bytes: &[u8]) -> Result<Vec<CatalogModel>> {
+    let v: Value = serde_json::from_slice(bytes)?;
+    let rows = v
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Protocol("OpenRouter catalogue missing data".into()))?;
+    rows.iter().map(CatalogModel::from_api).collect()
+}
+
 fn completion_body(model: &str, data_url: &str, use_schema: bool) -> Value {
     let mut prompt = metadata_prompt().to_owned();
     if !use_schema {
@@ -319,4 +414,39 @@ fn unsupported_schema(message: &str) -> bool {
             || m.contains("unsupported")
             || m.contains("not allowed")
             || m.contains("does not support"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates_but_not_zero_past_or_invalid_values() {
+        let now = httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:07 GMT").unwrap();
+        for value in [
+            " 30 ",
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                retry_delay(value, now),
+                Some(Duration::from_secs(30)),
+                "{value}"
+            );
+        }
+        for value in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            "1.5",
+            "bogus",
+            "18446744073709551616",
+            "Sun, 06 Nov 1994 08:49:07 GMT",
+            "Sun, 06 Nov 1994 08:49:06 GMT",
+        ] {
+            assert_eq!(retry_delay(value, now), None, "{value}");
+        }
+    }
 }

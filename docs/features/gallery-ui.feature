@@ -65,6 +65,13 @@ Feature: Review artwork in the native gallery
       And the summary moves from Preparing N… to Generating K of N · D done · F failed to Generated S of N, with failures counted
       And admission, preflight or batch failure shows Generation failed with the error
 
+    Scenario: OpenRouter asks Generate marked to wait
+      Given Generate marked runs one publication at a time
+      When an OpenRouter request waits and retries after a rate limit
+      Then only the current card stays Generating… and the remaining cards stay Queued
+      And clicking Generate marked again starts no work
+      And the finished card and summary count one outcome for that publication, not one per attempt
+
     Scenario: Act on a busy or finished card
       When the user edits, deletes or approves a queued or generating card
       Then nothing changes and the UI says "Wait for this image's generation to finish"

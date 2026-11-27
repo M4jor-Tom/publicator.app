@@ -295,34 +295,57 @@ async fn batch_persists_each_success_before_continuing_after_failure() {
 
 #[tokio::test]
 async fn batch_reports_progress_and_releases_each_finished_record() {
+    use common::http::{manual_clock, received};
     use publicator::application::{BatchEvent, RecordResult};
     let f = Fixture::new();
-    let rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
+    let mut rows: Vec<_> = (1..=3).map(|n| f.marked_row(n)).collect();
+    rows[2]["title"] = json!("Manual title");
     f.write(json!(rows));
+    let (limited, observed) = Reply::new("/chat/completions", 429, "busy").confirm_skipped_body();
     // The second record's request is held while the first record's uuid is edited.
     let replies = vec![
+        limited,
         completion("title-3"),
         completion("title-2"),
         completion("title-1"),
     ];
-    let (server, started, release) = Server::start_paused_at(replies, 1);
+    let (server, started, release) = Server::start_paused_at(replies, 2);
     let app = Arc::new(Application::new(
         Arc::new(f.store.clone()),
         client(server.url().to_owned()),
     ));
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _clock = manual_clock();
+    let patient = GenerationRequest {
+        timeout: Duration::from_secs(15),
+        ..request(Source::OpenRouter)
+    };
     let batch = {
         let (app, events) = (Arc::clone(&app), Arc::clone(&events));
         tokio::spawn(async move {
-            app.generate_marked_with_events(&request(Source::OpenRouter), None, |event| {
+            app.generate_marked_with_events(&patient, None, |event| {
                 events.lock().unwrap().push(event)
             })
             .await
         })
     };
-    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(10)).unwrap())
-        .await
-        .unwrap();
+    received(&observed).await;
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            BatchEvent::Admitted(vec![id(3), id(2), id(1)]),
+            BatchEvent::Started(id(3))
+        ]
+    );
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    received(&started).await;
+    let persisted = f.read();
+    assert_eq!(persisted[2]["title"], "Manual title");
+    assert_eq!(
+        persisted[2]["description"],
+        "A complete generated description."
+    );
+    assert_eq!(persisted[2]["state"], "DESCRIBED");
     app.mutate(Some(&id(3)), |_| Ok(()))
         .expect("a finished record accepts edits");
     assert!(app.mutate(Some(&id(2)), |_| Ok(())).is_err());
@@ -330,6 +353,9 @@ async fn batch_reports_progress_and_releases_each_finished_record() {
     assert!(app.begin_publishing().is_err());
     release.send(()).unwrap();
     let report = batch.await.unwrap().unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0], requests[1], "same image and model");
     server.finish();
     let finished = |n| {
         BatchEvent::Finished(RecordResult {
@@ -906,4 +932,132 @@ async fn invalid_single_generation_source_runs_no_local_preflight() {
         assert!(!entered.exists(), "llmfit ran for invalid source data");
         assert_eq!(std::fs::read(&f.store.paths().json).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn cooldown_expiry_uses_the_active_deadline_and_the_next_record_gets_a_new_one() {
+    use common::http::{manual_clock, received, wait_for};
+    use publicator::application::BatchEvent;
+    use tokio::time::{Instant, advance};
+    let f = Fixture::new();
+    let (mut rows, _, _) = f.namesake_rows("SCHEDULED");
+    rows = rows.into_iter().map(with_blank_metadata).collect();
+    f.write(json!(rows));
+    let (limited, release) = Reply::new("/chat/completions", 429, "busy")
+        .with_header("Retry-After", "6")
+        .hold_headers();
+    let (limited, observed) = limited.confirm_skipped_body();
+    let server = Server::start(vec![limited, completion("Queued record")]);
+    let app = Application::new(Arc::new(f.store.clone()), client(server.url().into()));
+    let mut request = request(Source::OpenRouter);
+    request.timeout = Duration::from_secs(6);
+    let (events, mut progress) = tokio::sync::mpsc::unbounded_channel();
+    let _clock = manual_clock();
+    let begun = Instant::now();
+    let batch =
+        app.generate_marked_with_events(&request, None, move |event| events.send(event).unwrap());
+    let check = async {
+        wait_for(|| server.requests().len() == 1).await;
+        assert_eq!(
+            progress.try_recv().unwrap(),
+            BatchEvent::Admitted(vec![id(2), id(1)])
+        );
+        assert_eq!(progress.try_recv().unwrap(), BatchEvent::Started(id(2)));
+        advance(Duration::from_secs(3)).await;
+        release.send(()).unwrap();
+        received(&observed).await;
+        advance(Duration::from_millis(3001)).await;
+        let Some(BatchEvent::Finished(active)) = progress.recv().await else {
+            panic!("active record did not finish")
+        };
+        assert_eq!(active.uuid, id(2));
+        assert!(!active.saved);
+        assert_eq!(
+            active.error.as_deref(),
+            Some("provider error: OpenRouter deadline exceeded")
+        );
+        assert_eq!(Instant::now() - begun, Duration::from_millis(6001));
+        assert_eq!(progress.recv().await, Some(BatchEvent::Started(id(1))));
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(f.read(), json!(rows));
+        advance(Duration::from_secs(3)).await;
+    };
+    let (report, ()) = tokio::join!(batch, check);
+    let report = report.unwrap();
+    assert_eq!(
+        (report.succeeded, report.failed, report.results.len()),
+        (1, 1, 2)
+    );
+    assert_eq!(f.read()[0]["title"], "Queued record");
+    assert_eq!(f.read()[1], rows[1]);
+    let calls = server.requests();
+    assert_eq!(calls.len(), 2);
+    assert_ne!(
+        calls[0]["body"], calls[1]["body"],
+        "the second call is not a retry of the first image"
+    );
+    server.finish();
+}
+
+#[tokio::test]
+async fn abort_during_cooldown_releases_batch_but_keeps_other_callers_gated() {
+    use common::http::{manual_clock, received};
+    let f = Fixture::new();
+    f.write(json!([
+        f.marked_row(1),
+        f.marked_row(2),
+        f.art_row(3, "SCHEDULED")
+    ]));
+    let original = f.read();
+    let (limited, observed) = Reply::new("/chat/completions", 429, "busy")
+        .with_header("Retry-After", "5")
+        .confirm_skipped_body();
+    let server = Server::start(vec![limited, completion("Unrelated record")]);
+    let app = Arc::new(Application::new(
+        Arc::new(f.store.clone()),
+        client(server.url().into()),
+    ));
+    let _clock = manual_clock();
+    let patient = GenerationRequest {
+        timeout: Duration::from_secs(15),
+        ..request(Source::OpenRouter)
+    };
+    let batch = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.generate_marked(&patient).await })
+    };
+    received(&observed).await;
+    assert!(app.mutate(Some(&id(2)), |_| Ok(())).is_err());
+    batch.abort();
+    assert!(batch.await.unwrap_err().is_cancelled());
+    for row in [id(1), id(2)] {
+        app.mutate(Some(&row), |_| Ok(()))
+            .expect("abort releases both reservations");
+    }
+    // Let blocking image tools run against real time for this short deadline probe.
+    tokio::time::resume();
+    let other = app.generate_one(&id(3), request(Source::OpenRouter)).await;
+    tokio::time::pause();
+    assert_eq!(
+        other.unwrap_err().to_string(),
+        "provider error: OpenRouter deadline exceeded"
+    );
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "abort did not clear the cooldown"
+    );
+    let long = GenerationRequest {
+        timeout: Duration::from_secs(10),
+        ..request(Source::OpenRouter)
+    };
+    let unrelated = id(3);
+    let (result, ()) = tokio::join!(app.generate_one(&unrelated, long), async {
+        tokio::time::advance(Duration::from_millis(3001)).await;
+    });
+    assert_eq!(result.unwrap().metadata.title, "Unrelated record");
+    let saved = f.read();
+    assert_eq!((&saved[0], &saved[1]), (&original[0], &original[1]));
+    assert_eq!(saved[2]["title"], "Unrelated record");
+    server.finish();
 }

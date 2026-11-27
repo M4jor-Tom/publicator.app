@@ -135,7 +135,7 @@ fn catalogue_requires_vision_and_zero_pricing() {
 }
 
 #[tokio::test]
-async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
+async fn ordinary_error_walks_other_vendor_before_sibling_and_reports_answerer() {
     let (_dir, img) = image();
     let catalog=json!({"data":[
         {"id":"vendor/selected:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}},
@@ -143,7 +143,7 @@ async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
         {"id":"vendor/sibling:free","architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0","completion":"0"}}
     ]}).to_string();
     let server = common::http::Server::start(vec![
-        Reply::new("/chat/completions", 429, "busy"),
+        Reply::new("/chat/completions", 503, "busy"),
         Reply::new("/models", 200, catalog),
         Reply::new("/chat/completions", 200, completion("other/model:free")),
     ]);
@@ -170,6 +170,7 @@ async fn http_429_walks_other_vendor_before_sibling_and_reports_answerer() {
 async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![
+        throttled("/chat/completions", "1"),
         Reply::new(
             "/chat/completions",
             400,
@@ -179,7 +180,7 @@ async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
         Reply::new("/chat/completions", 200, completion("vendor/model")),
     ]);
     let c = client(server.url());
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
     c.openrouter_attempt(&img, "vendor/model", true, deadline)
         .await
         .unwrap();
@@ -187,11 +188,12 @@ async fn schema_rejection_retries_once_prompt_shaped_then_memoizes() {
         .await
         .unwrap();
     let req = server.requests();
-    assert_eq!(req.len(), 3);
-    assert!(req[0]["body"].get("response_format").is_some());
-    assert!(req[1]["body"].get("response_format").is_none());
-    assert!(req[1]["body"].to_string().contains("title"));
+    assert_eq!(req.len(), 4);
+    assert_eq!(req[0], req[1], "a 429 body cannot reject the schema");
+    assert!(req[1]["body"].get("response_format").is_some());
     assert!(req[2]["body"].get("response_format").is_none());
+    assert!(req[2]["body"].to_string().contains("title"));
+    assert_eq!(req[2], req[3]);
 }
 
 #[tokio::test]
@@ -311,7 +313,7 @@ async fn successful_selected_model_does_not_fetch_catalogue() {
 async fn malformed_rescue_catalogue_preserves_original_model_error() {
     let (_dir, img) = image();
     let server = common::http::Server::start(vec![
-        Reply::new("/chat/completions", 429, "original busy"),
+        Reply::new("/chat/completions", 503, "original busy"),
         Reply::new("/models", 200, "{bad"),
     ]);
     let err = client(server.url())
@@ -320,7 +322,7 @@ async fn malformed_rescue_catalogue_preserves_original_model_error() {
         .unwrap_err();
     let requests = server.requests();
     server.finish();
-    assert!(err.to_string().contains("429"), "{err}");
+    assert!(err.to_string().contains("503"), "{err}");
     let paths: Vec<_> = requests.iter().map(|r| r["path"].clone()).collect();
     assert_eq!(paths, ["/chat/completions", "/models"]);
 }
@@ -357,7 +359,7 @@ fn mixed_catalogue() -> String {
 /// The selected model fails, the rescue catalogue arrives, its first candidate fails.
 fn failing_rescue() -> Vec<Reply> {
     vec![
-        Reply::new("/chat/completions", 429, "busy"),
+        Reply::new("/chat/completions", 503, "busy"),
         Reply::new("/models", 200, mixed_catalogue()),
         Reply::new(
             "/chat/completions",
@@ -532,5 +534,241 @@ async fn batch_sends_the_recorded_artwork_and_keeps_the_attempted_candidate() {
             (&saved["title"], &saved["state"]),
             (&json!("T"), &json!("DESCRIBED"))
         );
+    }
+}
+
+fn throttled(path: &str, after: &str) -> Reply {
+    Reply::new(
+        path,
+        429,
+        "response_format unsupported; DUMMY-test-credential data:image/png;base64,cG5nIGJ5dGVz",
+    )
+    .with_header("Retry-After", after)
+}
+
+#[tokio::test]
+async fn shared_pause_starts_at_headers_and_leaves_in_flight_and_ollama_alone() {
+    use common::http::{manual_clock, received, wait_for};
+    use tokio::time::{Instant, advance};
+
+    let _clock = manual_clock();
+    let (b, finish_b) = answered().hold_headers();
+    let (shorter, send_shorter) = throttled("/chat/completions", "1").hold_headers();
+    let (shorter, observed_shorter) = shorter.confirm_skipped_body();
+    let (a, observed_a) = throttled("/chat/completions", "30").confirm_skipped_body();
+    let server = Server::start(vec![
+        b,
+        shorter,
+        a,
+        Reply::new(
+            "/api/chat",
+            200,
+            json!({"message":{"content":common::http::content("Local")}}),
+        ),
+        answered(),
+        answered(),
+        Reply::new("/models", 200, mixed_catalogue()),
+    ]);
+    let client = Arc::new(
+        MetadataClient::new(
+            reqwest::Client::new(),
+            Endpoints {
+                openrouter: server.url().into(),
+                ollama: server.url().into(),
+            },
+            PathBuf::new(),
+        )
+        .with_openrouter_key("DUMMY-test-credential"),
+    );
+    let (_dir, image) = image();
+    let image = Arc::new(image);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let start = |model| {
+        let (client, image) = (Arc::clone(&client), Arc::clone(&image));
+        tokio::spawn(async move {
+            client
+                .openrouter_attempt(&image, model, true, deadline)
+                .await
+                .unwrap()
+        })
+    };
+    let b = start("vendor/b");
+    wait_for(|| server.requests().len() == 1).await;
+    let c = start("vendor/c");
+    wait_for(|| server.requests().len() == 2).await;
+    let a = start("vendor/a");
+    received(&observed_a).await;
+    // Poll this catalogue fetch during the pause, then resume the same future after the retries
+    // so the script doesn't depend on request ordering at the boundary.
+    let mut catalogue = std::pin::pin!(client.catalogue(deadline));
+    let before_expiry = Instant::now() + Duration::from_secs(29);
+    let during_pause = async {
+        advance(Duration::from_secs(5)).await;
+        send_shorter.send(()).unwrap();
+        received(&observed_shorter).await;
+        finish_b.send(()).unwrap();
+        assert_eq!(b.await.unwrap().model_used, "vendor/b");
+        let local = client
+            .local_generate(&image, &vision_request(Duration::from_secs(1)))
+            .await
+            .unwrap();
+        assert_eq!(local.metadata.title, "Local");
+        advance(Duration::from_millis(24001)).await;
+    };
+    let (early, ()) = tokio::join!(
+        tokio::time::timeout_at(before_expiry, &mut catalogue),
+        during_pause
+    );
+    assert!(early.is_err(), "catalogue must remain gated");
+    assert_eq!(
+        server.requests().len(),
+        4,
+        "shorter 429 must not end the pause"
+    );
+    advance(Duration::from_secs(1)).await;
+    assert_eq!(a.await.unwrap().model_used, "vendor/a");
+    assert_eq!(c.await.unwrap().model_used, "vendor/c");
+    assert!(!catalogue.await.unwrap().is_empty());
+    let requests = server.requests();
+    for first in &requests[1..3] {
+        assert!(
+            requests[4..6].contains(first),
+            "retry must preserve model and schema"
+        );
+    }
+    server.finish();
+}
+
+#[tokio::test]
+async fn unusable_retry_after_backs_off_to_a_cap_and_success_resets_it() {
+    use common::http::{manual_clock, received};
+    use tokio::time::{Instant, advance};
+
+    let _clock = manual_clock();
+    let mut signals = Vec::new();
+    let mut replies = Vec::new();
+    for header in [
+        None,
+        Some("not-a-date"),
+        Some("0"),
+        Some("18446744073709551615"),
+        None,
+        None,
+    ] {
+        let reply = header.map_or_else(
+            || Reply::new("/chat/completions", 429, "busy"),
+            |value| throttled("/chat/completions", value),
+        );
+        let (reply, signal) = reply.confirm_skipped_body();
+        replies.push(reply);
+        signals.push(signal);
+    }
+    replies.insert(5, answered());
+    replies.push(answered());
+    let server = Server::start(replies);
+    let client = client(server.url());
+    let (_dir, image) = image();
+    let request = vision_request(Duration::from_secs(45));
+    let generate = async {
+        client.generate(&image, &request).await.unwrap();
+        client.generate(&image, &request).await.unwrap();
+    };
+    let verify = async {
+        for (signal, (attempts, seconds)) in
+            signals
+                .iter()
+                .zip([(1, 1), (2, 2), (3, 4), (4, 8), (5, 8), (7, 1)])
+        {
+            received(signal).await;
+            let deadline =
+                Instant::now() + Duration::from_secs(seconds) - Duration::from_millis(20);
+            let catalogue = client.catalogue(deadline);
+            let check = async {
+                advance(Duration::from_secs(seconds) - Duration::from_millis(19)).await;
+            };
+            let (result, ()) = tokio::join!(catalogue, check);
+            assert!(matches!(
+                result,
+                Err(publicator::error::Error::OpenRouterDeadline)
+            ));
+            assert_eq!(
+                server.requests().len(),
+                attempts,
+                "wait {seconds}s at attempt {attempts}"
+            );
+            advance(Duration::from_millis(21)).await;
+        }
+    };
+    tokio::join!(generate, verify);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 8);
+    assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
+    server.finish();
+}
+
+#[tokio::test]
+async fn throttled_catalogue_and_prompt_mode_fallback_retry_identical_requests() {
+    let _clock = common::http::manual_clock();
+    let failure = Reply::new("/chat/completions", 503, "selected failed");
+    let (catalogue, got_catalogue_429) = throttled("/models", "1").confirm_skipped_body();
+    let (fallback, got_fallback_429) =
+        Reply::new("/chat/completions", 429, "slow down").confirm_skipped_body();
+    let fallback_catalogue = json!({"data":[{
+        "id":"safe/fallback", "architecture":{"input_modalities":["image"]},
+        "pricing":{"prompt":"0","completion":"0"}, "supported_parameters":[]
+    }]})
+    .to_string();
+    let server = Server::start(vec![
+        failure,
+        catalogue,
+        Reply::new("/models", 200, fallback_catalogue),
+        fallback,
+        answered(),
+    ]);
+    let client = client(server.url());
+    let (_dir, image) = image();
+    let request = vision_request(Duration::from_secs(10));
+    let tick = async {
+        for signal in [got_catalogue_429, got_fallback_429] {
+            common::http::received(&signal).await;
+            tokio::time::advance(Duration::from_millis(1001)).await;
+        }
+    };
+    let (result, ()) = tokio::join!(client.generate(&image, &request), tick);
+    assert_eq!(result.unwrap().model_used, "safe/fallback");
+    let requests = server.requests();
+    assert_eq!(requests[1], requests[2]);
+    assert_eq!(requests[3], requests[4]);
+    assert!(requests[3]["body"].get("response_format").is_none());
+    server.finish();
+}
+
+#[tokio::test]
+async fn throttled_fallback_deadline_overrides_earlier_errors_and_hides_rate_limit_input() {
+    use common::http::{manual_clock, received};
+    use tokio::time::advance;
+    let _clock = manual_clock();
+    for path in ["/models", "/chat/completions"] {
+        let mut replies = vec![Reply::new("/chat/completions", 503, "selected failed")];
+        if path == "/chat/completions" {
+            replies.push(Reply::new("/models", 200, mixed_catalogue()));
+        }
+        let (reply, signal) = throttled(path, "30").confirm_skipped_body();
+        replies.extend([reply, Reply::new("/probe", 200, "{}")]);
+        let server = Server::start(replies);
+        let client = client(server.url());
+        let (_dir, image) = image();
+        let request = vision_request(Duration::from_secs(4));
+        let tick = async {
+            received(&signal).await;
+            advance(Duration::from_secs(4) + Duration::from_millis(1)).await;
+        };
+        let (result, ()) = tokio::join!(client.generate(&image, &request), tick);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "provider error: OpenRouter deadline exceeded"
+        );
+        probe(&server);
+        server.finish();
     }
 }

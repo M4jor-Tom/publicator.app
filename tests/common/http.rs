@@ -9,7 +9,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Bounds every wait on the code under test: a missing request or unreleased gate fails, not hangs.
@@ -19,6 +19,9 @@ pub struct Reply {
     pub path: String,
     pub status: u16,
     pub body: String,
+    headers: Vec<(String, String)>,
+    release_headers: Option<mpsc::Receiver<()>>,
+    skipped_body: Option<mpsc::Sender<()>>,
 }
 
 impl Reply {
@@ -27,7 +30,29 @@ impl Reply {
             path: path.into(),
             status,
             body: body.to_string(),
+            headers: Vec::new(),
+            release_headers: None,
+            skipped_body: None,
         }
+    }
+
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn hold_headers(mut self) -> (Self, mpsc::Sender<()>) {
+        let (send, receive) = mpsc::channel();
+        self.release_headers = Some(receive);
+        (self, send)
+    }
+
+    /// Keep a nonempty body unsent; EOF proves the client acted on headers alone.
+    pub fn confirm_skipped_body(mut self) -> (Self, mpsc::Receiver<()>) {
+        assert!(!self.body.is_empty());
+        let (send, receive) = mpsc::channel();
+        self.skipped_body = Some(send);
+        (self, receive)
     }
 }
 
@@ -76,10 +101,7 @@ impl Server {
         )
     }
 
-    fn start_gated(
-        replies: Vec<Reply>,
-        mut gate: Option<(usize, mpsc::Sender<()>, mpsc::Receiver<()>)>,
-    ) -> Self {
+    fn start_gated(replies: Vec<Reply>, mut gate: Option<BodyGate>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(false).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -91,9 +113,11 @@ impl Server {
         let thread = thread::spawn(move || {
             let _done = done_tx;
             let mut replies = replies.into_iter();
+            let mut gated = Vec::new();
             while let Some(reply) = replies.next() {
                 let (mut stream, _) = listener.accept().expect("expected HTTP request");
                 if stopping.load(Ordering::SeqCst) {
+                    gated.into_iter().for_each(join_reply);
                     // The shutdown wakeup, not a request: report what was never asked for.
                     return std::iter::once(reply)
                         .chain(replies)
@@ -113,26 +137,17 @@ impl Server {
                     captured.push(serde_json::json!({"path": path, "body": body}));
                     captured.len()
                 };
-                let reason = if reply.status == 200 { "OK" } else { "Error" };
-                write!(
-                    stream,
-                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    reply.status,
-                    reason,
-                    reply.body.len(),
-                )
-                .unwrap();
-                if let Some((_, started, release)) = gate.take_if(|(at, ..)| *at + 1 == served) {
-                    let _ = started.send(());
-                    release.recv_timeout(WAIT).unwrap_or_else(|_| {
-                        panic!("paused HTTP reply for {path} was never released")
-                    });
-                    // The client may have abandoned the held body at its deadline; tests assert that.
-                    let _ = stream.write_all(reply.body.as_bytes());
+                let body_gate = gate.take_if(|(at, ..)| *at + 1 == served);
+                if reply.release_headers.is_some()
+                    || reply.skipped_body.is_some()
+                    || body_gate.is_some()
+                {
+                    gated.push(thread::spawn(move || send_reply(stream, reply, body_gate)));
                 } else {
-                    stream.write_all(reply.body.as_bytes()).unwrap();
+                    send_reply(stream, reply, None);
                 }
             }
+            gated.into_iter().for_each(join_reply);
             Vec::new()
         });
         Self {
@@ -184,6 +199,91 @@ impl Drop for Server {
             resume_unwind(panic);
         }
     }
+}
+
+type BodyGate = (usize, mpsc::Sender<()>, mpsc::Receiver<()>);
+
+fn join_reply(worker: thread::JoinHandle<()>) {
+    if let Err(panic) = worker.join() {
+        resume_unwind(panic);
+    }
+}
+
+fn send_reply(mut stream: TcpStream, reply: Reply, body_gate: Option<BodyGate>) {
+    if let Some(release) = reply.release_headers {
+        match release.recv_timeout(WAIT) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(e) => panic!("headers never released for {}: {e}", reply.path),
+        }
+    }
+    let reason = if reply.status == 200 { "OK" } else { "Error" };
+    let extra: String = reply
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    let mut headers = format!(
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
+        reply.status,
+        reason,
+        reply.body.len()
+    );
+    if reply.skipped_body.is_none() && body_gate.is_none() {
+        headers.push_str(&reply.body);
+        stream.write_all(headers.as_bytes()).unwrap();
+        return;
+    }
+    stream.write_all(headers.as_bytes()).unwrap();
+    if let Some(skipped) = reply.skipped_body {
+        let mut byte = [0];
+        assert_eq!(
+            stream
+                .read(&mut byte)
+                .expect("client should close without reading the body"),
+            0
+        );
+        let _ = skipped.send(());
+    } else if let Some((_, started, release)) = body_gate {
+        let _ = started.send(());
+        release
+            .recv_timeout(WAIT)
+            .unwrap_or_else(|_| panic!("paused HTTP reply for {} was never released", reply.path));
+        // The client may have abandoned the body at its deadline.
+        let _ = stream.write_all(reply.body.as_bytes());
+    }
+}
+
+/// Pause Tokio time without auto-advancing timers while real loopback I/O is in flight.
+/// Keep the sender alive and move time explicitly with `tokio::time::advance`.
+pub fn manual_clock() -> mpsc::Sender<()> {
+    let (keep_alive, until_dropped) = mpsc::channel();
+    tokio::time::pause();
+    tokio::task::spawn_blocking(move || {
+        // Also release auto-advance if a broken test stops making progress.
+        let _ = until_dropped.recv_timeout(WAIT * 3);
+    });
+    keep_alive
+}
+
+pub async fn wait_for(mut ready: impl FnMut() -> bool) {
+    let started = Instant::now();
+    while !ready() {
+        assert!(
+            started.elapsed() < WAIT,
+            "loopback fixture did not progress"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+pub async fn received(rx: &mpsc::Receiver<()>) {
+    wait_for(|| match rx.try_recv() {
+        Ok(()) => true,
+        Err(mpsc::TryRecvError::Empty) => false,
+        Err(e) => panic!("fixture signal dropped: {e}"),
+    })
+    .await;
 }
 
 fn read_request(stream: &mut TcpStream) -> (String, Value) {

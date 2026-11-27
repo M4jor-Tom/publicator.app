@@ -96,6 +96,7 @@ pub struct MetadataClient {
     _llmfit_program: PathBuf,
     pub(crate) rejected_schemas: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) catalogue: std::sync::Mutex<Option<(std::time::Instant, Vec<CatalogModel>)>>,
+    openrouter_cooldown: std::sync::Mutex<openrouter::Cooldown>,
     pub(crate) openrouter_key: Option<String>,
 }
 impl MetadataClient {
@@ -106,6 +107,7 @@ impl MetadataClient {
             _llmfit_program: llmfit_program,
             rejected_schemas: std::sync::Mutex::new(std::collections::HashSet::new()),
             catalogue: std::sync::Mutex::new(None),
+            openrouter_cooldown: Default::default(),
             openrouter_key: None,
         }
     }
