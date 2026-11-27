@@ -28,6 +28,7 @@ Feature: Review artwork in the native gallery
       Then the original fits a full-window black viewer, or the cached preview is used for mp4
       And the fitted image opens first, with no text visible
       And if the clicked publication has a description, including a current draft, one downward wheel step reveals its wrapped text and further scrolling can reach the end
+      And the viewer also scrolls with Up, Down, Page Up, Page Down, Space, Shift+Space, Home and End without moving the underlying page
       And a thumbnail without a description stays image-only
       And click or Escape closes only the viewer, restoring the tab and scroll position; viewer scrolling and Publish shortcuts do not act on the page behind it
 

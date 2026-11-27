@@ -20,7 +20,7 @@ use crate::{
 };
 use iced::{
     Element, Length, Subscription, Task, Theme,
-    keyboard::{Key, key::Named},
+    keyboard::{Key, Modifiers, key::Named},
     widget::{button, column, container, row, text},
 };
 use serde_json::Value;
@@ -251,6 +251,7 @@ pub enum Message {
     },
     CloseViewer,
     ViewerWheel,
+    ViewerKey(Named, Modifiers, f32),
     ToggleDescriptionEditor(String),
     Pick(Candidate),
     PickFinished(Result<(), String>),
@@ -926,7 +927,8 @@ impl App {
             | Message::ToggleCalendarEvent(..)
             | Message::OpenViewer { .. }
             | Message::CloseViewer
-            | Message::ViewerWheel => self.update_previews(message),
+            | Message::ViewerWheel
+            | Message::ViewerKey(..) => self.update_previews(message),
             Message::Pick(..)
             | Message::PickFinished(..)
             | Message::AskDelete(..)
@@ -1085,11 +1087,7 @@ impl App {
     }
 
     fn update_keyboard(&mut self, message: Message) -> Task<Message> {
-        // Escape closes the viewer first; other keys would act on cells hidden under it.
         if self.viewer.is_some() {
-            if matches!(message, Message::PublishKeyboardExit) {
-                self.viewer = None;
-            }
             return Task::none();
         }
         match message {
@@ -1374,20 +1372,45 @@ impl App {
     }
 
     fn update_viewer(&mut self, message: Message) -> Task<Message> {
-        if let Message::OpenViewer { path, publication } = message {
-            let description = publication
-                .as_deref()
-                .and_then(|uuid| self.description_for(uuid))
-                .filter(|description| !description.trim().is_empty())
-                .map(str::to_owned);
-            self.viewer = Some((path, description));
-            iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
-        } else {
-            if matches!(message, Message::CloseViewer) {
-                self.viewer = None;
+        match message {
+            Message::OpenViewer { path, publication } => {
+                let description = publication
+                    .as_deref()
+                    .and_then(|uuid| self.description_for(uuid))
+                    .filter(|description| !description.trim().is_empty())
+                    .map(str::to_owned);
+                self.viewer = Some((path, description));
+                iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::unfocus(),
+                )
             }
-            Task::none()
+            Message::CloseViewer => {
+                self.viewer = None;
+                Task::none()
+            }
+            Message::ViewerKey(key, modifiers, height) => {
+                self.update_viewer_key(key, modifiers, height)
+            }
+            _ => Task::none(),
         }
+    }
+
+    fn update_viewer_key(
+        &mut self,
+        key: Named,
+        modifiers: Modifiers,
+        height: f32,
+    ) -> Task<Message> {
+        let Some((_, description)) = &self.viewer else {
+            return Task::none();
+        };
+        if key == Named::Escape && modifiers.is_empty() {
+            return self.update_viewer(Message::CloseViewer);
+        }
+        if description.is_none() {
+            return Task::none();
+        }
+        style::scroll_viewer(key, modifiers, height)
     }
 
     fn description_for(&self, uuid: &str) -> Option<&str> {
@@ -1434,7 +1457,10 @@ impl App {
                 self.row_previews.insert(uuid, Some(result));
                 return describe::preview_tasks(self);
             }
-            Message::OpenViewer { .. } | Message::CloseViewer | Message::ViewerWheel => {
+            Message::OpenViewer { .. }
+            | Message::CloseViewer
+            | Message::ViewerWheel
+            | Message::ViewerKey(..) => {
                 return self.update_viewer(message);
             }
             _ => unreachable!("message routed to previews handler"),
@@ -3037,7 +3063,11 @@ impl App {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick),
             iced::window::close_requests().map(|_| Message::CloseRequested),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
-            iced::event::listen_with(publish_keyboard_event),
+            if self.viewer.is_none() {
+                iced::event::listen_with(publish_keyboard_event)
+            } else {
+                Subscription::none()
+            },
         ])
     }
 
@@ -3484,8 +3514,10 @@ mod tests {
             publication: None,
         });
         let _ = app.update(Message::PublishKeyboardToggle);
-        assert!(app.publish_keyboard_mode);
         let _ = app.update(Message::PublishKeyboardExit);
+        assert!(app.publish_keyboard_mode);
+        assert!(app.viewer.is_some());
+        let _ = app.update(Message::ViewerKey(Named::Escape, Modifiers::NONE, 760.0));
         assert!(app.viewer.is_none());
         assert!(app.publish_keyboard_mode);
         let _ = app.update(Message::PublishKeyboardExit);

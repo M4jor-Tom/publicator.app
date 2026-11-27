@@ -1591,6 +1591,16 @@ def publish_options_keyboard_drift_failure_retry_and_reconcile(ctx):
     # Keyboard: F6 focuses the first pending cell, Tab the next, Space toggles its selection.
     app.key("F6")
     app.look(lambda img: img.stems(ACCENT, row(img, first)), "keyboard focus on the first row")
+    # The viewer owns the keyboard; even an active Publish keyboard mode stays put.
+    digest = app.digest()
+    name = name_of[first]
+    thumb = dict(palette.blocks(app.last, list_view(app.last)[0]))[name]
+    app.click(center(thumb))
+    app.look(lambda img: viewer_image(img, palette, name), "Publish viewer open")
+    app.key("Tab", "F6", "space", "Escape")
+    app.look(lambda img: tabs(img) and img.stems(ACCENT, row(img, first)),
+             "Publish keyboard focus unchanged after closing the viewer")
+    check(app.digest() == digest, "viewer keyboard input changed Publish selection")
     app.key("Tab")
     app.look(lambda img: img.stems(ACCENT, row(img, second)), "keyboard focus on the second row")
     app.key("space")
@@ -1978,6 +1988,37 @@ def read_viewer_description(app, palette, box, name, root):
     app.last.save(root / "viewer-description-end.png")
 
 
+def read_viewer_with_keyboard(app, palette, box, name, root):
+    def image_first(img):
+        return (viewer_image(img, palette, name)
+                and not img.stems(INK, (0, 0, img.w, img.h)))
+
+    def text_at_bottom(img):
+        return img.stems(INK, (0, img.h - 75, img.w, img.h))
+
+    app.click(center(box))
+    app.look(image_first, "viewer reopened at the image")
+    app.key("Down")
+    app.look(text_at_bottom, "Down reveals the description")
+    app.last.save(root / "viewer-keyboard-down.png")
+    app.key("Up")
+    app.look(image_first, "Up returns to the image")
+    app.key("Next")  # X11 Page Down
+    app.look(text_at_bottom, "Page Down reaches the description")
+    app.key("Prior")  # X11 Page Up
+    app.look(image_first, "Page Up returns to the image")
+    app.key("space")
+    app.look(text_at_bottom, "Space reaches the description")
+    app.key("End")
+    app.look(lambda img: text_at_bottom(img) and any(
+        y + h >= img.h - 1 for _, y, _, h in img.boxes(THUMB, (img.w - 12, 0, img.w, img.h), 6, 10)),
+        "End reaches the bottom of the description")
+    app.last.save(root / "viewer-keyboard-end.png")
+    app.key("Home")
+    app.look(image_first, "Home returns to the image")
+    app.key("Escape")
+
+
 @story
 def thumbnail_opens_the_viewer_and_closing_keeps_the_view(ctx):
     """Pick, Schedule and Describe share the viewer and keep their tab and scroll position."""
@@ -2019,7 +2060,8 @@ def thumbnail_opens_the_viewer_and_closing_keeps_the_view(ctx):
         app.park()
         app.look(lambda img: view(img) == before, f"{tab} to keep its tab and scroll after {close}")
 
-    app.resize(1100, 1050)
+    # Keep the description taller than one viewport so the end needs another keypress.
+    app.resize(1100, 930)
     jump(app, 0)
     scheduled = [row for row in app.rows() if row["state"] == "SCHEDULED"]
     name, blank = (scheduled[i]["files"][0]["basename"] for i in (0, 4))
@@ -2027,12 +2069,17 @@ def thumbnail_opens_the_viewer_and_closing_keeps_the_view(ctx):
     digest = app.digest()
     read_viewer_description(app, palette, dict(blocks)[name], name, ctx.root)
     app.key("Escape")
-    app.look(lambda img: (found := tabs(img)) and len(found) == 5 and found[2][1], "Describe restored")
+    thumbnail = app.look(lambda img: dict(view(img)[2]).get(name), "Describe restored")
+    before = view(app.last)
+    read_viewer_with_keyboard(app, palette, thumbnail, name, ctx.root)
+    app.look(lambda img: view(img) == before, "keyboard scrolling kept Describe's tab and position")
+    app.resize(1100, 1050)
     box = app.look(lambda img: dict(view(img)[2]).get(blank), "the blank description thumbnail")
     app.click(center(box))
     app.look(lambda img: viewer_image(img, palette, blank), "publication without a description")
     image_first = app.last.data
     wheel_down(app, 3)
+    app.key("End", "Next", "space")
     stays(lambda: app.shot().data == image_first, "blank publication viewer remains image-only", 1)
     app.last.save(ctx.root / "viewer-image-only.png")
     app.key("Escape")

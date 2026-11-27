@@ -2,7 +2,11 @@
 //! grid, browser-grey full-width buttons and white fields.
 use super::Message;
 use iced::{
-    Background, Border, Color, ContentFit, Element, Font, Length, Theme, color, font,
+    Background, Border, Color, ContentFit, Element, Event, Font, Length, Rectangle, Renderer, Size,
+    Task, Theme,
+    advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, renderer, widget::Tree},
+    color, font,
+    keyboard::{self, Key, Modifiers, key::Named},
     theme::Palette,
     widget::{
         Button, Container, button, container, grid, image, pick_list, sensor, text, text_editor,
@@ -185,11 +189,79 @@ pub fn header(_: &Theme) -> container::Style {
     boxed(color!(0x111111), Border::default())
 }
 
+const VIEWER_SCROLL: &str = "art viewer";
+
+pub(super) fn scroll_viewer(key: Named, modifiers: Modifiers, height: f32) -> Task<Message> {
+    use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_by, snap_to};
+
+    let page = (height - 32.0).max(1.0);
+    let y = match (key, modifiers) {
+        (Named::ArrowDown, Modifiers::NONE) => 80.0,
+        (Named::ArrowUp, Modifiers::NONE) => -80.0,
+        (Named::PageDown | Named::Space, Modifiers::NONE) => page,
+        (Named::PageUp, Modifiers::NONE) | (Named::Space, Modifiers::SHIFT) => -page,
+        (Named::Home, Modifiers::NONE) => return snap_to(VIEWER_SCROLL, RelativeOffset::START),
+        (Named::End, Modifiers::NONE) => return snap_to(VIEWER_SCROLL, RelativeOffset::END),
+        _ => return Task::none(),
+    };
+    scroll_by(VIEWER_SCROLL, AbsoluteOffset { x: 0.0, y })
+}
+
+/// The viewer's top layer owns keyboard input even when the pointer is outside the window.
+struct ViewerKeys;
+
+impl Widget<Message, Theme, Renderer> for ViewerKeys {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(&mut self, _: &mut Tree, _: &Renderer, limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+
+    fn draw(
+        &self,
+        _: &Tree,
+        _: &mut Renderer,
+        _: &Theme,
+        _: &renderer::Style,
+        _: Layout<'_>,
+        _: mouse::Cursor,
+        _: &Rectangle,
+    ) {
+    }
+
+    fn update(
+        &mut self,
+        _: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        _: mouse::Cursor,
+        _: &Renderer,
+        _: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _: &Rectangle,
+    ) {
+        let Event::Keyboard(event) = event else {
+            return;
+        };
+        shell.capture_event();
+        if let keyboard::Event::KeyPressed {
+            key: Key::Named(key),
+            modifiers,
+            ..
+        } = event
+        {
+            shell.publish(Message::ViewerKey(*key, *modifiers, layout.bounds().height));
+        }
+    }
+}
+
 pub(super) fn art_viewer<'a>(path: &Path, description: Option<&'a str>) -> Element<'a, Message> {
     use iced::widget::{column, mouse_area, responsive, scrollable};
 
     let handle = image::Handle::from_path(path);
-    responsive(move |size| {
+    let content = responsive(move |size| {
         let image = container(image(handle.clone()).content_fit(ContentFit::ScaleDown))
             .width(Length::Fill)
             .height(size.height)
@@ -211,15 +283,20 @@ pub(super) fn art_viewer<'a>(path: &Path, description: Option<&'a str>) -> Eleme
             );
         }
         mouse_area(
-            container(scrollable(body).width(Length::Fill).height(Length::Fill))
-                .style(|_| boxed(Color::BLACK, Border::default())),
+            container(
+                scrollable(body)
+                    .id(VIEWER_SCROLL)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .style(|_| boxed(Color::BLACK, Border::default())),
         )
         .on_press(Message::CloseViewer)
         // A wheel event unhandled by the viewer's scrollable (including at its ends) stops here.
         .on_scroll(|_| Message::ViewerWheel)
         .into()
-    })
-    .into()
+    });
+    iced::widget::stack![content, Element::new(ViewerKeys)].into()
 }
 
 /// A bordered table cell (Publish).
