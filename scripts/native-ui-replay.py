@@ -1775,7 +1775,8 @@ def calendar_plans_and_delivery_frames(ctx):
     img = app.last
     frames = [chip_frame(img, chip) for chip in listed]
     check(frames == ["dashed", "none", "dashed", "dashed", "solid"], f"unexpected Calendar frames: {frames}")
-    check(img.stems((0x77,) * 3, area(listed[1])), "past confirmed title is not dimmed")
+    # The 11 px chip font can have exact-colour strokes only a few pixels wide.
+    check(img.boxes((0x77,) * 3, area(listed[1]), min_w=3), "past confirmed title is not dimmed")
     img.save(ctx.root / "frames.png")
 
     plan = app.row("00000000-0000-4000-8000-000000000002")
