@@ -26,7 +26,10 @@ Feature: Review artwork in the native gallery
     Scenario: Inspect a loaded thumbnail
       When the user clicks a loaded thumbnail in any workflow tab or expanded Calendar event
       Then the original fits a full-window black viewer, or the cached preview is used for mp4
-      And click or Escape closes only the viewer, restoring the tab and scroll position; Publish shortcuts do nothing while it is open
+      And the fitted image opens first, with no text visible
+      And if the clicked publication has a description, including a current draft, one downward wheel step reveals its wrapped text and further scrolling can reach the end
+      And a thumbnail without a description stays image-only
+      And click or Escape closes only the viewer, restoring the tab and scroll position; viewer scrolling and Publish shortcuts do not act on the page behind it
 
   Rule: Editing and deletion use the same persistent operations as the CLI
 
@@ -74,7 +77,11 @@ Feature: Review artwork in the native gallery
 
     Scenario: Switch the Describe layout during a batch
       When the user chooses Grid or Rows in the Describe controls
-      Then Grid shows the card grid and Rows shows one full-width card per publication, thumbnail, fields and actions side by side, stacked like Grid in a narrow window
+      Then Grid shows the card grid and Rows shows one compact full-width card per publication with the existing generation states and all five labeled actions
+      And at 1536×864 logical pixels, four complete editable Rows cards fit below the compact provider, model, layout and batch controls
+      And at 560 logical pixels wide the controls and actions wrap without clipping
+      And the resting description uses a fixed-height preview with an overflow cue only when text is hidden and no inner scrollbar
+      And Edit description opens the full draft for editing and saving without rewriting the previewed text
       And Describe opens in Rows; the choice is kept in memory through tab switches and Refresh, never saved, so a restart opens Rows again
       And in both layouts the batch cards are listed first, in batch order, until the Refresh that clears its summary
 

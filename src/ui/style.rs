@@ -56,7 +56,7 @@ pub fn cards<'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 /// Cards stacked one per full-width row.
 pub fn rows<'a>(children: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     iced::widget::Column::with_children(children)
-        .spacing(GAP)
+        .spacing(8)
         .width(Length::Fill)
         .into()
 }
@@ -78,10 +78,11 @@ pub fn art<'a>(
     missing: bool,
     height: f32,
     key: &str,
+    publication: Option<&str>,
 ) -> Element<'a, Message> {
     match preview {
         Some(Some(Ok(path))) => match original {
-            Some(original) => opens(thumbnail(path, height), original, path),
+            Some(original) => opens(thumbnail(path, height), original, path, publication),
             None => thumbnail(path, height),
         },
         Some(Some(Err(_))) if missing => text("Artwork missing").color(MUTED).into(),
@@ -124,9 +125,13 @@ pub fn opens<'a>(
     content: impl Into<Element<'a, Message>>,
     original: &Path,
     thumb: &Path,
+    publication: Option<&str>,
 ) -> Element<'a, Message> {
     iced::widget::mouse_area(content)
-        .on_press(Message::OpenViewer(viewer_file(original, thumb)))
+        .on_press(Message::OpenViewer {
+            path: viewer_file(original, thumb),
+            publication: publication.map(str::to_owned),
+        })
         .into()
 }
 
@@ -180,8 +185,41 @@ pub fn header(_: &Theme) -> container::Style {
     boxed(color!(0x111111), Border::default())
 }
 
-pub fn viewer(_: &Theme) -> container::Style {
-    boxed(Color::BLACK, Border::default())
+pub(super) fn art_viewer<'a>(path: &Path, description: Option<&'a str>) -> Element<'a, Message> {
+    use iced::widget::{column, mouse_area, responsive, scrollable};
+
+    let handle = image::Handle::from_path(path);
+    responsive(move |size| {
+        let image = container(image(handle.clone()).content_fit(ContentFit::ScaleDown))
+            .width(Length::Fill)
+            .height(size.height)
+            .center_x(Length::Fill)
+            .center_y(size.height);
+        let mut body = column![image];
+        if let Some(description) = description {
+            let description = column![
+                text("Description").font(BOLD),
+                text(description).wrapping(text::Wrapping::WordOrGlyph),
+            ]
+            .spacing(12)
+            .max_width(880);
+            body = body.push(
+                container(description)
+                    .width(Length::Fill)
+                    .center_x(Length::Fill)
+                    .padding([16, 28]),
+            );
+        }
+        mouse_area(
+            container(scrollable(body).width(Length::Fill).height(Length::Fill))
+                .style(|_| boxed(Color::BLACK, Border::default())),
+        )
+        .on_press(Message::CloseViewer)
+        // A wheel event unhandled by the viewer's scrollable (including at its ends) stops here.
+        .on_scroll(|_| Message::ViewerWheel)
+        .into()
+    })
+    .into()
 }
 
 /// A bordered table cell (Publish).

@@ -315,7 +315,8 @@ fn candidate_card<'a>(state: &'a App, candidate: &'a Candidate) -> Element<'a, M
             Some(&candidate.path),
             missing,
             240.0,
-            &preview_key(&candidate.path)
+            &preview_key(&candidate.path),
+            None,
         ),
         // A digest-style name has no word break: wrap between glyphs to keep it whole in the card.
         text(

@@ -43,6 +43,7 @@ PAGE = (0x1A, 0x1A, 0x1A)  # page background, as in the gutters between cards
 CARD = (0x2A, 0x2A, 0x2A)  # workflow cards and calendar chips
 HEADER = (0x11, 0x11, 0x11)  # header and footer bars
 WHITE = (0xFF, 0xFF, 0xFF)  # text inputs and editors
+INK = (0xEE, 0xEE, 0xEE)  # page and viewer text
 NOTICE = (0xFF, 0xF3, 0xCD)  # amber confirmation banners and nearest prompts
 WARNING = (0xE0, 0xA8, 0x00)
 ACCENT = (0x88, 0xAA, 0xCC)
@@ -1353,7 +1354,7 @@ def rows_controls(img):
     """The Describe controls above the first stacked card, top to bottom."""
     region, _ = list_view(img)
     top = min(c[1] for c in cards(img, region))
-    return sorted((b for b in buttons(img, (region[0], region[1], region[2], top), 100)), key=lambda b: b[1])
+    return buttons(img, (region[0], region[1], region[2], top), 30)
 
 
 def grid_chosen(img):
@@ -1369,6 +1370,92 @@ def describe_grid(app):
     app.look(grid_chosen, "the Grid layout")
 
 
+DESCRIPTION_END = "The copper lantern is still burning."
+
+
+def seed_describe_rows(rows):
+    """A long description, a short one, explicit line breaks, and a fourth visual identity."""
+    scheduled = [row for row in rows if row["state"] == "SCHEDULED"]
+    descriptions = [
+        "Copper light reflects across the quiet harbour. The sky is filled with low grey clouds. "
+        "A narrow path follows the water towards a boat tied in the distance.\n" +
+        "\n".join(f"{i:02}. Far across the water, the lights of the city are beginning to glow."
+                  for i in range(1, 41)) + "\n" + DESCRIPTION_END,
+        "A blue boat at low tide.",
+        "An empty jetty.\nA line of pale rocks leads to the sea.",
+        "Light on the hills just before dawn.",
+    ]
+    for row, title, description in zip(scheduled, (
+        "Copper Harbour", "Blue Boat", "Empty Jetty", "Morning Hills",
+    ), descriptions):
+        row["title"], row["description"] = title, description
+    scheduled[4]["description"] = ""  # a publication thumbnail with no text
+
+
+def complete_editable_rows(img, palette):
+    """Count cards with an entire background, loaded image, title input and all row actions."""
+    region, _ = list_view(img)
+    blocks = palette.blocks(img, region)
+    return [card for card in stacked(img) or []
+            if card[1] > region[1] and card[1] + card[3] < region[3]
+            and any(within(box, area(card)) for _, box in blocks)
+            and len(inputs(img, area(card))) == 1 and len(buttons(img, area(card))) == 6]
+
+
+def check_compact_rows(app, palette, root):
+    app.park()
+    complete = app.look(lambda img: (found := complete_editable_rows(img, palette))
+                        and len(found) >= 4 and found, "four complete editable Rows cards")
+    img = app.last
+    controls = rows_controls(img)
+    check(len(controls) == 7 and all(pressed(img, controls[i]) for i in (0, 2, 5)),
+          "the default provider, model and Rows choices are not all visible and selected")
+    check(all(img.stems(WARNING, area(card)) for card in complete), "draft status is not visible")
+    long_row, short_row = complete[:2]
+    check(img.boxes(ACCENT, area(long_row)) and not img.boxes(ACCENT, area(short_row)),
+          "the overflow cue should appear only on the long description")
+    img.save(root / "rows-1536x864.png")
+
+    # Open, save, collapse and reopen the exact same multiline value without shortening it.
+    target = next(row for row in app.rows() if row["state"] == "SCHEDULED")
+    name = target["files"][0]["basename"]
+    uuid = target["uuid"]
+
+    def first_card(img):
+        return card_of(img, list_view(img)[0], name, palette)
+
+    def expanded(img):
+        card = first_card(img)
+        fields = inputs(img, area(card)) if card else []
+        return (card, fields[1]) if len(fields) == 2 else None
+
+    app.click(center(buttons(img, area(complete[0]))[0]))  # Edit description
+    card, editor = app.look(expanded, "the inline Rows editor")
+    app.click((editor[0] + 8, editor[1] + 8))
+    app.key("ctrl+Home")
+    prefix = "A spring evening. "
+    app.type(prefix)
+    card, _ = app.look(expanded, "the edited row")
+    app.click(center(buttons(app.last, area(card))[4]))  # Save draft
+    wait_until(lambda: app.row(uuid)["description"] == prefix + target["description"],
+               "complete long Rows draft saved")
+    card, _ = app.look(expanded, "the saved row")
+    app.click(center(buttons(app.last, area(card))[0]))  # Done editing
+    card = app.look(lambda img: (card := first_card(img)) and not expanded(img) and card,
+                    "the saved description collapsed")
+    app.click(center(buttons(app.last, area(card))[0]))
+    _, editor = app.look(expanded, "the saved description reopened")
+    # Move to the bottom without editing; the end marker is checked in the screenshot.
+    app.click(center(editor))
+    # Compare the first line, not the focus border or the caret on another line.
+    first_line = (editor[0] + 10, editor[1] + 7, 400, 18)
+    before = crop(app.shot(), first_line)
+    app.key("ctrl+End")
+    app.look(lambda img: crop(img, first_line) != before, "the reopened editor scrolled to the end")
+    app.last.save(root / "rows-reopened-editor.png")
+    close_and_wait(app)
+
+
 @story
 def describe_rows_layout_and_batch_order(ctx):
     """Describe opens in Rows: one full-width card per publication, a running batch's cards
@@ -1377,6 +1464,12 @@ def describe_rows_layout_and_batch_order(ctx):
     settings = {"installed_models": ["gemma4:31b"], "local_hold": 3, "ai_timeout_ms": 60000}
     app = ctx.launch("gallery", settings=settings, size=(1500, 1550))
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    app.edit_rows(seed_describe_rows)
+    close_and_wait(app)
+    app = ctx.launch("gallery", size=(1536, 864))
+    navigate(app, "Describe")
+    check_compact_rows(app, palette, ctx.root)
+    app = ctx.launch("gallery", settings=settings, size=(1500, 1550))
     marked = [row for row in app.rows() if needs_generation(row)]
     kept = {row["uuid"] for row in marked[3:6]}  # behind unmarked cards in store order
 
@@ -1430,11 +1523,21 @@ def describe_rows_layout_and_batch_order(ctx):
     navigate(app, "Describe")
     previews(app, palette, "Describe")
     app.look(stacked, "Rows after a relaunch")
-    # A narrow window stacks each card like Grid: its Title input spans the card's width.
     app.resize(560, 900)
-    app.look(lambda img: (listed := cards(img, list_view(img)[0]))
-             and any(box[2] > listed[0][2] * 0.8 for box in inputs(img, area(listed[0]))),
-             "narrow Rows cards with full-width fields")
+
+    def narrow_rows(img):
+        shown = complete_editable_rows(img, palette)
+        return (len(rows_controls(img)) == 7 and shown
+                and inputs(img, area(shown[0]))[0][2] > shown[0][2] * 0.8)
+
+    app.look(narrow_rows, "all choices and actions in narrow Rows with stacked thumbnails")
+    app.last.save(ctx.root / "rows-narrow.png")
+    app.click(center(rows_controls(app.last)[4]))
+    app.look(grid_chosen, "narrow Grid selected")
+    app.last.save(ctx.root / "grid-narrow.png")
+    app.click(center(describe_controls(app.last, list_view(app.last)[0])[5]))
+    app.look(lambda img: narrow_rows(img) and pressed(img, rows_controls(img)[5]),
+             "narrow Rows selected again")
     close_and_wait(app)
 
 
@@ -1846,44 +1949,95 @@ def reopen_keeps_saved_edits(ctx):
 SIZES = ((700, 900), (1100, 760), (1500, 1000))
 
 
+def viewer_image(img, palette, name):
+    """The black viewer, with no workflow UI visible, fits the selected original."""
+    # Scrollable descriptions have a scrollbar in the rightmost 10 pixels.
+    bars = [img.px(x, y) for x in (2, img.w // 2, img.w - 15) for y in (2, img.h - 3)]
+    shown = [b for n, b in palette.blocks(img, (0, 0, img.w, img.h)) if n == name]
+    return (all(px == (0, 0, 0) for px in bars) and not img.boxes(HEADER, None, 20, 20)
+            and not img.boxes(CARD, None, 20, 20) and shown and shown[0])
+
+
+def wheel_down(app, count=1):
+    app.x("mousemove", "--window", app.wid, 30, app.last.h // 2,
+          "click", "--repeat", count, "--delay", 60, 5)
+
+
+def read_viewer_description(app, palette, box, name, root):
+    app.click(center(box))
+    app.look(lambda img: viewer_image(img, palette, name), "long description's original image first")
+    check(not app.last.stems(INK, (0, 0, app.last.w, app.last.h)), "text is visible before scrolling")
+    app.last.save(root / "viewer-image-first.png")
+    wheel_down(app)
+    app.look(lambda img: img.stems(INK, (0, img.h - 60, img.w, img.h)),
+             "description heading and first lines after one wheel step")
+    app.last.save(root / "viewer-first-scroll.png")
+    wheel_down(app, 30)
+    app.look(lambda img: not palette.blocks(img, (0, 0, img.w, img.h))
+             and img.stems(INK, (0, img.h - 70, img.w, img.h)), "description end visible")
+    app.last.save(root / "viewer-description-end.png")
+
+
 @story
 def thumbnail_opens_the_viewer_and_closing_keeps_the_view(ctx):
-    """A loaded thumbnail shows its original file over the whole window; a click (Pick) or
-    Escape (Schedule) closes it on the same tab at the same scroll."""
+    """Pick, Schedule and Describe share the viewer and keep their tab and scroll position."""
     app = ctx.launch("gallery")
     palette = Palette.manifest(app.fixture / "gallery-fixture-manifest.json")
+    app.edit_rows(seed_describe_rows)
+    close_and_wait(app)
+    app = ctx.launch("gallery")
     search(app)
-    for tab, close in (("Pick", "click"), ("Schedule", "Escape")):
+
+    def view(img):
+        region, thumb = list_view(img)
+        return tabs(img), (region, thumb), palette.blocks(img, region)
+
+    for tab, close in (("Pick", "click"), ("Schedule", "Escape"), ("Describe", "click"),
+                       ("Describe", "Escape")):
         navigate(app, tab)
         jump(app, 0.45)
-        img, region, blocks = previews(app, palette, tab)
+        _, _, blocks = previews(app, palette, tab)
         if not blocks:  # a Pick stop can fall between two rows of thumbnails
             scroll_by(app, -40)
-            img, region, blocks = previews(app, palette, f"{tab} - 40 px")
+            previews(app, palette, f"{tab} - 40 px")
         app.park()
-        before = app.shot()
-        view = (tabs(before), list_view(before), palette.blocks(before, region))
-        name, box = view[2][0]
+        before = view(app.shot())
+        name, box = before[2][0]
         app.click(center(box))
-
-        def covered(img):
-            bars = [img.px(x, y) for x in (2, img.w // 2, img.w - 3) for y in (2, img.h - 3)]
-            shown = [b for n, b in palette.blocks(img, (0, 0, img.w, img.h)) if n == name]
-            return (all(px == (0, 0, 0) for px in bars) and not img.boxes(HEADER, None, 20, 20)
-                    and not img.boxes(CARD, None, 20, 20) and shown and shown[0])
-
         # The 480x300 original, not its thumbnail, centred and never upscaled.
-        x, y, w, h = app.look(covered, f"{tab} viewer to cover the window with {name}")
+        x, y, w, h = app.look(lambda img: viewer_image(img, palette, name), f"{tab} viewer with {name}")
         check((w, h) == (480, 300) and abs(x + w // 2 - app.last.w // 2) <= 2,
               f"{tab} viewer shows {name} at {(x, y, w, h)}")
+        image_first = app.last.data
+        wheel_down(app, 3)
+        if tab == "Pick":
+            stays(lambda: app.shot().data == image_first, "Pick artwork viewer remains image-only", 1)
         if close == "click":
             app.click((10, 10))
         else:
             app.key("Escape")
-        app.look(lambda img: not covered(img), f"{tab} viewer to close")
         app.park()
-        app.look(lambda img: (tabs(img), list_view(img), palette.blocks(img, region)) == view,
-                 f"{tab} to keep its tab and scroll after the viewer")
+        app.look(lambda img: view(img) == before, f"{tab} to keep its tab and scroll after {close}")
+
+    app.resize(1100, 1050)
+    jump(app, 0)
+    scheduled = [row for row in app.rows() if row["state"] == "SCHEDULED"]
+    name, blank = (scheduled[i]["files"][0]["basename"] for i in (0, 4))
+    _, _, blocks = previews(app, palette, "Describe top")
+    digest = app.digest()
+    read_viewer_description(app, palette, dict(blocks)[name], name, ctx.root)
+    app.key("Escape")
+    app.look(lambda img: (found := tabs(img)) and len(found) == 5 and found[2][1], "Describe restored")
+    box = app.look(lambda img: dict(view(img)[2]).get(blank), "the blank description thumbnail")
+    app.click(center(box))
+    app.look(lambda img: viewer_image(img, palette, blank), "publication without a description")
+    image_first = app.last.data
+    wheel_down(app, 3)
+    stays(lambda: app.shot().data == image_first, "blank publication viewer remains image-only", 1)
+    app.last.save(ctx.root / "viewer-image-only.png")
+    app.key("Escape")
+    app.look(lambda img: len(tabs(img)) == 5 and tabs(img)[2][1], "Describe restored from image-only")
+    check(app.digest() == digest, "opening and reading changed saved metadata")
     close_and_wait(app)
 
 

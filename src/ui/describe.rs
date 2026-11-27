@@ -4,16 +4,13 @@ use crate::{
     model::{Phase, metadata_blank, phase},
 };
 use iced::{
-    Element, Length, Task,
-    widget::{Column, button, column, container, row, text, text_input},
+    Element, Length, Rectangle, Renderer, Size, Task, Theme,
+    advanced::{Layout, Widget, layout, mouse, renderer, text::paragraph, widget::Tree},
+    widget::{Column, button, column, container, row, text, text_editor, text_input},
 };
 use serde_json::Value;
 
-/// The Rows layout's thumbnail and action column widths.
-const ROW_ART_WIDTH: f32 = 160.0;
-const ROW_ACTIONS_WIDTH: f32 = 180.0;
-/// Below this window width a Rows card stacks like a Grid card, so its fields keep about
-/// 300 px beside nothing rather than a sliver between the thumbnail and the actions.
+const ROW_ART_HEIGHT: f32 = 108.0;
 const ROWS_MIN_WINDOW_WIDTH: f32 = 760.0;
 
 /// Publication thumbnails for the on-screen placeholders of the Schedule, Describe and Publish
@@ -74,43 +71,85 @@ pub(super) fn preview_tasks(state: &mut App) -> Task<Message> {
 
 /// The provider, model and layout choices, Generate marked and its summary.
 fn controls(state: &App) -> Column<'_, Message> {
-    let mut controls = column![text("AI provider")].spacing(8);
-    for source in crate::metadata::available_sources() {
+    let compact = state.describe_layout == DescribeLayout::Rows;
+    let choice = |label: String, selected, message| {
+        let button = if compact {
+            button(text(label)).padding([5, 10])
+        } else {
+            style::wide(label)
+        };
+        button.style(style::tab(selected)).on_press(message)
+    };
+    let providers = crate::metadata::available_sources().iter().map(|&source| {
         let label = match source {
             Source::OpenRouter => "OpenRouter",
             Source::Local => "Local Ollama",
         };
-        controls = controls.push(
-            style::wide(label)
-                .style(style::tab(state.source == *source))
-                .on_press(Message::SelectSource(*source)),
-        );
-    }
-    controls = controls.push(text("Model"));
-    for model in VISION_MODELS.iter() {
-        controls = controls.push(
-            style::wide(model.ollama_name.clone())
-                .style(style::tab(state.model == *model))
-                .on_press(Message::SelectModel(model.clone())),
-        );
-    }
-    controls = controls.push(text("Layout"));
-    for (layout, label) in [
+        choice(
+            label.into(),
+            state.source == source,
+            Message::SelectSource(source),
+        )
+        .into()
+    });
+    let models = VISION_MODELS.iter().map(|model| {
+        choice(
+            model.ollama_name.clone(),
+            state.model == *model,
+            Message::SelectModel(model.clone()),
+        )
+        .into()
+    });
+    let layouts = [
         (DescribeLayout::Grid, "Grid"),
         (DescribeLayout::Rows, "Rows"),
-    ] {
+    ]
+    .into_iter()
+    .map(|(layout, label)| {
+        choice(
+            label.into(),
+            state.describe_layout == layout,
+            Message::SelectDescribeLayout(layout),
+        )
+        .into()
+    });
+    let mut controls = column![].spacing(8);
+    if compact {
+        fn group<'a>(
+            label: &'static str,
+            choices: Vec<Element<'a, Message>>,
+        ) -> iced::widget::Row<'a, Message> {
+            row![text(label)]
+                .extend(choices)
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+        }
         controls = controls.push(
-            style::wide(label)
-                .style(style::tab(state.describe_layout == layout))
-                .on_press(Message::SelectDescribeLayout(layout)),
+            row![
+                group("AI provider", providers.collect()),
+                group("Model", models.collect()),
+                group("Layout", layouts.collect()),
+                button("Generate marked")
+                    .padding([5, 10])
+                    .on_press(Message::GenerateMarked)
+            ]
+            .spacing(16)
+            .wrap(),
         );
+    } else {
+        controls = controls
+            .push(text("AI provider"))
+            .extend(providers)
+            .push(text("Model"))
+            .extend(models)
+            .push(text("Layout"))
+            .extend(layouts)
+            .push(text(format!(
+                "Selected: {:?} / {}",
+                state.source, state.model.ollama_name
+            )))
+            .push(style::wide("Generate marked").on_press(Message::GenerateMarked));
     }
-    controls = controls
-        .push(text(format!(
-            "Selected: {:?} / {}",
-            state.source, state.model.ollama_name
-        )))
-        .push(style::wide("Generate marked").on_press(Message::GenerateMarked));
     if let Some(summary) = batch_summary(state) {
         controls = controls.push(text(summary));
     }
@@ -127,12 +166,14 @@ pub fn view(state: &App) -> Element<'_, Message> {
         DescribeLayout::Grid => style::cards(cards),
         DescribeLayout::Rows => style::rows(cards),
     };
-    let mut content = column![]
-        .push(super::floating(
-            super::tab_scrollable(super::Tab::Describe, list),
-            super::schedule::delete_banner(state),
-        ))
-        .spacing(12);
+    let list = super::tab_scrollable(super::Tab::Describe, list);
+    let list = if state.describe_layout == DescribeLayout::Rows {
+        list.spacing(4)
+    } else {
+        list
+    };
+    let mut content =
+        column![super::floating(list, super::schedule::delete_banner(state))].spacing(12);
     if state.local_install_consent_pending() {
         content = content.push(
             container(
@@ -254,35 +295,27 @@ fn generation_line<'a>(state: &App, uuid: &str, marked: bool) -> Option<Element<
     })
 }
 
-/// A card in the current layout. Grid, and Rows in a narrow window, stack the thumbnail,
-/// `details`, `actions` and `status`; Rows puts a smaller thumbnail, `details` over `status`,
-/// and `actions` side by side.
 fn layout_card<'a>(
     state: &'a App,
     uuid: &str,
-    details: Column<'a, Message>,
-    actions: Option<Column<'a, Message>>,
-    status: Element<'a, Message>,
+    details: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let side_by_side = state.describe_layout == DescribeLayout::Rows
-        && state.window_width >= ROWS_MIN_WINDOW_WIDTH;
-    let content: Element<'a, Message> = if side_by_side {
-        let actions = actions.map(|actions| actions.width(Length::Fixed(ROW_ACTIONS_WIDTH)));
+    if state.describe_layout == DescribeLayout::Grid {
+        return style::card(column![state.row_art(uuid, 240.0), details].spacing(8)).into();
+    }
+    let content: Element<'a, Message> = if state.window_width >= ROWS_MIN_WINDOW_WIDTH {
         row![
-            container(state.row_art(uuid, 160.0)).width(Length::Fixed(ROW_ART_WIDTH)),
-            column![details, status].spacing(8).width(Length::Fill),
+            container(state.row_art(uuid, ROW_ART_HEIGHT)).width(164),
+            details
         ]
-        .push(actions.map(Element::from))
-        .spacing(16)
+        .spacing(12)
         .into()
     } else {
-        column![state.row_art(uuid, 240.0), details]
-            .push(actions.map(Element::from))
-            .push(status)
-            .spacing(8)
+        column![state.row_art(uuid, ROW_ART_HEIGHT), details]
+            .spacing(6)
             .into()
     };
-    style::card(content).into()
+    style::card(content).padding(8).into()
 }
 
 /// A card whose generation moved it on to DESCRIBED: read-only, it stays listed until Refresh
@@ -299,82 +332,264 @@ fn generated_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, 
         .push(text("Description"))
         .push(text(saved.description));
     let status = text("Described; listed here until Refresh").color(style::MUTED);
-    layout_card(state, &uuid, details, None, status.into())
+    layout_card(state, &uuid, details.push(status).into())
 }
 
-fn metadata_card<'a>(state: &'a App, row: &Value, uuid: String) -> Element<'a, Message> {
-    let saved = crate::workflow::Metadata::of(row);
-    let (title, description) = state
-        .drafts
-        .get(&uuid)
-        .map(|draft| (draft.title().to_owned(), draft.description().to_owned()))
-        .unwrap_or((saved.title, saved.description));
+fn metadata_card<'a>(state: &'a App, row: &'a Value, uuid: String) -> Element<'a, Message> {
+    let compact = state.describe_layout == DescribeLayout::Rows;
+    let draft = state.drafts.get(&uuid);
+    let title = draft
+        .map(super::Draft::title)
+        .or_else(|| row.get("title")?.as_str())
+        .unwrap_or("");
+    let description = draft
+        .map(super::Draft::description)
+        .or_else(|| row.get("description")?.as_str())
+        .unwrap_or("");
     let title_uuid = uuid.clone();
-    let mut card = column![text(super::schedule::date_label(state, row))].spacing(8);
-    let marked = metadata_blank(&title, &description);
-    if let Some(line) = generation_line(state, &uuid, marked) {
-        card = card.push(line);
-    }
-    if state.revealed_publication() == Some(uuid.as_str()) {
-        card = card.push(style::warning("Opened from Calendar"));
-    }
-    card = card.push(text("Title")).push(
-        text_input("Title", &title)
-            .on_input(move |value| Message::Edited {
-                uuid: title_uuid.clone(),
-                field: super::drafts::Field::Title,
-                text: value,
-            })
-            .on_submit(Message::SaveDraft(uuid.clone()))
-            .style(style::input),
-    );
-    card = card.push(text("Description"));
-    if let Some(editor) = state.description_editors.get(&uuid)
-        && state.viewer.is_some()
-    {
-        // tiny-skia paints an editor's overflowing last line unclipped, over the viewer; a
-        // clipped text of the same height keeps the layout and scroll.
-        card = card.push(
-            container(text(editor.text()))
-                .height(Length::Fixed(120.0))
-                .clip(true),
-        );
-    } else if let Some(editor) = state.description_editors.get(&uuid) {
-        let description_uuid = uuid.clone();
-        card = card.push(
-            iced::widget::text_editor(editor)
-                .placeholder("Description")
-                .height(Length::Fixed(120.0))
-                .on_action(move |action| Message::DescriptionAction {
-                    uuid: description_uuid.clone(),
-                    action,
-                })
-                .style(style::editor),
-        );
-    } else {
-        card = card.push(text(description.clone()));
-    }
-    let dirty = |field| {
-        state
-            .drafts
-            .get(&uuid)
-            .is_some_and(|d| d.is_field_dirty(field))
+    let save_uuid = uuid.clone();
+    let title_input = text_input("Title", title)
+        .on_input(move |value| Message::Edited {
+            uuid: title_uuid.clone(),
+            field: super::drafts::Field::Title,
+            text: value,
+        })
+        .on_submit(Message::SaveDraft(save_uuid))
+        .style(style::input);
+    let saved = |field| {
+        if draft.is_some_and(|d| d.is_field_dirty(field)) {
+            "unsaved"
+        } else {
+            "saved"
+        }
     };
-    let saved = |field| if dirty(field) { "unsaved" } else { "saved" };
-    let status = format!(
+    let status = style::warning(format!(
         "Title: {}; description: {}",
         saved(super::drafts::Field::Title),
         saved(super::drafts::Field::Description)
-    );
-    let actions = column![
-        style::wide("Generate one").on_press(Message::GenerateOne(uuid.clone())),
-        style::wide("Approve metadata").on_press(Message::ApproveMetadata(uuid.clone())),
-        style::wide("Return to Schedule").on_press(Message::ReturnToSchedule(uuid.clone())),
-        style::wide("Save draft").on_press(Message::SaveDraft(uuid.clone())),
-        super::schedule::delete_button(uuid.clone()),
-    ]
-    .spacing(8);
-    layout_card(state, &uuid, card, Some(actions), style::warning(status))
+    ));
+    let progress = generation_line(state, &uuid, metadata_blank(title, description));
+    let date = text(super::schedule::date_label(state, row));
+    let revealed = state.revealed_publication() == Some(uuid.as_str());
+    let actions = [
+        ("Generate one", Message::GenerateOne(uuid.clone())),
+        ("Approve metadata", Message::ApproveMetadata(uuid.clone())),
+        (
+            "Return to Schedule",
+            Message::ReturnToSchedule(uuid.clone()),
+        ),
+        ("Save draft", Message::SaveDraft(uuid.clone())),
+        ("Delete…", Message::AskDeletePublication(uuid.clone())),
+    ];
+    let mut details;
+    if compact {
+        details = column![row![date, status].push(progress).spacing(12).wrap()]
+            .spacing(4)
+            .width(Length::Fill);
+        if revealed {
+            details = details.push(style::warning("Opened from Calendar"));
+        }
+        details = details.push(
+            row![text("Title"), title_input]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+        );
+        let expanded = state.expanded_description.as_ref() == Some(&uuid);
+        let edit = button(if expanded {
+            "Done editing"
+        } else {
+            "Edit description"
+        })
+        .on_press(Message::ToggleDescriptionEditor(uuid.clone()));
+        details = if expanded {
+            details
+                .push(
+                    row![text("Description"), edit]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                )
+                .push(description_editor(state, &uuid, description))
+        } else {
+            details.push(
+                row![Element::new(DescriptionPreview(description)), edit]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+            )
+        };
+        details = details.push(
+            iced::widget::Row::with_children(
+                actions
+                    .map(|(label, action)| button(label).padding([5, 10]).on_press(action).into()),
+            )
+            .spacing(6)
+            .wrap(),
+        );
+    } else {
+        details = column![date].spacing(8).push(progress);
+        if revealed {
+            details = details.push(style::warning("Opened from Calendar"));
+        }
+        details = details
+            .push(text("Title"))
+            .push(title_input)
+            .push(text("Description"))
+            .push(description_editor(state, &uuid, description))
+            .push(
+                Column::with_children(
+                    actions.map(|(label, action)| style::wide(label).on_press(action).into()),
+                )
+                .spacing(8),
+            )
+            .push(status);
+    }
+    layout_card(state, &uuid, details.into())
+}
+
+fn description_editor<'a>(
+    state: &'a App,
+    uuid: &str,
+    description: &'a str,
+) -> Element<'a, Message> {
+    // tiny-skia can paint an editor's last line over the viewer; keep its height without the editor.
+    if state.viewer.is_some() {
+        return container(text(description)).height(120).clip(true).into();
+    }
+    let Some(editor) = state.description_editors.get(uuid) else {
+        return text(description).into();
+    };
+    let uuid = uuid.to_owned();
+    text_editor(editor)
+        .placeholder("Description")
+        .height(120)
+        .on_action(move |action| Message::DescriptionAction {
+            uuid: uuid.clone(),
+            action,
+        })
+        .style(style::editor)
+        .into()
+}
+
+/// A two-line resting preview. Measure with the same font and wrapping that we draw with;
+/// counting characters or source lines cannot tell whether a particular window clips the text.
+struct DescriptionPreview<'a>(&'a str);
+
+#[derive(Default)]
+struct PreviewText {
+    full: paragraph::Plain<<Renderer as iced::advanced::text::Renderer>::Paragraph>,
+    clipped: paragraph::Plain<<Renderer as iced::advanced::text::Renderer>::Paragraph>,
+    cue: paragraph::Plain<<Renderer as iced::advanced::text::Renderer>::Paragraph>,
+    overflow: bool,
+}
+
+impl Widget<Message, Theme, Renderer> for DescriptionPreview<'_> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<PreviewText>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(PreviewText::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fixed(40.0))
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let size = self.size();
+        let bounds = limits.resolve(size.width, size.height, Size::ZERO);
+        let state = tree.state.downcast_mut::<PreviewText>();
+        let format = || text::Format {
+            line_height: text::LineHeight::Absolute(20.0.into()),
+            shaping: text::Shaping::Advanced,
+            wrapping: text::Wrapping::WordOrGlyph,
+            ..text::Format::default()
+        };
+        let measure = |width| layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY));
+        let body = if self.0.trim().is_empty() {
+            "No description"
+        } else {
+            self.0
+        };
+        text::layout(
+            &mut state.full,
+            renderer,
+            &measure(bounds.width),
+            body,
+            format(),
+        );
+        state.overflow = state.full.min_height() > bounds.height;
+        if state.overflow {
+            text::layout(
+                &mut state.cue,
+                renderer,
+                &measure(bounds.width),
+                "…",
+                format(),
+            );
+            let body_width = (bounds.width - state.cue.min_width() - 6.0).max(0.0);
+            text::layout(
+                &mut state.clipped,
+                renderer,
+                &measure(body_width),
+                body,
+                format(),
+            );
+        }
+        layout::Node::new(bounds)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        _theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let Some(clip) = bounds.intersection(viewport) else {
+            return;
+        };
+        let state = tree.state.downcast_ref::<PreviewText>();
+        let body = if state.overflow {
+            &state.clipped
+        } else {
+            &state.full
+        };
+        text::draw(
+            renderer,
+            style,
+            bounds,
+            body.raw(),
+            text::Style::default(),
+            &clip,
+        );
+        if state.overflow {
+            let cue_bounds = Rectangle {
+                x: bounds.x + bounds.width - state.cue.min_width(),
+                y: bounds.y + bounds.height - state.cue.min_height(),
+                width: state.cue.min_width(),
+                height: state.cue.min_height(),
+            };
+            text::draw(
+                renderer,
+                style,
+                cue_bounds,
+                state.cue.raw(),
+                text::Style {
+                    color: Some(style::ACCENT),
+                },
+                &clip,
+            );
+        }
+    }
 }
 
 /// SCHEDULED rows, plus those `kept` (cards whose generation just described them); the `batch`
